@@ -55,6 +55,30 @@ def sample() -> dict[str, Any]:
     }
 
 
+def with_unfilled() -> dict[str, Any]:
+    return {
+        **sample(),
+        "unfilled": {
+            "includes": [
+                {
+                    "file": "backend/pkg/main.py",
+                    "router": "extlib.mixed(handler)",
+                    "occurrence": 1,
+                    "reason": "pkg.main:handler is defined in the backend package",
+                }
+            ],
+            "dependencies": [
+                {
+                    "binding": "pkg.main:mine",
+                    "bound_to": "extlib.pass_through(dep)",
+                    "reason": "a callable of the package",
+                },
+                {"external": "extlib.Missing", "reason": "no module named 'extlib'"},
+            ],
+        },
+    }
+
+
 def test_a_capture_survives_a_write_and_a_read_with_the_same_bytes() -> None:
     capture = library_capture.from_json(sample())
     text = library_capture.dumps(capture)
@@ -76,10 +100,54 @@ def test_an_unknown_top_level_key_is_ignored_and_not_written_back() -> None:
     assert "registrations" not in library_capture.dumps(library_capture.from_json(data))
 
 
+def test_a_capture_without_unfilled_gaps_writes_no_unfilled_key() -> None:
+    assert "unfilled" not in library_capture.from_json(sample())
+    assert "unfilled" not in library_capture.dumps(library_capture.from_json(sample()))
+    assert library_capture.unfilled_of(library_capture.from_json(sample())) == {"includes": [], "dependencies": []}
+
+
+def test_unfilled_gaps_survive_a_write_and_a_read_with_the_same_bytes() -> None:
+    capture = library_capture.from_json(with_unfilled())
+    text = library_capture.dumps(capture)
+    assert library_capture.loads(text) == capture
+    assert library_capture.dumps(library_capture.loads(text)) == text
+    assert library_capture.unfilled_of(capture)["dependencies"][1] == {
+        "external": "extlib.Missing",
+        "reason": "no module named 'extlib'",
+    }
+
+
 def mutated(change) -> dict[str, Any]:
     data = copy.deepcopy(sample())
     change(data)
     return data
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda d: d.update(unfilled=[]), "unfilled: must be an object"),
+        (lambda d: d["unfilled"].pop("includes"), "unfilled: missing 'includes'"),
+        (lambda d: d["unfilled"].pop("dependencies"), "unfilled: missing 'dependencies'"),
+        (lambda d: d["unfilled"].update(extra=[]), "unfilled: unknown key 'extra'"),
+        (lambda d: d["unfilled"].update(includes={}), "unfilled.includes: must be a list"),
+        (lambda d: d["unfilled"]["includes"][0].pop("reason"), "unfilled.includes[0]: missing 'reason'"),
+        (lambda d: d["unfilled"]["includes"][0].update(reason=""), "unfilled.includes[0].reason: must be a non-empty"),
+        (lambda d: d["unfilled"]["includes"][0].update(occurrence=0), "includes[0].occurrence: must be a positive"),
+        (lambda d: d["unfilled"]["includes"][0].update(routes=[]), "unfilled.includes[0]: unknown key 'routes'"),
+        (lambda d: d["unfilled"]["dependencies"][0].pop("bound_to"), "dependencies[0]: missing 'bound_to'"),
+        (lambda d: d["unfilled"]["dependencies"][1].update(bound_to="x"), "dependencies[1]: unknown key 'bound_to'"),
+        (lambda d: d["unfilled"]["dependencies"][0].update(external="x"), "exactly one of 'binding' and 'external'"),
+        (lambda d: d["unfilled"]["dependencies"][1].pop("external"), "exactly one of 'binding' and 'external'"),
+        (lambda d: d["unfilled"]["dependencies"][0].update(id="x"), "dependencies[0]: unknown key 'id'"),
+        (lambda d: d["unfilled"]["dependencies"][0].update(reason=3), "dependencies[0].reason: must be a non-empty"),
+    ],
+)
+def test_a_malformed_unfilled_key_is_refused_with_where_and_why(change, message: str) -> None:
+    data = copy.deepcopy(with_unfilled())
+    change(data)
+    with pytest.raises(CaptureFormatError, match=message.replace("[", r"\[").replace("]", r"\]")):
+        library_capture.from_json(data)
 
 
 @pytest.mark.parametrize(
@@ -174,4 +242,22 @@ def test_differences_name_each_added_removed_and_changed_entry() -> None:
         "include backend/pkg/main.py extlib.make() #1: changed",
         "dependency external extlib.Settings: removed",
         "dependency pkg.main:other: added",
+    ]
+
+
+def test_differences_name_each_added_removed_and_changed_unfilled_gap() -> None:
+    old = library_capture.from_json(with_unfilled())
+    data = with_unfilled()
+    data["unfilled"]["includes"][0]["reason"] = "the call ran 2 times"
+    data["unfilled"]["dependencies"][0]["bound_to"] = "extlib.pass_through(other)"
+    data["unfilled"]["dependencies"].pop(1)
+    assert library_capture.differences(old, library_capture.from_json(data)) == [
+        "unfilled include backend/pkg/main.py extlib.mixed(handler) #1: changed",
+        "unfilled dependency external extlib.Missing: removed",
+        "unfilled dependency pkg.main:mine: changed",
+    ]
+    assert library_capture.differences(library_capture.from_json(sample()), old) == [
+        "unfilled include backend/pkg/main.py extlib.mixed(handler) #1: added",
+        "unfilled dependency external extlib.Missing: added",
+        "unfilled dependency pkg.main:mine: added",
     ]

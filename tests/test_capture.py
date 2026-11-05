@@ -5,12 +5,14 @@ guarantee that nothing but the three commands runs repository code."""
 from __future__ import annotations
 
 import io
+import json
 import os
 import signal
 import stat
 import subprocess
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -216,6 +218,267 @@ def test_check_exits_2_when_the_app_cannot_be_run(repo: Path) -> None:
     code, out, err = run_capture(repo, "--check", python=str(repo / "no-python"))
     assert (code, out) == (2, "")
     assert "no such file" in err
+
+
+# ── --if-stale ───────────────────────────────────────────────────────────
+
+PASS_THROUGH = """
+
+def passthrough(dep=None):
+    return dep
+"""
+
+MINE = """mine = extlib.passthrough({argument})
+
+
+@app.get("/mine")
+def mine_route(value=Depends(mine)):
+    return value
+
+
+"""
+
+
+@pytest.fixture
+def oracle_calls(monkeypatch: pytest.MonkeyPatch) -> list[Sequence[str]]:
+    """The arguments of each start of the app."""
+    calls: list[Sequence[str]] = []
+    original = runner.run_oracle
+
+    def spy(python: Path, arguments: Sequence[str], env: Mapping[str, str], *, request: object | None = None) -> dict:
+        calls.append(arguments)
+        return original(python, arguments, env, request=request)
+
+    monkeypatch.setattr(runner, "run_oracle", spy)
+    return calls
+
+
+def bind_unfilled_dependency(repo: Path, argument: str) -> None:
+    """``mine`` is bound to a call of installed code that returns a callable of the backend package, which stays a gap."""
+    library = repo.parent / "site" / "extlib" / "__init__.py"
+    if "passthrough" not in library.read_text(encoding="utf-8"):
+        library.write_text(library.read_text(encoding="utf-8") + PASS_THROUGH, encoding="utf-8")
+    path = repo / "backend" / "pkg" / "main.py"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(
+            "app.include_router(users.get_router",
+            MINE.format(argument=argument) + "app.include_router(users.get_router",
+            1,
+        )
+        if "mine = " not in text
+        else text.replace("extlib.passthrough(get_manager)", f"extlib.passthrough({argument})"),
+        encoding="utf-8",
+    )
+    test_verify.git(repo, "add", "-A")
+
+
+def test_a_fresh_capture_is_not_refreshed_and_the_app_is_not_started(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    assert run_capture(repo)[0] == 0
+    before = (repo / CAPTURE_FILE).read_bytes()
+    oracle_calls.clear()
+    code, out, err = run_capture(repo, "--if-stale", python=None)
+    assert (code, out, err) == (0, f"capture: {CAPTURE_FILE} is up to date (static check)\n", "")
+    assert oracle_calls == []
+    assert (repo / CAPTURE_FILE).read_bytes() == before
+
+
+def test_the_gaps_a_capture_could_not_fill_are_recorded_with_their_reasons(repo: Path) -> None:
+    bind_unfilled_dependency(repo, "get_manager")
+    assert run_capture(repo)[0] == 0
+    assert captured(repo)["unfilled"] == {
+        "includes": [
+            {
+                "file": "backend/pkg/main.py",
+                "router": "extlib.make_mixed_router(own_handler)",
+                "occurrence": 1,
+                "reason": "pkg.main:own_handler is defined in the backend package, not in installed code",
+            }
+        ],
+        "dependencies": [
+            {
+                "binding": "pkg.main:mine",
+                "bound_to": "extlib.passthrough(get_manager)",
+                "reason": "it is pkg.deps:get_manager, a callable of the package, which the analysis reads from source",
+            }
+        ],
+    }
+    first = (repo / CAPTURE_FILE).read_bytes()
+    assert run_capture(repo)[0] == 0
+    assert (repo / CAPTURE_FILE).read_bytes() == first
+    assert run_capture(repo, "--check")[0] == 0
+
+
+def test_a_gap_that_was_attempted_and_not_filled_does_not_start_the_app_again(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    bind_unfilled_dependency(repo, "get_manager")
+    assert run_capture(repo)[0] == 0
+    oracle_calls.clear()
+    code, out, _ = run_capture(repo, "--if-stale", python=None)
+    assert (code, out) == (0, f"capture: {CAPTURE_FILE} is up to date (static check)\n")
+    assert oracle_calls == []
+
+
+def test_a_capture_file_without_the_unfilled_key_is_refreshed_once(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    assert run_capture(repo)[0] == 0
+    current = (repo / CAPTURE_FILE).read_bytes()
+    older = {key: value for key, value in json.loads(current).items() if key != "unfilled"}
+    (repo / CAPTURE_FILE).write_text(json.dumps(older), encoding="utf-8")
+    oracle_calls.clear()
+    code, out, err = run_capture(repo, "--if-stale")
+    assert code == 0, err
+    assert out == f"capture: wrote {CAPTURE_FILE}: 3 includes (5 routes), 3 dependencies\n"
+    assert "include_router extlib.make_mixed_router(own_handler) #1 at backend/pkg/main.py has no entry" in err
+    assert len(oracle_calls) == 1
+    assert (repo / CAPTURE_FILE).read_bytes() == current
+    oracle_calls.clear()
+    assert run_capture(repo, "--if-stale")[1] == f"capture: {CAPTURE_FILE} is up to date (static check)\n"
+    assert oracle_calls == []
+
+
+def test_a_distribution_version_that_differs_from_the_lock_is_refreshed(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    assert run_capture(repo)[0] == 0
+    current = (repo / CAPTURE_FILE).read_bytes()
+    drifted = json.loads(current)
+    drifted["distributions"]["extlib"] = "1.2.2"
+    (repo / CAPTURE_FILE).write_text(library_capture.dumps(library_capture.from_json(drifted)), encoding="utf-8")
+    oracle_calls.clear()
+    code, out, err = run_capture(repo, "--if-stale")
+    assert code == 0, err
+    assert out.startswith(f"capture: wrote {CAPTURE_FILE}")
+    assert "extlib was captured at 1.2.2 but backend/uv.lock locks 1.2.3" in err
+    assert len(oracle_calls) == 1
+    assert (repo / CAPTURE_FILE).read_bytes() == current
+
+
+def test_a_new_include_of_installed_code_is_refreshed(repo: Path, oracle_calls: list[Sequence[str]]) -> None:
+    assert run_capture(repo)[0] == 0
+    edit_main(
+        repo,
+        'app.include_router(extlib.make_status_router(), prefix="/status")',
+        'app.include_router(extlib.make_status_router(), prefix="/status")\n'
+        'app.include_router(extlib.make_status_router(), prefix="/again")',
+    )
+    oracle_calls.clear()
+    code, _, err = run_capture(repo, "--if-stale")
+    assert code == 0, err
+    assert "include_router extlib.make_status_router() #2 at backend/pkg/main.py has no entry" in err
+    assert len(oracle_calls) == 1
+    assert ("extlib.make_status_router()", 2) in [(i["router"], i["occurrence"]) for i in captured(repo)["includes"]]
+    oracle_calls.clear()
+    assert run_capture(repo, "--if-stale")[0] == 0
+    assert oracle_calls == []
+
+
+def test_a_new_dependency_binding_of_installed_code_is_refreshed(repo: Path, oracle_calls: list[Sequence[str]]) -> None:
+    assert run_capture(repo)[0] == 0
+    bind_unfilled_dependency(repo, "get_manager")
+    oracle_calls.clear()
+    code, _, err = run_capture(repo, "--if-stale")
+    assert code == 0, err
+    assert "dependency pkg.main:mine (= extlib.passthrough(get_manager)) has no entry" in err
+    assert len(oracle_calls) == 1
+    assert [d["binding"] for d in captured(repo)["unfilled"]["dependencies"]] == ["pkg.main:mine"]
+
+
+def test_an_unfilled_binding_whose_expression_changed_counts_as_not_attempted(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    bind_unfilled_dependency(repo, "get_manager")
+    assert run_capture(repo)[0] == 0
+    bind_unfilled_dependency(repo, "dep=get_manager")
+    oracle_calls.clear()
+    code, _, err = run_capture(repo, "--if-stale")
+    assert code == 0, err
+    assert "dependency pkg.main:mine (= extlib.passthrough(dep=get_manager)) has no entry" in err
+    assert "dependency pkg.main:mine (= extlib.passthrough(get_manager)) is recorded as not captured" in err
+    assert len(oracle_calls) == 1
+    (unfilled,) = captured(repo)["unfilled"]["dependencies"]
+    assert unfilled["bound_to"] == "extlib.passthrough(dep=get_manager)"
+
+
+def test_an_unfilled_record_that_matches_no_gap_any_more_is_refreshed_away(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    assert run_capture(repo)[0] == 0
+    edit_main(repo, 'app.include_router(extlib.make_mixed_router(own_handler), prefix="/mixed")\n', "")
+    oracle_calls.clear()
+    code, _, err = run_capture(repo, "--if-stale")
+    assert code == 0, err
+    assert "is recorded as not captured but is no longer a gap" in err
+    assert len(oracle_calls) == 1
+    assert "unfilled" not in captured(repo)
+
+
+@pytest.mark.parametrize("text", [None, "{}\n", "not json"], ids=["missing", "not a capture", "not json"])
+def test_a_missing_or_malformed_capture_file_is_written(
+    repo: Path, oracle_calls: list[Sequence[str]], text: str | None
+) -> None:
+    assert run_capture(repo)[0] == 0
+    current = (repo / CAPTURE_FILE).read_bytes()
+    if text is None:
+        (repo / CAPTURE_FILE).unlink()
+    else:
+        (repo / CAPTURE_FILE).write_text(text, encoding="utf-8")
+    oracle_calls.clear()
+    code, out, err = run_capture(repo, "--if-stale")
+    assert code == 0, err
+    assert out.startswith(f"capture: wrote {CAPTURE_FILE}")
+    assert len(oracle_calls) == 1
+    assert (repo / CAPTURE_FILE).read_bytes() == current
+
+
+def test_a_capture_for_another_app_is_refreshed(repo: Path, oracle_calls: list[Sequence[str]]) -> None:
+    assert run_capture(repo)[0] == 0
+    current = (repo / CAPTURE_FILE).read_bytes()
+    other = {**json.loads(current), "app": "pkg.other:app"}
+    (repo / CAPTURE_FILE).write_text(json.dumps(other), encoding="utf-8")
+    oracle_calls.clear()
+    code, _, err = run_capture(repo, "--if-stale")
+    assert code == 0, err
+    assert "it was made for app pkg.other:app, not pkg.main:app" in err
+    assert len(oracle_calls) == 1
+    assert (repo / CAPTURE_FILE).read_bytes() == current
+
+
+def test_a_stale_capture_is_refused_like_a_plain_capture_when_the_environment_differs_from_the_lock(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    assert run_capture(repo)[0] == 0
+    before = (repo / CAPTURE_FILE).read_bytes()
+    (repo / "backend" / "uv.lock").write_text(lock_text(extlib="1.2.0"), encoding="utf-8")
+    oracle_calls.clear()
+    code, out, err = run_capture(repo, "--if-stale")
+    assert (code, out) == (2, "")
+    assert "extlib 1.2.3 is installed but backend/uv.lock locks 1.2.0" in err
+    assert len(oracle_calls) == 1
+    assert (repo / CAPTURE_FILE).read_bytes() == before
+
+
+def test_if_stale_without_the_config_table_says_so_and_exits_0(repo: Path, oracle_calls: list[Sequence[str]]) -> None:
+    config = repo / ".code-intel" / "config.toml"
+    text = config.read_text(encoding="utf-8")
+    config.write_text(text[: text.index("[backend.capture]")] + text[text.index("[frontend]") :], encoding="utf-8")
+    code, out, err = run_capture(repo, "--if-stale")
+    assert (code, out) == (0, "")
+    assert "has no [backend.capture] table; nothing to refresh" in err
+    assert oracle_calls == []
+    assert not (repo / CAPTURE_FILE).exists()
+
+
+def test_if_stale_and_check_exclude_each_other(repo: Path) -> None:
+    err = io.StringIO()
+    with redirect_stderr(err), pytest.raises(SystemExit) as raised:
+        cli.main(["capture", "--repo-root", str(repo), "--if-stale", "--check"])
+    assert raised.value.code == 2
+    assert "argument --check: not allowed with argument --if-stale" in err.getvalue()
 
 
 # ── Refusals ─────────────────────────────────────────────────────────────

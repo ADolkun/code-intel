@@ -112,7 +112,7 @@ Every command takes `--repo-root PATH` (default: the git work tree containing th
 | `verify [CHECK …]` | Check the analyzers against each other and against the source; see [Verification](#verification). Its `library-capture` check starts the app. | 0 passed, 1 a check failed, 2 a check could not run |
 | `summary` | Markdown counts and coverage of the analysis, one table per analyzer. | 0, 1 a section failed |
 | `runtime-check [--python PYTHON] [--set K=V …] [--env-file FILE]` | Compare the static route analysis with the running app. | 0, 1 unexplained difference, 2 could not run |
-| `capture [--check] [--python PYTHON]` | Record what installed code contributes to the app (routers library factories build, library dependency trees) in `.code-intel/library-capture.json`; `--check` compares without writing; see [Library routers and dependencies](#library-routers-and-dependencies). Needs `[backend.capture]`. | 0, 1 `--check` found a difference, 2 could not run or the environment differs from the lock |
+| `capture [--check \| --if-stale] [--python PYTHON]` | Record what installed code contributes to the app (routers library factories build, library dependency trees) in `.code-intel/library-capture.json`; `--check` compares without writing; `--if-stale` starts the app only when a static check finds the file stale; see [Library routers and dependencies](#library-routers-and-dependencies). Needs `[backend.capture]`; `--if-stale` without it prints a note and exits 0. | 0, 1 `--check` found a difference, 2 could not run or the environment differs from the lock |
 | `dump di [--json]` | Dependency-injection map: every route with its dependencies in FastAPI order. | 0, 1 could not run, 2 incomplete |
 | `dump routes [--json] [--unmatched]` | Backend routes matched with frontend calls. | 0, 1 could not run, 2 incomplete |
 | `dump jsx (COMPONENT \| --all) [--root DIR] [--include-tests] [--no-self-close] [--json]` | JSX usage of a component, or every element. | 0, 2 frontend unavailable |
@@ -614,8 +614,10 @@ Static analysis reads the repository, never installed code. Two things in instal
 **Workflow.**
 
 1. Add `[backend.capture]` to the config. Install the backend's locked dependencies (`uv sync --locked` in the backend) so the interpreter matches the lock.
-2. Run `code-intel capture`. It finds the gaps statically (each `unresolved_include`, each `external` dependency binding, each installed callable the package uses as a dependency), imports the app, records what the running app shows at exactly those places, and writes the file. A second run writes the same bytes. A gap it cannot fill stays a gap, and its reason is printed (`capture: not captured, include_router at backend/app/main.py:28 (…): pkg.main:own_handler is defined in the backend package`).
+2. Run `code-intel capture`. It finds the gaps statically (each `unresolved_include`, each `external` dependency binding, each installed callable the package uses as a dependency), imports the app, records what the running app shows at exactly those places, and writes the file. A second run writes the same bytes. A gap it cannot fill stays a gap; its reason is printed (`capture: not captured, include_router at backend/app/main.py:28 (…): pkg.main:own_handler is defined in the backend package`) and recorded in the file's `unfilled` key.
 3. Commit the file. `capture --check` (and the `library-capture` check of `verify`) fails when the file differs from what the app builds now; run it in CI with the backend's locked environment. After a lock bump of FastAPI or of a captured library, a change to an `include_router` of installed code or to a library dependency, or when `library_capture_stale` appears, run `capture` again; two branches that both recapture conflict, and running it again resolves that.
+
+`capture --if-stale` runs the freshness checks below with the file applied and starts the app only when one of them finds the file stale; otherwise it prints `capture: <file> is up to date (static check)` and exits 0, having imported nothing. When it does start the app it does what `capture` does, including the refusal below. It needs no interpreter when the file is fresh. A value passed to a library factory that changes in another module is not statically detectable, so `--if-stale` can report a file fresh that `capture --check` reports different; keep `--check` in CI.
 
 `capture` refuses (exit 2, nothing written) when an installed version of `fastapi` or of any captured distribution differs from the lock, naming both versions and `uv sync --locked`, because the file would describe code the lock does not install.
 
@@ -625,7 +627,8 @@ Static analysis reads the repository, never installed code. Two things in instal
 
 - `includes`: for each `include_router` call whose child comes wholly from installed code, the child's routes (method, path relative to the child, handler id and definition, route-level dependencies and their `via`, parameter dependencies), keyed by the call's file, the text of its router argument (`ast.unparse`, so reformatting does not matter) and its occurrence among the calls of that file with the same text;
 - `dependencies`: the dependency tree of each external binding (`binding`: `module:name`, with `bound_to`, the text of the expression the name is bound to) and of each installed callable named in the package (`external`: a dotted name). A node with `sub` is a callable of installed code and the capture owns its subtree; a node without it is a callable of the backend package, which the analysis reads from source on every call;
-- `callables`: where each installed callable is defined (distribution, file inside it, line), and `distributions` the versions installed.
+- `callables`: where each installed callable is defined (distribution, file inside it, line), and `distributions` the versions installed;
+- `unfilled` (only when there is a gap `capture` could not fill): `includes` and `dependencies`, each keyed like the entry it would have been (an include by file, router text and occurrence; a dependency by `binding` with `bound_to`, or by `external`) with the `reason` the app gave. The analysis ignores it; `capture --if-stale` reads it to tell a gap already attempted from a new one. A gap whose key changed (a binding bound to another expression, a second include of the same router) is new. A file written before the key existed has none, so the first `--if-stale` over a repository with such a gap starts the app once and writes it.
 
 Everything the repository owns is still read from source on every call: an include's prefix and dependencies, the app's dependencies, dispatch order and the sub-dependencies of the repository's own callables. A repository edit therefore rarely stales the capture.
 
@@ -639,6 +642,25 @@ Everything the repository owns is still read from source on every call: an inclu
 - a gap with no entry while `[backend.capture]` is configured keeps its own limitation, which adds `not in .code-intel/library-capture.json; run code-intel capture`.
 
 A malformed file is a `parse_failed` diagnostic on it. What static checks cannot see is a value passed to a library factory changing in another module; the `library-capture` check catches it.
+
+`capture --if-stale` treats the file as stale when any of these holds, and as fresh otherwise: the file is malformed; the analysis reports `library_capture_stale`; a gap `capture` can fill has no entry and no `unfilled` record (a missing file is the case where there are such gaps); an `unfilled` record matches no gap any more.
+
+#### Keeping the capture fresh
+
+A pre-commit or [prek](https://github.com/j178/prek) local hook can run `capture --if-stale`, so the committed file does not go stale and a commit that changes nothing it depends on pays only the static check:
+
+```yaml
+- repo: local
+  hooks:
+    - id: code-intel-capture
+      name: refresh the code-intel library capture
+      entry: uv run --no-project --python 3.14 --with-requirements .code-intel/requirements.txt code-intel capture --if-stale
+      language: system
+      pass_filenames: false
+      files: ^(backend/.*\.py|backend/uv\.lock|\.code-intel/)
+```
+
+Set `files` to the backend's Python files, its lockfile and `.code-intel/`. A hook that rewrites a file fails the commit, as every pre-commit hook does: stage the file and commit again. Starting the app needs the backend's locked environment (`uv sync --locked`); when the file is fresh the hook needs no interpreter. CI should still run `capture --check`, which also catches what the static check cannot.
 
 **Limits.** A router that is not wholly from installed code (a repository handler passed into the factory), or whose include did not run once while the app was imported, is not captured. A package callable that returns a closure it defines is identified by FastAPI as its factory, so its parameters cannot be told from the closure's and the entry is not applied. A library that adds routes to a router it is handed (an app-level `get_app()`) is not captured. Library routes are never reported as backend-only or counted in coverage.
 
