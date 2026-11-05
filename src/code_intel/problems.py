@@ -123,6 +123,9 @@ LIMITATION_KINDS: Mapping[str, str] = {
         "the frontend pages could not be read (Node or TypeScript is unavailable), so a path that only a page "
         "could satisfy is not checked"
     ),
+    "frontend_provisioning": (
+        "TypeScript is being installed in the background (first use), so frontend results are n/a until it is ready"
+    ),
 }
 
 # The backend findings that can hide, misplace or change a live route: the

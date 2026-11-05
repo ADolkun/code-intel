@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from code_intel import problems, queries
+from code_intel import problems, queries, ts_bridge
 from code_intel.result_types import ERROR_FIELDS, SCHEMA_VERSION, ErrorCode, library_text, route_where
 
 STALE_CODE_WARNING = (
@@ -157,6 +157,15 @@ def envelope(
         complete = analysis.get("complete", True)
         diagnostics = queries.problem_dicts(analysis.get("diagnostics") or [])
         limitations = queries.problem_dicts(analysis.get("analysis_limitations") or [])
+        if any(d.get("problem") == "frontend_provisioning" for d in diagnostics):
+            provisioning = problems.limitation(
+                "frontend_provisioning",
+                stage="toolchain",
+                file=None,
+                line=None,
+                message=f"{ts_bridge.PROVISIONING_MESSAGE}. Fix: {ts_bridge.PROVISIONING_FIX}",
+            )
+            limitations = [*limitations, provisioning.as_dict()]
         payload.update(
             {
                 "schema_version": SCHEMA_VERSION,

@@ -31,12 +31,12 @@ from typing import Literal
 from code_intel.cli import Context
 from code_intel.code_paths import JSX_SUFFIXES, SourceFile, is_test_path, iter_source_files
 from code_intel.problems import Problem, diagnostic, partition
+from code_intel.provision import find_toolchain
 from code_intel.repo_files import RepoFilesError, list_repo_files
 from code_intel.result_types import SCHEMA_VERSION
 from code_intel.ts_bridge import (
     HelperError,
     ToolchainProblem,
-    find_toolchain,
     frontend_not_found_problem,
     incomplete_toolchain_problem,
 )

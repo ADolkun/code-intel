@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from code_intel import include_model as include_models
-from code_intel import queries, route_matching, ts_bridge
+from code_intel import provision, queries, route_matching, ts_bridge
 from code_intel.backend_model import BackendModel, LiveRoute
 from code_intel.cli import Context
 from code_intel.code_paths import TS_SUFFIXES, SourceFile, is_test_path, iter_source_files, rel_posix
@@ -484,7 +484,7 @@ def compute_routes(
     The helper is a separate node process, so the scan overlaps the backend
     build instead of adding to it.
     """
-    toolchain = toolchain or ts_bridge.find_toolchain(repo_root)
+    toolchain = toolchain or provision.find_toolchain(repo_root)
     with ThreadPoolExecutor(max_workers=1) as pool:
         scan_future = pool.submit(scan_frontend, repo_root, config.frontend, toolchain)
         model = (model_builder or build_backend_model)(repo_root, config.backend)

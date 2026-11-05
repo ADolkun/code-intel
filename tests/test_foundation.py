@@ -300,6 +300,7 @@ EXPECTED_LIMITATIONS = {
     "submodule_missing",
     "frontend_definitions_unavailable",
     "frontend_pages_unavailable",
+    "frontend_provisioning",
 }
 EXPECTED_DIAGNOSTICS = {
     "read_failed",

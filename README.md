@@ -22,7 +22,7 @@ Contents: [Requirements](#requirements) · [Install and launch](#install-and-lau
 - **Python 3.14** and [uv](https://docs.astral.sh/uv/). The backend analysis parses the analyzed code with the running interpreter, so it must be at least the version the backend declares (`backend.python_version_file`); see [Old interpreter](#old-interpreter). The package depends on `mcp` (>=2.3, <3), `markdown-it-py` (==4.2.0) and `PyYAML`; `uv` installs them.
 - **git** on `PATH`. Whether a path exists is decided by git (tracked, or untracked and not ignored), never by the filesystem, so a local checkout full of generated or ignored files answers like a clean CI checkout. Every walk (backend, frontend, symbols, docs) is limited to the same git-visible files. A git failure is reported by name; there is no filesystem fallback.
 - **Node.js 18 or newer** on `PATH` (or named by `CODE_INTEL_NODE`, a path or a command name) for the frontend analysis. MCP clients started from a GUI often lack the version manager's `PATH`, so set `CODE_INTEL_NODE` in the server entry's `env`. A relative `CODE_INTEL_NODE` containing a directory separator resolves against the repository root.
-- **TypeScript 7.1 or newer** for the frontend analysis, installed once per machine by [`code-intel setup`](#install-and-launch) into a user cache and shared by every checkout and repository. The helper has its own pinned copy (`7.1.0-beta`, in the package's `ts/package.json` and lockfile) because it calls the compiler's JavaScript API, which TypeScript 7.0 does not export: 7.1 adds it at stable paths (`typescript/sync`, `typescript/ast`). When 7.1 is released, the pin becomes a version bump. `CODE_INTEL_TYPESCRIPT_DIR` names another TypeScript package directory instead (a relative value resolves against the repository root). A TypeScript older than 7.1 is refused with a `typescript_unsupported` problem that names the fix.
+- **TypeScript 7.1 or newer** for the frontend analysis, installed once per machine, on first use or by [`code-intel setup`](#install-and-launch), into a user cache shared by every checkout and repository. The helper has its own pinned copy (`7.1.0-beta`, in the package's `ts/package.json` and lockfile) because it calls the compiler's JavaScript API, which TypeScript 7.0 does not export: 7.1 adds it at stable paths (`typescript/sync`, `typescript/ast`). When 7.1 is released, the pin becomes a version bump. `CODE_INTEL_TYPESCRIPT_DIR` names another TypeScript package directory instead (a relative value resolves against the repository root). A TypeScript older than 7.1 is refused with a `typescript_unsupported` problem that names the fix.
 
 Without Node or TypeScript:
 
@@ -36,7 +36,7 @@ A helper that crashes while Node and TypeScript are present is reported the same
 A repository pins the tool by commit in one file, `.code-intel/requirements.txt`:
 
 ```
-code-intel @ git+https://github.com/ADolkun/code-intel@<full commit sha>  # v0.2.0
+code-intel @ git+https://github.com/ADolkun/code-intel@<full commit sha>  # v0.2.1
 ```
 
 A full SHA is immutable, so `uv` serves later launches from its cache without fetching. Every caller (the MCP client, CI, a git hook) uses the same launcher from the repository root:
@@ -47,7 +47,15 @@ uv run --no-project --python 3.14 --with-requirements .code-intel/requirements.t
 
 `--no-project` keeps the launch independent of whatever project the directory belongs to; `--python 3.14` is needed because `uv` only finds a repository's `.python-version` when it runs inside it.
 
-**One-time TypeScript install.** `code-intel setup` copies the packaged `ts/package.json` and `ts/package-lock.json` to `${CODE_INTEL_CACHE_DIR:-~/.cache/code-intel}/ts/<lock digest>/` and runs `npm ci --ignore-scripts` there. It needs no repository and no config. The install is built in a staging directory and renamed into place, so a failed or killed run leaves nothing half-installed and two runs at once cannot corrupt each other. A second run finds the install and does not call npm (`ok: typescript 7.1.0-beta already installed at …`). Every checkout, worktree and repository shares the install; the tool needs no `npm ci` per worktree.
+**TypeScript install, automatic on first use.** A command or tool that needs the frontend and finds no TypeScript installs it itself, the way `code-intel setup` does: it copies the packaged `ts/package.json` and `ts/package-lock.json` to `${CODE_INTEL_CACHE_DIR:-~/.cache/code-intel}/ts/<lock digest>/` and runs `npm ci --ignore-scripts` there (npm is the only code it runs). It needs Node.js with npm on `PATH` and network access to the npm registry, once.
+
+- A **command** installs first, printing one line to standard error (`code-intel: installing TypeScript into … (first use, one time)`), and then runs.
+- The **MCP server** installs in a background thread and does not block the reply. Until the install finishes, a frontend answer carries `problem: "frontend_provisioning"` (an error body, or the `frontend_unavailable` diagnostic of a partial answer, plus a `frontend_provisioning` [limitation](#limitation-kinds)) saying TypeScript will be ready shortly; backend tools are unaffected. The next call after the install finishes answers in full.
+- The install is built in a staging directory and renamed into place under a lock file (`ts/.<digest>.lock`, `flock`), so a failed or killed run leaves nothing half-installed, and several servers (worktrees) and commands at once take turns: the one that waits finds the winner's install and does not call npm.
+- A process makes one attempt per lock digest. When it fails (no `node` or `npm`, npm offline), the answer is the usual `frontend_unavailable`, and its fix names the cause and says to run `code-intel setup` to retry.
+- `CODE_INTEL_TYPESCRIPT_DIR` is an explicit TypeScript location and is never provisioned over: with it set, nothing is installed. `CODE_INTEL_NODE` only picks the `node` to run, so a missing TypeScript is still installed; the install uses the `npm` in the same directory as that node when there is one (with the directory first on `PATH`), else `npm` on `PATH`. `CODE_INTEL_NO_AUTO_SETUP=1` restores the earlier behaviour, a missing TypeScript being reported with the `setup` fix.
+
+**Prewarming.** `code-intel setup` does the same install on demand, for CI or a machine that is about to go offline. It needs no repository and no config, and a second run finds the install and does not call npm (`ok: typescript 7.1.0-beta already installed at …`). Every checkout, worktree and repository shares the install; the tool needs no `npm ci` per worktree.
 
 **MCP client entry.** Register the server in the repository's `.mcp.json`:
 
@@ -85,9 +93,10 @@ Environment variables:
 
 | Variable | Meaning |
 | --- | --- |
-| `CODE_INTEL_NODE` | The `node` binary (a path or a command name). Default: the first `node` on `PATH`. |
-| `CODE_INTEL_TYPESCRIPT_DIR` | A TypeScript package directory used instead of the cache install. |
-| `CODE_INTEL_CACHE_DIR` | Where `setup` installs TypeScript. Default: `~/.cache/code-intel`. |
+| `CODE_INTEL_NODE` | The `node` binary (a path or a command name). Default: the first `node` on `PATH`. The [automatic TypeScript install](#install-and-launch) uses the `npm` beside it. |
+| `CODE_INTEL_TYPESCRIPT_DIR` | A TypeScript package directory used instead of the cache install. Setting it turns off the automatic install. |
+| `CODE_INTEL_CACHE_DIR` | Where the automatic install and `setup` put TypeScript. Default: `~/.cache/code-intel`. |
+| `CODE_INTEL_NO_AUTO_SETUP` | Set to `1` to turn off the automatic TypeScript install: a missing TypeScript is reported as `frontend_unavailable`, as before 0.2.1. |
 | `CODE_INTEL_REQUIRE_TOOLCHAIN` | Set to `1` in the test suite: a test that needs Node, TypeScript, git or FastAPI fails instead of skipping when it is missing. |
 
 ## Commands
@@ -98,7 +107,7 @@ Every command takes `--repo-root PATH` (default: the git work tree containing th
 | --- | --- | --- |
 | `config-check` | Validate the config file. Unknown keys, unknown client kinds and missing required keys are errors that name the key and the file. | 0 valid, 1 invalid |
 | `mcp` | Serve the [tools](#tools) over stdio. | |
-| `setup` | Install the [TypeScript](#install-and-launch) the frontend analysis needs. | 0, 1 failed |
+| `setup` | Install the [TypeScript](#install-and-launch) the frontend analysis needs: an explicit prewarm, for CI. Other commands and the MCP server install it on first use. | 0, 1 failed |
 | `doc-check [--json]` | Check the [docs](#docs-check) and the agent instruction files against the code. | 0 no findings, 1 findings, 2 could not run or incomplete |
 | `verify [CHECK …]` | Check the analyzers against each other and against the source; see [Verification](#verification). Its `library-capture` check starts the app. | 0 passed, 1 a check failed, 2 a check could not run |
 | `summary` | Markdown counts and coverage of the analysis, one table per analyzer. | 0, 1 a section failed |
@@ -494,7 +503,7 @@ Rows use `file` and `line` (frontend rows add `def_line`); route matches nest `b
 | `frontend_unavailable` | `missing`, `fix`, `problem` | the tool needs the frontend and it could not be analyzed; `problem` names the cause (below) |
 | `internal_error` | `tool` | an unexpected exception in the tool itself; the message names the file, line and function that raised, and the server log has the traceback |
 
-`frontend_unavailable` `problem` codes: `node_not_found`, `node_failed`, `node_too_old`, `typescript_not_found`, `typescript_unreadable`, `typescript_unsupported` (TypeScript older than 7.1) and `toolchain_incomplete` (the probe returned no problem, yet node or TypeScript is missing) from the toolchain probe; `frontend_not_found` when the checkout has no frontend root; and `helper_failed` when Node and TypeScript are present but the helper crashed (its message names the helper mode and the failed step; the fix is to [run the helper by hand](#commands)). `symbol_resolve` with `side="both"` keeps its backend candidates and carries the code in its diagnostic's `problem`.
+`frontend_unavailable` `problem` codes: `node_not_found`, `node_failed`, `node_too_old`, `typescript_not_found`, `typescript_unreadable`, `typescript_unsupported` (TypeScript older than 7.1) and `toolchain_incomplete` (the probe returned no problem, yet node or TypeScript is missing) from the toolchain probe; `frontend_provisioning` when the MCP server is installing TypeScript in the background and the answer will be possible shortly; `frontend_not_found` when the checkout has no frontend root; and `helper_failed` when Node and TypeScript are present but the helper crashed (its message names the helper mode and the failed step; the fix is to [run the helper by hand](#commands)). `symbol_resolve` with `side="both"` keeps its backend candidates and carries the code in its diagnostic's `problem`.
 
 ### Diagnostic kinds
 
@@ -552,6 +561,7 @@ Rows use `file` and `line` (frontend rows add `def_line`); route matches nest `b
 | `submodule_missing` | a git submodule is not checked out (`git submodule update --init --recursive`), so documentation links and paths into it get status `not_checked`; the docs check still passes |
 | `frontend_definitions_unavailable` | Node or TypeScript is unavailable, so the docs check indexes no frontend definitions: frontend symbols named in docs carry no definition location, but their existence still resolves through tracked code, so no status and no exit code changes |
 | `frontend_pages_unavailable` | the frontend pages could not be read (Node or TypeScript is unavailable), so a bare path that only a page could satisfy is `not_checked` |
+| `frontend_provisioning` | the MCP server is installing TypeScript in the background (first use), so the frontend-derived parts of this answer are n/a; it is added to a reply whose `frontend_unavailable` diagnostic has `problem: "frontend_provisioning"`, and the next call after the install finishes answers in full |
 
 A test keeps these tables in sync with the registries in `problems.py`.
 
@@ -908,9 +918,9 @@ uv run code-intel setup
 CODE_INTEL_REQUIRE_TOOLCHAIN=1 uv run pytest -n auto
 ```
 
-The dependency groups `fastapi-live` (default) and `fastapi-copy` select the FastAPI the oracle tests run against; install one at a time: `uv sync --no-default-groups --group dev --group fastapi-copy`. Tests that need Node, TypeScript, git or FastAPI skip when they are missing; `CODE_INTEL_REQUIRE_TOOLCHAIN=1` (set in CI) turns those skips into failures. The code has no type-check suppressions; keep it that way.
+The dependency groups `fastapi-live` (default) and `fastapi-copy` select the FastAPI the oracle tests run against; install one at a time: `uv sync --no-default-groups --group dev --group fastapi-copy`. The tests turn the automatic install off (`CODE_INTEL_NO_AUTO_SETUP=1`), so run `code-intel setup` first. Tests that need Node, TypeScript, git or FastAPI skip when they are missing; `CODE_INTEL_REQUIRE_TOOLCHAIN=1` (set in CI) turns those skips into failures. The code has no type-check suppressions; keep it that way.
 
-Layout of `src/code_intel/`: `server.py` registers the tools, validates arguments and maps failures to error bodies; `analysis_runtime.py` owns every cache, its freshness and the analyzer-code staleness check; `queries.py` and `doc_queries.py` hold the pure filtering, matching and suggestion logic; `presenters.py` and `doc_presenters.py` render text and JSON through one envelope. Backend: `py_sources.py`, `py_escapes.py`, `py_values.py`, `router_bases.py`, `router_graph.py`, `include_model.py`, `dependency_resolver.py` and `di_map.py`; the library capture is `library_capture.py` (the file format), `library_view.py` (what the analysis applies and checks), `capture.py` and `runner.py` (the command and the clean-environment subprocess). Frontend: `ts_bridge.py`, `ts_facts.py`, `ts/*.cjs`, `route_map.py`, `route_matching.py`, `jsx_usage.py`, `symbol_resolve.py`. Docs: `markdown_facts.py`, `repo_files.py`, `code_words.py`, `doc_rules.py`, `doc_refs.py`, `doc_report.py`, `doc_resolvers.py`, `pages.py`, `agent_files.py`, `doc_check.py`. Commands: `cli.py`, `setup.py`, `verify.py`, `summary.py`, `runtime_check.py`.
+Layout of `src/code_intel/`: `server.py` registers the tools, validates arguments and maps failures to error bodies; `analysis_runtime.py` owns every cache, its freshness and the analyzer-code staleness check; `queries.py` and `doc_queries.py` hold the pure filtering, matching and suggestion logic; `presenters.py` and `doc_presenters.py` render text and JSON through one envelope. Backend: `py_sources.py`, `py_escapes.py`, `py_values.py`, `router_bases.py`, `router_graph.py`, `include_model.py`, `dependency_resolver.py` and `di_map.py`; the library capture is `library_capture.py` (the file format), `library_view.py` (what the analysis applies and checks), `capture.py` and `runner.py` (the command and the clean-environment subprocess). Frontend: `ts_bridge.py`, `provision.py` (the install on first use), `ts_facts.py`, `ts/*.cjs`, `route_map.py`, `route_matching.py`, `jsx_usage.py`, `symbol_resolve.py`. Docs: `markdown_facts.py`, `repo_files.py`, `code_words.py`, `doc_rules.py`, `doc_refs.py`, `doc_report.py`, `doc_resolvers.py`, `pages.py`, `agent_files.py`, `doc_check.py`. Commands: `cli.py`, `setup.py`, `verify.py`, `summary.py`, `runtime_check.py`.
 
 ## License
 
