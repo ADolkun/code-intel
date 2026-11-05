@@ -112,6 +112,10 @@ LIMITATION_KINDS: Mapping[str, str] = {
         "Node or TypeScript is unavailable, so the docs check has no frontend definition locations; "
         "frontend symbols still resolve through tracked code"
     ),
+    "frontend_pages_unavailable": (
+        "the frontend pages could not be read (Node or TypeScript is unavailable), so a path that only a page "
+        "could satisfy is not checked"
+    ),
 }
 
 # The backend findings that can hide, misplace or change a live route: the

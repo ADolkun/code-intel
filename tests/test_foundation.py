@@ -297,6 +297,7 @@ EXPECTED_LIMITATIONS = {
     "conditional_import",
     "submodule_missing",
     "frontend_definitions_unavailable",
+    "frontend_pages_unavailable",
 }
 EXPECTED_DIAGNOSTICS = {
     "read_failed",
