@@ -1,0 +1,8 @@
+{
+  "name": "code-intel-ts",
+  "private": true,
+  "description": "TypeScript 7 compiler API for the MCP server helper; the frontend pins its own typescript",
+  "dependencies": {
+    "typescript": "7.1.0-beta"
+  }
+}
