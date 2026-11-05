@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from fake_npm import NODE, FakeNpm, which
+from fake_npm import NODE, NPM, FakeNpm, which
 from fixture_repo import FULL_CONFIG, git_init, hermetic_git, make_repo, write
 
 from code_intel import analysis_runtime, cli, provision, setup, toolchain_pins, ts_bridge
@@ -112,9 +112,8 @@ def test_missing_node_is_reported_as_node_and_nothing_is_installed(tmp_path: Pat
     [
         {provision.NO_AUTO_ENV: "1"},
         {ts_bridge.TS_DIR_ENV: "elsewhere/typescript"},
-        {ts_bridge.NODE_ENV: NODE},
     ],
-    ids=["opt-out", "typescript-dir", "node"],
+    ids=["opt-out", "typescript-dir"],
 )
 def test_an_opt_out_or_an_explicit_override_is_never_provisioned_over(tmp_path: Path, extra: dict[str, str]) -> None:
     npm = FakeNpm()
@@ -122,6 +121,39 @@ def test_an_opt_out_or_an_explicit_override_is_never_provisioned_over(tmp_path: 
     assert toolchain.problem is not None and toolchain.problem.code in ("typescript_not_found", "node_not_found")
     assert npm.npm_calls == []
     assert not ts_bridge.install_dir(_env(tmp_path)).exists()
+
+
+def test_an_explicit_node_is_still_provisioned_with_the_npm_beside_it(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    node = write(bin_dir / "node", "")
+    npm_binary = write(bin_dir / "npm", "")
+    for binary in (node, npm_binary):
+        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    npm = FakeNpm(node=str(node))
+    toolchain = provision.find_toolchain(
+        tmp_path / "repo",
+        env=_env(tmp_path, {ts_bridge.NODE_ENV: str(node)}),
+        which=lambda name: None,
+        run=npm,
+    )
+    assert toolchain.available and toolchain.node == str(node)
+    [call] = npm.npm_calls
+    assert call["cmd"][0] == str(npm_binary)
+    assert call["env"]["PATH"].split(os.pathsep)[0] == str(bin_dir)
+
+
+def test_an_explicit_node_without_a_sibling_npm_uses_npm_on_path(tmp_path: Path) -> None:
+    node = write(tmp_path / "bin" / "node", "")
+    node.chmod(node.stat().st_mode | stat.S_IXUSR)
+    npm = FakeNpm(node=str(node))
+    toolchain = provision.find_toolchain(
+        tmp_path / "repo",
+        env=_env(tmp_path, {ts_bridge.NODE_ENV: str(node)}),
+        which=lambda name: NPM if name == "npm" else None,
+        run=npm,
+    )
+    assert toolchain.available
+    assert npm.npm_calls[0]["cmd"][0] == NPM and npm.npm_calls[0]["env"] is None
 
 
 def test_zero_does_not_opt_out(tmp_path: Path) -> None:

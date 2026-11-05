@@ -81,7 +81,20 @@ def _npm_failure(proc: subprocess.CompletedProcess) -> SetupError:
     )
 
 
-def _build(target: Path, npm: str, run: Callable[..., Any]) -> None:
+def _find_npm(
+    toolchain: ts_bridge.Toolchain, which: Callable[[str], str | None]
+) -> tuple[str | None, dict[str, str] | None]:
+    """(npm, its environment). ``CODE_INTEL_NODE`` can name a node that is not on PATH; its sibling npm
+    is used then, with that directory first on PATH because npm starts ``node`` from there."""
+    if toolchain.node is not None and toolchain.node_source == "env":
+        beside = Path(toolchain.node).with_name("npm")
+        if beside.is_file() and os.access(beside, os.X_OK):
+            path = os.pathsep.join([str(beside.parent), os.environ.get("PATH", "")])
+            return str(beside), {**os.environ, "PATH": path}
+    return which("npm"), None
+
+
+def _build(target: Path, npm: str, env: dict[str, str] | None, run: Callable[..., Any]) -> None:
     """``npm ci`` in a staging directory, then rename it to ``target``."""
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=target.parent))
@@ -89,7 +102,9 @@ def _build(target: Path, npm: str, run: Callable[..., Any]) -> None:
         for name in PACKAGED_FILES:
             shutil.copyfile(ts_bridge.HELPER_DIR / name, stage / name)
         try:
-            proc = run([npm, *NPM_ARGS], cwd=str(stage), capture_output=True, timeout=NPM_TIMEOUT_S, check=False)
+            proc = run(
+                [npm, *NPM_ARGS], cwd=str(stage), env=env, capture_output=True, timeout=NPM_TIMEOUT_S, check=False
+            )
         except (OSError, subprocess.SubprocessError) as exc:
             raise SetupError(f"could not run npm ({type(exc).__name__}: {exc})") from exc
         if proc.returncode != 0:
@@ -122,7 +137,7 @@ def install(
     problem = toolchain.problem
     if problem is not None and problem.code.startswith("node_"):
         raise SetupError(f"{problem.message}. Fix: {problem.fix}")
-    npm = which("npm")
+    npm, npm_env = _find_npm(toolchain, which)
     if npm is None:
         raise SetupError("npm not found on PATH (it ships with Node.js)")
     target = ts_bridge.install_dir(env)
@@ -135,7 +150,7 @@ def install(
             shutil.rmtree(stale, ignore_errors=True)
         if target.exists():
             shutil.rmtree(target)
-        _build(target, npm, run)
+        _build(target, npm, npm_env, run)
     toolchain = _toolchain(env, which, run)
     if not toolchain.available:
         detail = f"{toolchain.problem.message}. Fix: {toolchain.problem.fix}" if toolchain.problem else "unknown"

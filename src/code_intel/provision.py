@@ -8,8 +8,8 @@ and answers with a ``frontend_provisioning`` problem until it finishes.
 Each process makes one attempt per install directory (which the packaged
 lockfile's digest names), so a failure is not retried in a loop; the failure
 becomes the toolchain problem, with ``code-intel setup`` as the way to retry.
-An explicit ``CODE_INTEL_TYPESCRIPT_DIR`` or ``CODE_INTEL_NODE``, or
-``CODE_INTEL_NO_AUTO_SETUP=1``, leaves the toolchain as the probe found it.
+An explicit ``CODE_INTEL_TYPESCRIPT_DIR``, or ``CODE_INTEL_NO_AUTO_SETUP=1``,
+leaves the toolchain as the probe found it; ``CODE_INTEL_NODE`` only picks node.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ _attempts: dict[Path, _Attempt] = {}
 
 def _install_problem(toolchain: Toolchain, env: Mapping[str, str]) -> ToolchainProblem | None:
     """The problem an automatic install would fix, or None when there is none or it is not ours to fix."""
-    if env.get(NO_AUTO_ENV, "") not in ("", "0") or env.get(ts_bridge.TS_DIR_ENV) or env.get(ts_bridge.NODE_ENV):
+    if env.get(NO_AUTO_ENV, "") not in ("", "0") or env.get(ts_bridge.TS_DIR_ENV):
         return None
     problem = toolchain.problem
     return problem if problem is not None and problem.code in _INSTALLABLE else None

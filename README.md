@@ -53,7 +53,7 @@ uv run --no-project --python 3.14 --with-requirements .code-intel/requirements.t
 - The **MCP server** installs in a background thread and does not block the reply. Until the install finishes, a frontend answer carries `problem: "frontend_provisioning"` (an error body, or the `frontend_unavailable` diagnostic of a partial answer, plus a `frontend_provisioning` [limitation](#limitation-kinds)) saying TypeScript will be ready shortly; backend tools are unaffected. The next call after the install finishes answers in full.
 - The install is built in a staging directory and renamed into place under a lock file (`ts/.<digest>.lock`, `flock`), so a failed or killed run leaves nothing half-installed, and several servers (worktrees) and commands at once take turns: the one that waits finds the winner's install and does not call npm.
 - A process makes one attempt per lock digest. When it fails (no `node` or `npm`, npm offline), the answer is the usual `frontend_unavailable`, and its fix names the cause and says to run `code-intel setup` to retry.
-- `CODE_INTEL_TYPESCRIPT_DIR` and `CODE_INTEL_NODE` are explicit overrides and are never provisioned over: with either set, nothing is installed. `CODE_INTEL_NO_AUTO_SETUP=1` restores the earlier behaviour, a missing TypeScript being reported with the `setup` fix.
+- `CODE_INTEL_TYPESCRIPT_DIR` is an explicit TypeScript location and is never provisioned over: with it set, nothing is installed. `CODE_INTEL_NODE` only picks the `node` to run, so a missing TypeScript is still installed; the install uses the `npm` in the same directory as that node when there is one (with the directory first on `PATH`), else `npm` on `PATH`. `CODE_INTEL_NO_AUTO_SETUP=1` restores the earlier behaviour, a missing TypeScript being reported with the `setup` fix.
 
 **Prewarming.** `code-intel setup` does the same install on demand, for CI or a machine that is about to go offline. It needs no repository and no config, and a second run finds the install and does not call npm (`ok: typescript 7.1.0-beta already installed at …`). Every checkout, worktree and repository shares the install; the tool needs no `npm ci` per worktree.
 
@@ -93,7 +93,7 @@ Environment variables:
 
 | Variable | Meaning |
 | --- | --- |
-| `CODE_INTEL_NODE` | The `node` binary (a path or a command name). Default: the first `node` on `PATH`. Setting it turns off the [automatic TypeScript install](#install-and-launch); run `code-intel setup` instead. |
+| `CODE_INTEL_NODE` | The `node` binary (a path or a command name). Default: the first `node` on `PATH`. The [automatic TypeScript install](#install-and-launch) uses the `npm` beside it. |
 | `CODE_INTEL_TYPESCRIPT_DIR` | A TypeScript package directory used instead of the cache install. Setting it turns off the automatic install. |
 | `CODE_INTEL_CACHE_DIR` | Where the automatic install and `setup` put TypeScript. Default: `~/.cache/code-intel`. |
 | `CODE_INTEL_NO_AUTO_SETUP` | Set to `1` to turn off the automatic TypeScript install: a missing TypeScript is reported as `frontend_unavailable`, as before 0.2.1. |
