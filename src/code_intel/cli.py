@@ -6,6 +6,8 @@ below that provides two functions:
 - ``add_arguments(parser)``: its options. The common ``--repo-root`` and
   ``--config`` are already on the parser.
 - ``run(args, context) -> int``: the exit code. ``context`` is a ``Context``.
+  A module with ``NEEDS_CONFIG = False`` (``setup``) is run without a
+  repository or config file, and ``context`` is ``None``.
 
 The table lists the planned interface; ``--help`` shows only the commands whose
 module exists. Modules are imported to register their options, so a heavy
@@ -105,6 +107,9 @@ def _config_check(context: Context) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    handler = None if args.command == "config-check" else importlib.import_module(f"code_intel.{args.handler}")
+    if handler is not None and not getattr(handler, "NEEDS_CONFIG", True):
+        return handler.run(args, None)
     try:
         repo_root = resolve_repo_root(args.repo_root)
         config = load_config(repo_root, args.config)
@@ -115,9 +120,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"code-intel: {exc}", file=sys.stderr)
         return 1 if args.command == "config-check" else 2
     context = Context(repo_root, config)
-    if args.command == "config-check":
+    if handler is None:
         return _config_check(context)
-    return importlib.import_module(f"code_intel.{args.handler}").run(args, context)
+    return handler.run(args, context)
 
 
 if __name__ == "__main__":

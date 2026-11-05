@@ -306,12 +306,15 @@ def fake_command(monkeypatch: pytest.MonkeyPatch, name: str, calls: list) -> Non
     monkeypatch.setitem(sys.modules, f"code_intel.{name}", module)
 
 
-def test_only_commands_with_a_module_are_offered(capsys: pytest.CaptureFixture[str]) -> None:
+def test_only_commands_with_a_module_are_offered(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setitem(cli.COMMANDS, "ghost", ("no_such_module", "a command without a module"))
     with pytest.raises(SystemExit) as caught:
         cli.main(["--help"])
     assert caught.value.code == 0
     out = capsys.readouterr().out
-    assert "config-check" in out and "doc-check" not in out and "dump" not in out
+    assert "config-check" in out and "ghost" not in out
 
 
 def test_a_command_module_gets_its_options_and_the_loaded_context(
