@@ -36,7 +36,7 @@ A helper that crashes while Node and TypeScript are present is reported the same
 A repository pins the tool by commit in one file, `.code-intel/requirements.txt`:
 
 ```
-code-intel @ git+https://github.com/ADolkun/code-intel@<full commit sha>  # v0.2.1
+code-intel @ git+https://github.com/ADolkun/code-intel@<full commit sha>  # v0.2.2
 ```
 
 A full SHA is immutable, so `uv` serves later launches from its cache without fetching. Every caller (the MCP client, CI, a git hook) uses the same launcher from the repository root:
