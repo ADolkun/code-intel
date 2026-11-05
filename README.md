@@ -95,4 +95,4 @@ install one at a time: `uv sync --no-default-groups --group dev --group fastapi-
 
 ## License
 
-To be decided.
+MIT, see [LICENSE](LICENSE).

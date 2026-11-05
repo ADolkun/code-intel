@@ -8,6 +8,8 @@ version = "0.1.0.dev0"
 description = "Static analysis of a FastAPI backend and its TypeScript frontend, served to coding agents over MCP."
 readme = "README.md"
 requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "mcp>=2.3,<3",
     "markdown-it-py==4.2.0",
