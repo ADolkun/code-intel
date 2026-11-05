@@ -150,6 +150,41 @@ def test_an_instance_client_names_a_module_or_a_package_not_both() -> None:
     )
 
 
+def test_the_capture_table_is_optional_and_takes_its_defaults() -> None:
+    assert parse(MINIMAL_CONFIG).backend.capture is None
+    cfg = parse(MINIMAL_CONFIG + '\n[backend.capture]\npython = "backend/.venv/bin/python"\n')
+    assert cfg.backend.capture == config.CaptureConfig(
+        "backend/.venv/bin/python", ".code-intel/library-capture.json", ()
+    )
+
+
+def test_the_capture_table_reads_its_file_and_a_sorted_environment() -> None:
+    cfg = parse(
+        MINIMAL_CONFIG + '\n[backend.capture]\npython = "py"\nfile = "x/cap.json"\nenv = { B_KEY = "2", A_KEY = "" }\n'
+    )
+    assert cfg.backend.capture == config.CaptureConfig("py", "x/cap.json", (("A_KEY", ""), ("B_KEY", "2")))
+
+
+@pytest.mark.parametrize(
+    "table,expected",
+    [
+        ("", "missing required key 'python' in [backend.capture]"),
+        ('python = "/abs/python"', "'python' in [backend.capture] must be a repository-relative path"),
+        ('python = "../python"', "'python' in [backend.capture] must be a repository-relative path"),
+        ('python = "py"\nfile = "../c.json"', "'file' in [backend.capture] must be a repository-relative path"),
+        ('python = "py"\nenv = ["A=1"]', "'env' in [backend.capture] must be a table of strings"),
+        ('python = "py"\nenv = { A = 1 }', "'A' in 'env' of [backend.capture] must be a string"),
+        (
+            'python = "py"\nenv = { "A-B" = "1" }',
+            "'A-B' in 'env' of [backend.capture] is not an environment variable name",
+        ),
+        ('python = "py"\nvenv = "x"', "unknown key 'venv' in [backend.capture]"),
+    ],
+)
+def test_a_bad_capture_table_is_named(table: str, expected: str) -> None:
+    assert expected in error_of(MINIMAL_CONFIG + f"\n[backend.capture]\n{table}\n")
+
+
 def test_missing_required_keys_are_named() -> None:
     assert error_of(MINIMAL_CONFIG.replace('package = "service_backend"\n', "")) == (
         "cfg.toml: missing required key 'package' in [backend]"

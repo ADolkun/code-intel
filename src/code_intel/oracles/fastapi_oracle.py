@@ -5,6 +5,8 @@ Run modes:
 
     fastapi_oracle.py --import-root DIR --app module:attr [--repo-root R]
                       [--env-file F] [--set K=V ...] --out OUT.json
+    fastapi_oracle.py --import-root DIR --app module:attr --repo-root R
+                      --capture REQUEST.json [--env-file F] [--set K=V ...] --out OUT.json
     fastapi_oracle.py --cases DIR [--repo-root R] --out OUT.json
     fastapi_oracle.py --compare RUNTIME.json DI.json
 
@@ -36,6 +38,15 @@ method bound to an instance as ``C().m`` (FastAPI skips its first parameter)
 and through the class or bound to the class as ``C.m``, a ``functools.partial``
 by what it wraps, a closure ``X.<locals>.Y`` by ``X``, and a lambda as
 ``<lambda>@L<line>``.
+
+``--capture`` imports the app like the first mode, and instead of the routes
+records what installed code contributed to the places REQUEST.json names
+(``includes``: ``{file, start, end}`` line spans of ``include_router`` calls;
+``dependencies``: ``{binding: "module:name"}`` or ``{external: "dotted.name"}``):
+the routes of each included router and the dependency trees, where a callable
+of the package (``package`` in the request) is a leaf, with the definition
+(distribution, file, line) of every installed callable and the version of each
+distribution named. It writes one result per requested item, or the reason.
 
 ``--compare`` checks DI JSON (schema v2) against a runtime dump and prints the
 differences by class: ``route_missing``, ``route_extra``, ``order_mismatch``
@@ -373,28 +384,41 @@ def _api_route_rows(
     return [{"method": method, "order": order + k, **row} for k, method in enumerate(methods)]
 
 
-def _route_dependencies(route, endpoint, n_app: int, is_ws: bool) -> tuple[list[dict], list[dict]]:
-    """The route's dependency layers (app, router, decorator) and its parameters'
-    dependencies, each a tree, in FastAPI's order."""
+def _layered_dependants(route, endpoint, n_app: int, is_ws: bool) -> list[tuple[Any, str]]:
+    """The route's dependants with the layer each comes from: ``app``, ``router``,
+    ``route decorator`` (``unknown`` when stacked decorators leave it ambiguous)
+    for the route-level ones, ``direct`` for those of the handler's parameters."""
     n_route = len(route.dependencies)
     n_decorator = REGISTRATIONS.decorator_count(
         endpoint, route.path, None if is_ws else getattr(route, "methods", None)
     )
-    route_deps: list[dict] = []
-    param_deps: list[dict] = []
+    out: list[tuple[Any, str]] = []
     for index, dependant in enumerate(route.dependant.dependencies):
         if dependant.call is None:
             continue
-        tree = _dep_tree(dependant)
         if index >= n_route:
-            param_deps.append({**tree, "how": _param_kind(endpoint, dependant.name)})
+            layer = "direct"
         elif index < n_app:
-            route_deps.append({**tree, "param": None, "via": "app"})
+            layer = "app"
         elif n_decorator is None:
-            route_deps.append({**tree, "param": None, "via": "unknown"})
+            layer = "unknown"
         else:
-            via = "route decorator" if index >= n_route - n_decorator else "router"
-            route_deps.append({**tree, "param": None, "via": via})
+            layer = "route decorator" if index >= n_route - n_decorator else "router"
+        out.append((dependant, layer))
+    return out
+
+
+def _route_dependencies(route, endpoint, n_app: int, is_ws: bool) -> tuple[list[dict], list[dict]]:
+    """The route's dependency layers (app, router, decorator) and its parameters'
+    dependencies, each a tree, in FastAPI's order."""
+    route_deps: list[dict] = []
+    param_deps: list[dict] = []
+    for dependant, layer in _layered_dependants(route, endpoint, n_app, is_ws):
+        tree = _dep_tree(dependant)
+        if layer == "direct":
+            param_deps.append({**tree, "how": _param_kind(endpoint, dependant.name)})
+        else:
+            route_deps.append({**tree, "param": None, "via": layer})
     return route_deps, param_deps
 
 
@@ -424,6 +448,255 @@ def load_app(spec: str):
     for part in attribute.removesuffix("()").split("."):
         app = getattr(app, part)
     return app() if factory else app
+
+
+# ── Capture ──────────────────────────────────────────────────────────────
+
+
+class _NotCapturable(Exception):
+    """A requested fact cannot be recorded; the message says why."""
+
+
+class _IncludeSites:
+    """The router handed to each ``include_router`` call written in the package at a requested place.
+
+    The call is attributed to the innermost frame outside FastAPI, so a router
+    that library code includes while it builds is not mistaken for the consumer's.
+    """
+
+    def __init__(self, repo_root: Path, spans: list[dict]) -> None:
+        self.repo_root = repo_root
+        self.spans = spans
+        self.routers: list[list[Any]] = [[] for _ in spans]
+
+    def install(self) -> None:
+        from fastapi import routing
+
+        original = routing.APIRouter.include_router
+        sites = self
+
+        def include_router(router, *args, **kwargs):
+            sites.record(sys._getframe(1), args[0] if args else kwargs.get("router"))
+            return original(router, *args, **kwargs)
+
+        routing.APIRouter.include_router = include_router
+
+    def record(self, frame, child) -> None:
+        while frame is not None and frame.f_globals.get("__name__", "").split(".")[0] == "fastapi":
+            frame = frame.f_back
+        if frame is None:
+            return
+        try:
+            file = Path(frame.f_code.co_filename).resolve().relative_to(self.repo_root).as_posix()
+        except OSError, ValueError:
+            return
+        for index, span in enumerate(self.spans):
+            if span["file"] == file and span["start"] <= frame.f_lineno <= span["end"]:
+                self.routers[index].append(child)
+
+
+def _normalized(dist: str) -> str:
+    return re.sub(r"[-_.]+", "-", dist).lower()
+
+
+class _Installed:
+    """Which installed distribution defines a callable, and the versions of those named."""
+
+    def __init__(self, package: str) -> None:
+        import importlib.metadata
+
+        self.package = package
+        self.metadata = importlib.metadata
+        self.owners = importlib.metadata.packages_distributions()
+        roots = {Path(entry).resolve() for entry in sys.path if entry and Path(entry).is_dir()}
+        self.roots = sorted(roots, key=lambda root: len(root.parts), reverse=True)
+        self.versions: dict[str, str] = {"fastapi": importlib.metadata.version("fastapi")}
+
+    def in_package(self, callable_id: str) -> bool:
+        return callable_id.split(":", 1)[0].split(".")[0] == self.package
+
+    def location(self, call, *, folded: bool = False) -> dict:
+        """``folded``: a closure is located at the function that made it, as its id names that function."""
+        file, line = _definition(_outer_function(call) if folded else call)
+        if file is None or line is None:
+            raise _NotCapturable(f"{callable_id(call)} has no source file")
+        path = Path(file).resolve()
+        for root in self.roots:
+            if path.is_relative_to(root):
+                rel = path.relative_to(root)
+                break
+        else:
+            raise _NotCapturable(f"{file} is not on the import path")
+        top = rel.parts[0].removesuffix(".py")
+        owners = self.owners.get(top)
+        if top == self.package:
+            raise _NotCapturable(f"{callable_id(call)} is defined in the backend package, not in installed code")
+        if not owners:
+            raise _NotCapturable(f"{rel.as_posix()} ({callable_id(call)}) is not in an installed distribution")
+        dist = _normalized(sorted(owners)[0])
+        self.versions[dist] = self.metadata.version(dist)
+        return {"dist": dist, "file": rel.as_posix(), "line": line}
+
+
+def _outer_function(call):
+    """The function that made a closure dependency, else ``call``."""
+    while isinstance(call, functools.partial):
+        call = call.func
+    if not (inspect.isfunction(call) and "<locals>" in call.__qualname__):
+        return call
+    outer: Any = sys.modules.get(call.__module__)
+    for part in call.__qualname__.split(".<locals>", 1)[0].split("."):
+        outer = getattr(outer, part, None)
+    return call if outer is None else outer
+
+
+def _definition(call) -> tuple[str | None, int | None]:
+    """Where FastAPI reads ``call``: a function's ``def``, a class's ``class``
+    line, an instance's class's ``__call__``."""
+    if isinstance(call, functools.partial):
+        return _definition(call.func)
+    if inspect.ismethod(call):
+        return _definition(call.__func__)
+    if inspect.isclass(call):
+        try:
+            lines, start = inspect.getsourcelines(call)
+            file = inspect.getsourcefile(call)
+        except _SOURCE_ERRORS:
+            return None, None
+        offset = next((k for k, text in enumerate(lines) if text.lstrip().startswith("class ")), 0)
+        return file, start + offset
+    if inspect.isroutine(call):
+        return def_location(call, None)
+    return def_location(type(call).__call__, None)
+
+
+class _Recording:
+    """The dependency trees of one captured entry and the installed callables they name."""
+
+    def __init__(self, installed: _Installed) -> None:
+        self.installed = installed
+        self.callables: dict[str, dict] = {}
+
+    def node(self, dependant, *, via: str | None = None, seen: tuple[int, ...] = ()) -> dict:
+        call = dependant.call
+        node: dict = {"id": callable_id(call)}
+        if via is not None:
+            node["via"] = via
+        elif dependant.name is not None:
+            node["param"] = dependant.name
+        if self.installed.in_package(node["id"]):
+            return node
+        self.callables.setdefault(node["id"], self.installed.location(call, folded=True))
+        node["sub"] = (
+            []
+            if id(dependant) in seen
+            else [self.node(d, seen=(*seen, id(dependant))) for d in dependant.dependencies if d.call is not None]
+        )
+        return node
+
+    def routes(self, child) -> list[dict]:
+        from fastapi import routing
+
+        rows: list[dict] = []
+        for original, route in _served_routes(child.routes):
+            if not isinstance(original, (routing.APIRoute, routing.APIWebSocketRoute)):
+                continue
+            is_ws = isinstance(original, routing.APIWebSocketRoute)
+            endpoint = route.endpoint
+            location = self.installed.location(endpoint)
+            route_deps: list[dict] = []
+            param_deps: list[dict] = []
+            for dependant, layer in _layered_dependants(route, endpoint, 0, is_ws):
+                if layer == "direct":
+                    param_deps.append(self.node(dependant))
+                elif layer == "unknown":
+                    raise _NotCapturable(
+                        f"{route.path}: which router or decorator a dependency comes from is ambiguous"
+                    )
+                else:
+                    route_deps.append(self.node(dependant, via=layer))
+            for method in ["WS"] if is_ws else sorted(route.methods or ()):
+                rows.append(
+                    {
+                        "method": method,
+                        "path": route.path,
+                        "kind": "websocket" if is_ws else "http",
+                        "handler_id": endpoint_id(endpoint),
+                        "location": location,
+                        "route_deps": route_deps,
+                        "param_deps": param_deps,
+                    }
+                )
+        if not rows:
+            raise _NotCapturable("the router has no routes")
+        return rows
+
+    def dependency(self, call) -> dict:
+        from fastapi.dependencies.utils import get_dependant
+
+        runtime_id = callable_id(call)
+        if self.installed.in_package(runtime_id):
+            raise _NotCapturable(f"it is {runtime_id}, a callable of the package, which the analysis reads from source")
+        dependant = get_dependant(path="", call=call)
+        return self.node(dependant)
+
+
+def _import_dotted(dotted: str):
+    parts = dotted.split(".")
+    for count in range(len(parts), 0, -1):
+        try:
+            obj: Any = importlib.import_module(".".join(parts[:count]))
+        except ModuleNotFoundError:
+            continue
+        for part in parts[count:]:
+            obj = getattr(obj, part)
+        return obj
+    raise _NotCapturable(f"no module named {parts[0]!r}")
+
+
+def _resolve_dependency(item: dict):
+    if "binding" in item:
+        module_name, _, name = item["binding"].partition(":")
+        obj: Any = importlib.import_module(module_name)
+        for part in name.split("."):
+            obj = getattr(obj, part)
+        return obj
+    return _import_dotted(item["external"])
+
+
+def capture_library(request: dict, sites: _IncludeSites, installed: _Installed) -> dict:
+    """What the app built that the request asks for, one result per requested item, in order.
+
+    A result is ``{"routes": [...], "callables": {...}}`` / ``{"sub": ...}`` or ``{"reason": ...}``.
+    """
+    includes: list[dict] = []
+    for routers in sites.routers:
+        if len(routers) != 1:
+            reason = (
+                "the call did not run while the app was imported"
+                if not routers
+                else f"the call ran {len(routers)} times"
+            )
+            includes.append({"reason": reason})
+            continue
+        recording = _Recording(installed)
+        try:
+            includes.append({"routes": recording.routes(routers[0]), "callables": recording.callables})
+        except _NotCapturable as exc:
+            includes.append({"reason": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - one entry that cannot be read must not hide the others
+            includes.append({"reason": f"{type(exc).__name__}: {exc}"})
+    dependencies: list[dict] = []
+    for item in request["dependencies"]:
+        recording = _Recording(installed)
+        try:
+            node = recording.dependency(_resolve_dependency(item))
+            dependencies.append({"id": node["id"], "sub": node["sub"], "callables": recording.callables})
+        except _NotCapturable as exc:
+            dependencies.append({"reason": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - one entry that cannot be read must not hide the others
+            dependencies.append({"reason": f"{type(exc).__name__}: {exc}"})
+    return {"includes": includes, "dependencies": dependencies, "versions": installed.versions}
 
 
 # ── Environment ──────────────────────────────────────────────────────────
@@ -607,12 +880,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--capture", type=Path)
     parser.add_argument("--compare", nargs=2, type=Path, metavar=("RUNTIME", "DI"))
     args = parser.parse_args(argv)
     if args.compare is None and args.out is None:
         parser.error("--out is required unless --compare is given")
     if args.compare is None and args.cases is None and (args.import_root is None or args.app is None):
         parser.error("give --cases DIR, or --import-root DIR with --app module:attr")
+    if args.capture is not None and (args.cases is not None or args.repo_root is None):
+        parser.error("--capture needs --import-root, --app and --repo-root, and no --cases")
     return args
 
 
@@ -635,7 +911,14 @@ def main(argv: list[str] | None = None) -> int:
         os.environ[key] = value
     repo_root = args.repo_root.resolve() if args.repo_root else None
     REGISTRATIONS.install()
-    if args.cases is not None:
+    if args.capture is not None and repo_root is not None:
+        request = json.loads(args.capture.read_text(encoding="utf-8"))
+        sites = _IncludeSites(repo_root, request["includes"])
+        sites.install()
+        sys.path.insert(0, str(args.import_root.resolve()))
+        load_app(args.app)
+        result = capture_library(request, sites, _Installed(request["package"]))
+    elif args.cases is not None:
         root = args.cases.resolve()
         sys.path.insert(0, str(root))
         result = run_cases(root, repo_root)

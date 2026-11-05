@@ -5,6 +5,8 @@ checkout that imports a real FastAPI app."""
 from __future__ import annotations
 
 import io
+import os
+import stat
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -14,7 +16,8 @@ import pytest
 from fixture_repo import hermetic_git
 from test_verify import MAIN, checkout, git
 
-from code_intel import cli, runtime_check
+from code_intel import cli, runner, runtime_check
+from code_intel.config import CaptureConfig
 from code_intel.oracles import fastapi_oracle
 
 LIB = "backend/.venv/lib/python3.14/site-packages/extlib/router.py"
@@ -293,10 +296,32 @@ def test_python_is_taken_from_the_current_directory_then_the_repository_without_
     link = repo / ".venv" / "bin" / "python"
     link.symlink_to(real)
     monkeypatch.chdir(elsewhere)
-    assert runtime_check.resolve_python(Path(".venv/bin/python"), repo) == link
-    assert runtime_check.resolve_python(link, repo) == link
-    with pytest.raises(runtime_check.RuntimeCheckError, match="no such file"):
-        runtime_check.resolve_python(Path("nope/python"), repo)
+    assert runner.interpreter(Path(".venv/bin/python"), None, repo) == link
+    assert runner.interpreter(link, None, repo) == link
+    with pytest.raises(runner.OracleRunError, match="--python nope/python: no such file"):
+        runner.interpreter(Path("nope/python"), None, repo)
+
+
+def test_the_configured_python_is_taken_from_the_repository_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, elsewhere = tmp_path / "repo", tmp_path / "elsewhere"
+    (repo / "bin").mkdir(parents=True)
+    (elsewhere / "bin").mkdir(parents=True)
+    (repo / "bin" / "python").write_text("")
+    (elsewhere / "bin" / "python").write_text("")
+    monkeypatch.chdir(elsewhere)
+    capture = CaptureConfig(python="bin/python")
+    assert runner.interpreter(None, capture, repo) == repo / "bin" / "python"
+    assert runner.interpreter(Path("bin/python"), capture, repo) == elsewhere / "bin" / "python"
+    (repo / "bin" / "python").unlink()
+    with pytest.raises(runner.OracleRunError, match=r"\[backend.capture\] python bin/python: no such file"):
+        runner.interpreter(None, capture, repo)
+
+
+def test_without_an_option_or_a_config_there_is_no_python(tmp_path: Path) -> None:
+    with pytest.raises(runner.OracleRunError, match=r"give --python, or set python in \[backend.capture\]"):
+        runner.interpreter(None, None, tmp_path)
 
 
 def test_the_oracle_calls_an_app_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -374,7 +399,58 @@ def test_a_python_that_does_not_exist_exits_2(repo: Path) -> None:
     assert code == 2 and "no such file" in err.getvalue()
 
 
-def test_the_command_requires_python() -> None:
-    with pytest.raises(SystemExit) as exc, redirect_stderr(io.StringIO()):
-        cli.build_parser().parse_args(["runtime-check"])
-    assert exc.value.code == 2
+def test_the_command_exits_2_without_a_python_from_the_option_or_the_config(repo: Path) -> None:
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = cli.main(["runtime-check", "--repo-root", str(repo)])
+    assert (code, out.getvalue()) == (2, "")
+    assert "give --python, or set python in [backend.capture]" in err.getvalue()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the configured interpreter is a shell script")
+def test_the_configured_python_and_env_are_used_without_the_option(repo: Path) -> None:
+    config = repo / ".code-intel" / "config.toml"
+    text = config.read_text(encoding="utf-8")
+    launcher = repo / "py"
+    launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+    configured = text.replace(
+        "\n[frontend]", '\n[backend.capture]\npython = "py"\nenv = { EXTRA_ROUTES = "1" }\n\n[frontend]', 1
+    )
+    config.write_text(configured, encoding="utf-8")
+    main = repo / "backend" / "service_backend" / "main.py"
+    main.write_text(
+        "import os\n"
+        + MAIN.replace(
+            "app.include_router(router)",
+            'if os.environ.get("EXTRA_ROUTES") == "1":\n'
+            '    @app.get("/extra")\n    def extra() -> int:\n        return 1\n\n\n'
+            "app.include_router(router)",
+        ),
+        encoding="utf-8",
+    )
+    git(repo, "add", "-A")
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = cli.main(["runtime-check", "--repo-root", str(repo)])
+    assert code == 0, out.getvalue() + err.getvalue()
+    assert "3 runtime routes, 3 analyzed" in out.getvalue()
+
+
+def test_the_app_is_imported_with_a_clean_environment(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AMBIENT_FLAG", "1")
+    main = repo / "backend" / "service_backend" / "main.py"
+    main.write_text(
+        "import os\n"
+        + MAIN.replace(
+            "app.include_router(router)",
+            'if os.environ.get("AMBIENT_FLAG") == "1":\n'
+            '    @app.get("/ambient")\n    def ambient() -> int:\n        return 1\n\n\n'
+            "app.include_router(router)",
+        ),
+        encoding="utf-8",
+    )
+    git(repo, "add", "-A")
+    code, out, _ = run_cli(repo)
+    assert code == 1
+    assert "2 runtime routes, 3 analyzed" in out and "  ! GET /ambient" in out
