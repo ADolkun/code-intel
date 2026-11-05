@@ -388,7 +388,7 @@ def test_syntax_error_on_old_interpreter_names_likely_cause() -> None:
     )
     assert diag.likely_cause is not None
     assert "interpreter too old" in diag.likely_cause and "3.99" in diag.likely_cause
-    assert diag.as_dict()["likely_cause"] == diag.likely_cause
+    assert diag.as_diagnostic()["likely_cause"] == diag.likely_cause
     other = problems.diagnostic("read_failed", stage="s", step="read file", file="x.py", exc=OSError("boom"))
     assert other.likely_cause is None and "likely_cause" not in other.as_dict()
     unconstrained = problems.diagnostic(

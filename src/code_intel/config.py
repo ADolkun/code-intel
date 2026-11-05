@@ -243,7 +243,7 @@ def _parse_backend(table: _Table) -> BackendConfig:
 _CLIENT_KEYS: Mapping[str, tuple[str, ...]] = {
     "call": ("module", "export", "url_arg", "init_arg", "default_method"),
     "options": ("module", "export", "options_arg", "url_property", "default_method"),
-    "instance": ("module", "export", "base_path"),
+    "instance": ("module", "package", "export", "base_path"),
     "global": ("name", "url_arg", "init_arg", "same_origin_only", "default_method"),
 }
 
@@ -277,9 +277,14 @@ def _parse_client(table: _Table) -> ClientSpec:
             base_path = table.opt_text("base_path", "") or ""
             if base_path and not base_path.startswith("/"):
                 raise table.fail(f"'base_path' in {table.where} must start with '/'")
-            spec = ClientSpec(
-                kind="instance", module=table.relpath("module"), export=table.text("export"), base_path=base_path
-            )
+            package = table.opt_text("package")
+            if package is None:
+                module, export = table.relpath("module"), table.text("export")
+            else:
+                if table.opt_relpath("module") is not None:
+                    raise table.fail(f"'module' and 'package' in {table.where} are mutually exclusive")
+                module, export = None, table.opt_text("export", "default")
+            spec = ClientSpec(kind="instance", module=module, package=package, export=export, base_path=base_path)
         case _:
             spec = ClientSpec(
                 kind="global",

@@ -58,6 +58,7 @@ from code_intel.config import Config
 from code_intel.problems import Problem, diagnostic, partition
 from code_intel.protocol_match import BaseRef, ClassRec, ClassTable, MemberRec, ProtocolMatch
 from code_intel.py_sources import module_name_for, resolve_relative
+from code_intel.repo_files import RepoFilesError, list_repo_files
 from code_intel.result_types import SCHEMA_VERSION
 from code_intel.ts_bridge import HelperError, ToolchainProblem, find_toolchain, frontend_not_found_problem
 from code_intel.ts_facts import FactsCache, ToolchainUnavailable, TsDecl, facts_problems
@@ -704,6 +705,10 @@ class SymbolIndex:
     def frontend_root(self) -> Path:
         return self.repo_root / self.layout.frontend_root
 
+    def _visible_files(self) -> frozenset[str]:
+        """The files git sees, so ignored build output never ranks. Raises ``RepoFilesError``."""
+        return list_repo_files(self.repo_root).files
+
     def clear(self) -> None:
         with self._lock:
             self._py.clear()
@@ -740,7 +745,9 @@ class SymbolIndex:
 
     def _python_files(self, problems: list[Problem]) -> list[tuple[SourceFile, _PyEntry]]:
         root = self.backend_root
-        files = iter_source_files(root, PY_SUFFIXES, self.repo_root, problems, stage=STAGE)
+        files = iter_source_files(
+            root, PY_SUFFIXES, self.repo_root, problems, stage=STAGE, visible=self._visible_files()
+        )
         entries = []
         for source in files:
             try:
@@ -869,7 +876,15 @@ class SymbolIndex:
         if missing_root is not None:
             raise ToolchainUnavailable(missing_root)
         root = self.frontend_root
-        files = iter_source_files(root, TS_SUFFIXES, self.repo_root, problems, stage=STAGE, generated_parent=root)
+        files = iter_source_files(
+            root,
+            TS_SUFFIXES,
+            self.repo_root,
+            problems,
+            stage=STAGE,
+            generated_parent=root,
+            visible=self._visible_files(),
+        )
         by_rel = self.facts.facts_for(files, root=root, suffixes=TS_SUFFIXES)
         out = []
         for source in files:
@@ -1056,6 +1071,9 @@ def run(args: argparse.Namespace, context: Context) -> int:
     except HelperError as exc:
         problem = exc.problem()
         print(f"code-intel: {problem.message}. Fix: {problem.fix}", file=sys.stderr)
+        return 2
+    except RepoFilesError as exc:
+        print(f"code-intel: {exc}", file=sys.stderr)
         return 2
     if args.json:
         print(json.dumps(body, ensure_ascii=False))

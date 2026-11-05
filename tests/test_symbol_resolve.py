@@ -17,11 +17,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from fixture_repo import FULL_CONFIG, MINIMAL_CONFIG, write
+from fixture_repo import FULL_CONFIG, MINIMAL_CONFIG, git_init, write
 
 from code_intel import cli, code_paths, symbol_resolve, ts_bridge, ts_facts
 from code_intel.config import parse_config
 from code_intel.oracles import compare_facts
+from code_intel.repo_files import RepoFilesError
+
+pytestmark = pytest.mark.usefixtures("module_git")
 
 DECL_ORACLE = Path(compare_facts.__file__).parent / "decl_oracle.cjs"
 _PARSE_ERRORS: tuple[type[Exception], ...] = (SyntaxError, ValueError)
@@ -30,6 +33,14 @@ LAYOUT = symbol_resolve.SymbolLayout(
     "frontend",
     ("frontend/components/", "frontend/lib/", "frontend/hooks/", "backend/service_backend/"),
 )
+
+
+def _index(
+    root: Path, facts: ts_facts.FactsCache, layout: symbol_resolve.SymbolLayout, **kwargs
+) -> symbol_resolve.SymbolIndex:
+    """An index over ``root`` made a git work tree: the walk covers the files git sees."""
+    return symbol_resolve.SymbolIndex(git_init(root), facts, layout, **kwargs)
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -656,7 +667,7 @@ def symbols(typescript_toolchain: ts_bridge.Toolchain, tmp_path_factory: pytest.
     _write_tree(root / "frontend", TS_FIXTURES)
     _write_tree(root / "backend", PY_FIXTURES)
     facts = ts_facts.FactsCache(root, lambda: typescript_toolchain)
-    repo = Repo(root, symbol_resolve.SymbolIndex(root, facts, LAYOUT), typescript_toolchain)
+    repo = Repo(root, _index(root, facts, LAYOUT), typescript_toolchain)
     repo.resolve("prime")
     assert facts.stats()["helper_runs"] == 1
     return repo
@@ -679,7 +690,7 @@ def python_repo(tmp_path: Path) -> Repo:
     (tmp_path / "frontend").mkdir()
     toolchain = _unavailable_toolchain()
     facts = ts_facts.FactsCache(tmp_path, lambda: toolchain)
-    return Repo(tmp_path, symbol_resolve.SymbolIndex(tmp_path, facts, LAYOUT), None)
+    return Repo(tmp_path, _index(tmp_path, facts, LAYOUT), None)
 
 
 # ── Oracle ───────────────────────────────────────────────────────────────
@@ -1267,7 +1278,7 @@ def test_frontend_side_raises_and_both_degrades_without_the_toolchain(python_rep
         problem.message
         == "frontend symbols were not searched: tools/code-intel/ts/node_modules/typescript/package.json not found"
     )
-    as_dict = problem.as_dict()
+    as_dict = problem.as_diagnostic()
     assert (as_dict["problem"], as_dict["missing"], as_dict["fix"]) == (
         "typescript_not_found",
         "tools/code-intel/ts/node_modules/typescript/package.json",
@@ -1300,7 +1311,7 @@ def test_both_sides_keep_the_backend_when_the_helper_fails(tmp_path: Path) -> No
         raise ts_bridge.HelperError("facts", "exit", "node exited with code 1: RangeError")
 
     facts = ts_facts.FactsCache(tmp_path, lambda: toolchain, run_helper=crashed)
-    index = symbol_resolve.SymbolIndex(tmp_path, facts, LAYOUT)
+    index = _index(tmp_path, facts, LAYOUT)
     with pytest.raises(ts_bridge.HelperError):
         index.resolve("Appointment", side="frontend")
     result = index.resolve("Appointment", side="both")
@@ -1314,7 +1325,7 @@ def test_both_sides_keep_the_backend_when_the_helper_fails(tmp_path: Path) -> No
 
 def test_a_checkout_without_frontend_reports_frontend_not_found(typescript_toolchain, tmp_path: Path) -> None:
     _write_tree(tmp_path / "backend", PY_FIXTURES)
-    index = symbol_resolve.SymbolIndex(tmp_path, ts_facts.FactsCache(tmp_path, lambda: typescript_toolchain), LAYOUT)
+    index = _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: typescript_toolchain), LAYOUT)
     with pytest.raises(ts_bridge.ToolchainUnavailable) as raised:
         index.resolve("Appointment", side="frontend")
     assert (raised.value.problem.code, raised.value.problem.missing) == ("frontend_not_found", "frontend")
@@ -1365,9 +1376,7 @@ def test_resolve_typescript_extract_failures_are_diagnostics(tmp_path: Path) -> 
     _write_tree(
         tmp_path / "frontend", {"ok.tsx": "export const Target = 1;\n", "bad.tsx": "export const Target = 2;\n"}
     )
-    index = symbol_resolve.SymbolIndex(
-        tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain, run_helper=helper), LAYOUT
-    )
+    index = _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain, run_helper=helper), LAYOUT)
     result = index.resolve("Target", side="frontend")
     assert [c.file for c in result.candidates] == ["frontend/ok.tsx"]
     assert result.complete is False
@@ -1593,7 +1602,7 @@ def test_resolve_caches_per_file_index(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(symbol_resolve, "_index_python_file", counting)
     toolchain = _unavailable_toolchain()
-    index = symbol_resolve.SymbolIndex(tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain), LAYOUT)
+    index = _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain), LAYOUT)
 
     def lookup(name: str) -> list[int]:
         return [c.start_line for c in index.resolve(name, side="backend").candidates]
@@ -1623,9 +1632,7 @@ def test_python_racy_entries_are_hash_checked(tmp_path: Path) -> None:
     now = 10_000_000_000_000
     os.utime(path, ns=(now - 1, now - 1))
     toolchain = _unavailable_toolchain()
-    index = symbol_resolve.SymbolIndex(
-        tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain), LAYOUT, clock=lambda: now
-    )
+    index = _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain), LAYOUT, clock=lambda: now)
     assert [c.name for c in index.resolve("alpha", side="backend").candidates] == ["alpha"]
     path.write_text("def gamma(): pass\n", encoding="utf-8")  # same size
     os.utime(path, ns=(now - 1, now - 1))
@@ -1670,9 +1677,7 @@ def test_python_edit_between_the_read_and_the_cache_is_seen(tmp_path: Path, monk
     os.utime(path, ns=(now - 1, now - 1))
     _edit_after_first_read(monkeypatch, path, "def gamma(): pass\n")
     toolchain = _unavailable_toolchain()
-    index = symbol_resolve.SymbolIndex(
-        tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain), LAYOUT, clock=lambda: now
-    )
+    index = _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain), LAYOUT, clock=lambda: now)
     assert [c.name for c in index.resolve("alpha", side="backend").candidates] == ["alpha"]
     assert index.resolve("alpha", side="backend").candidates == []
     assert [c.name for c in index.resolve("gamma", side="backend").candidates] == ["gamma"]
@@ -1937,9 +1942,7 @@ def protocol_repo(tmp_path: Path) -> Repo:
     _write_tree(tmp_path / "backend", {**PROTOCOL_FIXTURES, **PROTOCOL_FIXTURES_MORE})
     (tmp_path / "frontend").mkdir()
     toolchain = _unavailable_toolchain()
-    return Repo(
-        tmp_path, symbol_resolve.SymbolIndex(tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain), LAYOUT), None
-    )
+    return Repo(tmp_path, _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain), LAYOUT), None)
 
 
 def _matches(repo: Repo, name: str, file: str = "gateway.py") -> dict[str | None, list[str]]:
@@ -2131,6 +2134,7 @@ def test_symbol_resolve_cli_dumps(typescript_toolchain, tmp_path: Path) -> None:
     _write_tree(tmp_path / "frontend", {"a.tsx": "export const App = () => <div />;\n"})
     _write_tree(tmp_path / "backend", {"m.py": "class M:\n    X = 1\n"})
     write(tmp_path / ".code-intel" / "config.toml", MINIMAL_CONFIG)
+    git_init(tmp_path)
     env = {**os.environ, ts_bridge.TS_DIR_ENV: str(typescript_toolchain.typescript_dir)}
 
     def run(*args: str) -> dict:
@@ -2192,9 +2196,42 @@ def test_layout_roots_decide_where_symbols_are_looked_up(typescript_toolchain, t
     _write_tree(tmp_path / "api", {"core/ctx.py": "def current(): ...\n", "legacy/current.py": "def current(): ...\n"})
     _write_tree(tmp_path / "backend", {"stray.py": "def current(): ...\n"})
     layout = symbol_resolve.SymbolLayout("api", "web", ("api/core/",))
-    index = symbol_resolve.SymbolIndex(tmp_path, ts_facts.FactsCache(tmp_path, lambda: typescript_toolchain), layout)
+    index = _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: typescript_toolchain), layout)
     ranked = [(c.file, c.score) for c in index.resolve("current").candidates]
     assert ranked == [("api/core/ctx.py", 0.5), ("api/legacy/current.py", 0.4), ("web/src/lib/util.ts", 0.4)]
+
+
+def test_only_git_visible_files_are_indexed(typescript_toolchain, tmp_path: Path) -> None:
+    """Tracked and untracked-not-ignored files rank; ignored build output on either side never does."""
+    _write_tree(
+        tmp_path,
+        {
+            ".gitignore": "build/\nfrontend/src/generated/\n",
+            "backend/app/ctx.py": "def current(): ...\n",
+            "backend/build/lib/app/ctx.py": "def current(): ...\n",
+            "frontend/src/lib/util.ts": "export const current = 1;\n",
+            "frontend/src/generated/util.ts": "export const current = 2;\n",
+        },
+    )
+    git_init(tmp_path)
+    subprocess.run(["git", "add", "backend/app/ctx.py"], cwd=tmp_path, check=True)
+    layout = symbol_resolve.SymbolLayout("backend", "frontend", ("backend/app/",))
+    index = _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: typescript_toolchain), layout)
+    assert [c.file for c in index.resolve("current").candidates] == [
+        "backend/app/ctx.py",
+        "frontend/src/lib/util.ts",
+    ]
+    assert [c.file for c in index.resolve("current", side="backend").candidates] == ["backend/app/ctx.py"]
+    assert [rel for rel, _ in index.python_symbols([])] == ["backend/app/ctx.py"]
+    assert [rel for rel, _ in index.typescript_decls([])] == ["frontend/src/lib/util.ts"]
+
+
+def test_a_directory_that_git_cannot_list_is_an_error_not_a_filesystem_walk(tmp_path: Path) -> None:
+    _write_tree(tmp_path / "backend", {"m.py": "def current(): ...\n"})
+    toolchain = _unavailable_toolchain()
+    index = symbol_resolve.SymbolIndex(tmp_path, ts_facts.FactsCache(tmp_path, lambda: toolchain), LAYOUT)
+    with pytest.raises(RepoFilesError):
+        index.resolve("current", side="backend")
 
 
 def test_generated_output_directly_under_frontend_is_skipped(typescript_toolchain, tmp_path: Path) -> None:
@@ -2207,6 +2244,6 @@ def test_generated_output_directly_under_frontend_is_skipped(typescript_toolchai
         },
     )
     _write_tree(tmp_path / "backend", {"coverage/__init__.py": "Built = 4\n"})
-    index = symbol_resolve.SymbolIndex(tmp_path, ts_facts.FactsCache(tmp_path, lambda: typescript_toolchain), LAYOUT)
+    index = _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: typescript_toolchain), LAYOUT)
     result = index.resolve("Built", side="both")
     assert sorted(c.file for c in result.candidates) == ["backend/coverage/__init__.py", "frontend/app/build/page.tsx"]

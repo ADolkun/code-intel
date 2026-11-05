@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,13 @@ def hermetic_git(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
     home.mkdir(parents=True, exist_ok=True)
     for name, value in {**GIT_ENV, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")}.items():
         monkeypatch.setenv(name, value)
+
+
+def git_init(root: Path) -> Path:
+    """Make ``root`` a git work tree (nothing committed): its files are untracked, so visible unless ignored."""
+    if not (root / ".git").exists():
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    return root
 
 
 def write(path: Path, text: str, mtime: int = 1000) -> Path:

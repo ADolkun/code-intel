@@ -18,7 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from fixture_repo import MINIMAL_CONFIG, make_repo
+from fixture_repo import MINIMAL_CONFIG, git_init, make_repo
 from test_dependency_resolver import FakeResolver, FakeSources
 
 from code_intel import cli, include_model, route_map, ts_bridge
@@ -26,6 +26,8 @@ from code_intel.backend_model import BackendModel, LiveRoute, Located, RouteKind
 from code_intel.code_paths import TS_SUFFIXES, iter_source_files
 from code_intel.config import FrontendConfig, parse_config
 from code_intel.problems import Problem, diagnostic, limitation
+
+pytestmark = pytest.mark.usefixtures("module_git")
 
 API_CLIENTS_CONFIG = """
 [[frontend.clients]]
@@ -134,6 +136,7 @@ def render(variant: dict) -> str:
 
 
 def write_tree(repo: Path, tree: Mapping[str, str | bytes]) -> None:
+    git_init(repo)
     for rel, source in tree.items():
         path = repo / "frontend" / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1613,6 +1616,84 @@ def test_instance_and_global_rows_match_backend_routes_without_a_diagnostic(inst
     assert ("/api/agents/{agent_id}/chat", "same", "fetch") in matched
 
 
+PACKAGE_CONFIG = """
+[[frontend.clients]]
+kind = "instance"
+package = "axios"
+
+[[frontend.clients]]
+kind = "instance"
+package = "got"
+export = "got"
+base_path = "/api"
+"""
+PACKAGES = parse_config(MINIMAL_CONFIG + PACKAGE_CONFIG).frontend
+PACKAGE_CALLS = """\
+import axios from "axios";
+import http, { create as made } from "axios";
+import { got as client } from "got";
+import other from "other";
+
+export const bare = () => axios.get("/api/public/invoices/1");
+export const post = (token: string) => axios.post(`/api/public/invoices/${token}`, {});
+export const renamed = () => http.delete("/api/renamed");
+export const request = () => axios.request({ url: "/api/req", method: "put" });
+export const named = () => client.get("/accounts");
+export const notConfigured = () => other.get("/api/other");
+export const otherExport = () => made.get("/api/made");
+export const created = axios.create({ baseURL: "/api" });
+export const guard = (e: unknown) => axios.isAxiosError(e);
+export const own = (axios: { get(url: string): void }) => axios.get("/api/not-the-package");
+"""
+
+
+@pytest.fixture(scope="module")
+def packages(scan_tree) -> Scan:
+    return scan_tree({"tsconfig.json": TSCONFIG, "app/calls.ts": PACKAGE_CALLS}, PACKAGES)
+
+
+def _package(scan: Scan, snippet: str) -> list[tuple[str, str]]:
+    line = _instance_line(snippet, PACKAGE_CALLS)
+    return [(c["method"], render(u)) for c in scan.at("app/calls.ts", line) for u in c["urls"]]
+
+
+def test_a_package_default_import_is_an_instance_wherever_it_is_imported(packages: Scan) -> None:
+    assert _package(packages, "const bare") == [("GET", "/api/public/invoices/1")]
+    assert _package(packages, "const post") == [("POST", "/api/public/invoices/{param:token}")]
+    assert _package(packages, "const renamed") == [("DELETE", "/api/renamed")]
+    assert _package(packages, "const request") == [("PUT", "/api/req")]
+    [call] = packages.at("app/calls.ts", _instance_line("const bare", PACKAGE_CALLS))
+    assert (call["kind"], call["client"], call["method_source"]) == ("instance", "axios", "member")
+
+
+def test_a_package_named_export_takes_the_base_path_and_is_labelled_by_its_export(packages: Scan) -> None:
+    assert _package(packages, "const named") == [("GET", "/api/accounts")]
+    [call] = packages.at("app/calls.ts", _instance_line("const named", PACKAGE_CALLS))
+    assert call["client"] == "got"
+
+
+def test_only_the_configured_package_and_export_are_clients(packages: Scan) -> None:
+    for snippet in ("const notConfigured", "const otherExport", "const own"):
+        assert packages.at("app/calls.ts", _instance_line(snippet, PACKAGE_CALLS)) == [], snippet
+    assert packages.problems == []
+
+
+def test_a_bare_package_call_matches_its_backend_route(packages: Scan) -> None:
+    result = route_map.build_routes(model(live("GET", "/api/public/invoices/{token}", 0)), packages.result)
+    assert [(m["backend"]["path"], m["frontend"]["client"]) for m in result["matches"]] == [
+        ("/api/public/invoices/{token}", "axios")
+    ]
+
+
+def test_the_default_frontend_walk_covers_only_git_visible_files(tmp_path: Path, typescript_toolchain) -> None:
+    call_in = 'import { apiFetch } from "../lib/api";\nexport const go = () => apiFetch("/x");\n'
+    write_tree(tmp_path, base_tree(**{"app/seen.ts": call_in, "generated/hidden.ts": call_in}))
+    (tmp_path / ".gitignore").write_text("frontend/generated/\n", encoding="utf-8")
+    scan = route_map.scan_frontend(tmp_path, FRONTEND, typescript_toolchain)
+    assert isinstance(scan, route_map.FrontendScan)
+    assert {c["file"] for c in scan.calls} == {"frontend/app/seen.ts"}
+
+
 def test_a_missing_instance_module_or_export_is_a_diagnostic(scan_tree) -> None:
     base = {"tsconfig.json": TSCONFIG, "app/a.ts": "export const a = 1;\n"}
     scan = scan_tree({**base}, INSTANCES)
@@ -1698,6 +1779,7 @@ def test_missing_frontend_root_returns_the_backend_as_partial(tmp_path: Path, ty
 
 
 def test_unavailable_toolchain_names_the_missing_piece_and_the_fix(tmp_path: Path) -> None:
+    git_init(tmp_path)
     (tmp_path / "frontend").mkdir()
     problem = ts_bridge.ToolchainProblem(
         "typescript_not_found",
@@ -1714,7 +1796,7 @@ def test_unavailable_toolchain_names_the_missing_piece_and_the_fix(tmp_path: Pat
     )
     assert diag.message == "tools/code-intel/ts/node_modules/typescript/package.json not found"
     assert scan.code == "typescript_not_found"
-    row = diag.as_dict()
+    row = diag.as_diagnostic()
     assert (row["missing"], row["fix"]) == (
         "tools/code-intel/ts/node_modules/typescript/package.json",
         ts_bridge.FRONTEND_TS_FIX,
@@ -1722,6 +1804,7 @@ def test_unavailable_toolchain_names_the_missing_piece_and_the_fix(tmp_path: Pat
 
 
 def test_helper_failure_is_frontend_unavailable_not_a_crash(tmp_path: Path, typescript_toolchain) -> None:
+    git_init(tmp_path)
     (tmp_path / "frontend").mkdir()
 
     def broken(*_args, **_kwargs):
@@ -1855,6 +1938,21 @@ def test_cli_json_exit_code_and_stderr_name_each_lost_piece(monkeypatch, capsys,
     assert "could not parse" not in err
 
 
+def test_cli_refuses_a_too_old_interpreter(monkeypatch, capsys, tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    (repo / "backend" / ".python-version").write_text("99.0\n", encoding="utf-8")
+    monkeypatch.setattr(route_map, "compute_routes", lambda *_: pytest.fail("analysis must not run"))
+    assert _dump_routes("--json", "--repo-root", repo) == 1
+    assert "older than the repo minimum 99.0" in capsys.readouterr().err
+
+
+def test_cli_names_a_checkout_git_cannot_list(capsys, tmp_path: Path, typescript_toolchain) -> None:
+    repo = make_repo(tmp_path, MINIMAL_CONFIG + API_CLIENTS_CONFIG)
+    (repo / "backend" / "service_backend" / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+    assert _dump_routes("--json", "--repo-root", repo) == 2
+    assert "git" in capsys.readouterr().err
+
+
 def test_cli_text_report_leads_with_banners(monkeypatch, capsys, tmp_path: Path) -> None:
     lim = limitation("opaque_router_call", stage="backend", file="backend/main.py", line=764, message="app escapes")
     monkeypatch.setattr(
@@ -1885,7 +1983,7 @@ def test_compute_routes_overlaps_the_scan_with_the_backend_build(tmp_path: Path,
 
 
 def test_cli_matches_a_configured_repository_from_any_cwd(typescript_toolchain, tmp_path: Path) -> None:
-    repo = make_repo(tmp_path, MINIMAL_CONFIG + API_CLIENTS_CONFIG)
+    repo = git_init(make_repo(tmp_path, MINIMAL_CONFIG + API_CLIENTS_CONFIG))
     app = repo / "backend" / "service_backend" / "main.py"
     app.write_text(
         "from fastapi import FastAPI\napp = FastAPI()\n\n@app.get('/a')\ndef get_a(): ...\n\n"

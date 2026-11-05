@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
@@ -108,6 +108,21 @@ def typescript_toolchain() -> ts_bridge.Toolchain:
         )
         unavailable(f"TypeScript toolchain unavailable: {detail}")
     return toolchain
+
+
+@pytest.fixture(scope="module")
+def module_git(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Hermetic git for a module whose trees are git work trees (``fixture_repo.git_init``).
+
+    The TypeScript install lives under the user's cache, which hermetic git
+    moves with ``HOME``, so it is pinned first."""
+    from fixture_repo import hermetic_git
+
+    cache = ts_bridge.cache_dir()
+    with pytest.MonkeyPatch.context() as patch:
+        hermetic_git(patch, tmp_path_factory.mktemp("home"))
+        patch.setenv(ts_bridge.CACHE_ENV, str(cache))
+        yield
 
 
 @dataclass

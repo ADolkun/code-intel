@@ -22,7 +22,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from code_intel import include_model as include_models
 from code_intel import route_matching, ts_bridge
@@ -36,16 +36,14 @@ from code_intel.problems import (
     incomplete_banner,
     limitation,
     limitations_banner,
-    min_python_version,
     partition,
-    runtime_is_compatible,
+    runtime_refusal,
 )
+from code_intel.repo_files import RepoFilesError, list_repo_files
 from code_intel.result_types import (
     SCHEMA_VERSION,
     BackendRouteRow,
-    DiagnosticDict,
     FrontendCallRow,
-    LimitationDict,
     MatchBackendSide,
     MatchFrontendSide,
     MatchRow,
@@ -168,7 +166,8 @@ def scan_frontend(
 ) -> FrontendScan | FrontendUnavailable:
     """Run the ``routes`` helper over the frontend.
 
-    ``files`` defaults to every ``TS_SUFFIXES`` file under the frontend root. A
+    ``files`` defaults to every git-visible ``TS_SUFFIXES`` file under the
+    frontend root (``RepoFilesError`` when git cannot list the repository). A
     missing frontend root, an unavailable toolchain or a failed helper run
     returns ``FrontendUnavailable`` instead of raising, so callers can still
     report the backend.
@@ -180,7 +179,13 @@ def scan_frontend(
     walk_problems: list[Problem] = []
     if files is None:
         files = iter_source_files(
-            frontend_root, TS_SUFFIXES, repo_root, walk_problems, stage=STAGE, generated_parent=frontend_root
+            frontend_root,
+            TS_SUFFIXES,
+            repo_root,
+            walk_problems,
+            stage=STAGE,
+            generated_parent=frontend_root,
+            visible=list_repo_files(repo_root).files,
         )
     if not toolchain.available:
         return FrontendUnavailable.from_problem(ts_bridge.incomplete_toolchain_problem(toolchain), walk_problems)
@@ -406,8 +411,8 @@ def build_routes(model: BackendModel, scan: FrontendScan | FrontendUnavailable) 
     matched = _match_rows(compiled, rows)
 
     found_diagnostics, found_limitations = partition(problems)
-    diagnostics = [cast(DiagnosticDict, p.as_dict()) for p in found_diagnostics]
-    limitations = [cast(LimitationDict, p.as_dict()) for p in found_limitations]
+    diagnostics = [p.as_diagnostic() for p in found_diagnostics]
+    limitations = [p.as_limitation() for p in found_limitations]
     complete = not diagnostics
     backend_routes = [_backend_row(r) for r in sorted(model.routes, key=lambda r: r.order)]
     backend_only = [
@@ -524,18 +529,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace, context: Context) -> int:
     repo_root, backend = context.repo_root, context.config.backend
-    version_file = repo_root / backend.python_version_file if backend.python_version_file else None
-    minimum = min_python_version(version_file)
-    if not runtime_is_compatible(minimum):
-        running = f"{sys.version_info[0]}.{sys.version_info[1]}"
-        required = "{}.{}".format(*minimum)
-        print(
-            f"code-intel: Python {running} is older than the repo minimum {required}, so backend "
-            f"sources would not parse; re-run with Python >={required} (e.g. uv run --python {required})",
-            file=sys.stderr,
-        )
+    if (refusal := runtime_refusal(repo_root, backend.python_version_file)) is not None:
+        print(refusal, file=sys.stderr)
         return 1
-    result = compute_routes(repo_root, context.config)
+    try:
+        result = compute_routes(repo_root, context.config)
+    except RepoFilesError as exc:
+        print(f"code-intel: {exc}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(result, indent=2))
     else:

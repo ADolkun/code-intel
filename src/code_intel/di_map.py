@@ -27,14 +27,15 @@ from code_intel import problems
 from code_intel.backend_model import BackendModel, DepTarget, DepUse, LiveRoute, NameResolver, Unknown
 from code_intel.config import BackendConfig
 from code_intel.dependency_resolver import STAGE, DependencyResolver
-from code_intel.problems import min_python_version, runtime_is_compatible
 from code_intel.result_types import (
     SCHEMA_VERSION,
+    DiagnosticDict,
     DiDependencyFunction,
     DiDepRow,
     DiResult,
     DiRoute,
     DiRouter,
+    LimitationDict,
 )
 
 if TYPE_CHECKING:
@@ -183,8 +184,8 @@ def _registry(
     return out, shared
 
 
-def _dedupe(found: Iterable[problems.Problem]) -> list[dict]:
-    out: list[dict] = []
+def _dedupe(found: Iterable[problems.Problem]) -> list[DiagnosticDict | LimitationDict]:
+    out: list[DiagnosticDict | LimitationDict] = []
     seen: set[tuple] = set()
     for problem in found:
         row = problem.as_dict()
@@ -358,18 +359,6 @@ def _summary_lines(result: DiResult) -> list[str]:
 # ── Entry point ──────────────────────────────────────────────────────────
 
 
-def _refuse_incompatible_runtime(minimum: tuple[int, int]) -> int:
-    running = f"{sys.version_info[0]}.{sys.version_info[1]}"
-    required = "{}.{}".format(*minimum)
-    print(
-        f"Error: Python {running} is older than the repo minimum {required}. "
-        f"Backend source uses syntax this interpreter cannot parse, so results would be "
-        f"silently incomplete. Re-run with Python >={required} (e.g. `uv run --python {required}`).",
-        file=sys.stderr,
-    )
-    return 1
-
-
 def compute(repo_root: Path, backend: BackendConfig) -> DiResult:
     """Build the backend model for ``repo_root`` and return its DI JSON."""
     # Imported here so consumers that bring their own model do not load the graph builder.
@@ -387,10 +376,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace, context: Context) -> int:
     repo_root, backend = context.repo_root, context.config.backend
-    version_file = repo_root / backend.python_version_file if backend.python_version_file else None
-    minimum = min_python_version(version_file)
-    if not runtime_is_compatible(minimum):
-        return _refuse_incompatible_runtime(minimum)
+    if (refusal := problems.runtime_refusal(repo_root, backend.python_version_file)) is not None:
+        print(refusal, file=sys.stderr)
+        return 1
     package_dir = repo_root / backend.root / backend.package
     if not package_dir.is_dir():
         print(f"Error: {package_dir}: backend package directory not found", file=sys.stderr)

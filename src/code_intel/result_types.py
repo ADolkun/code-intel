@@ -285,10 +285,11 @@ class ClientSpec:
       and the init object argument ``init_arg``.
     - ``options``: a function exported by ``module`` taking an options object at
       ``options_arg`` whose ``url_property`` holds the URL.
-    - ``instance``: an object exported by ``module`` (an axios-style instance);
-      ``export.get/post/put/patch/delete/head/options(url, ...)`` and
-      ``export.request({url, method})`` are calls, and ``base_path`` is prepended
-      to every URL.
+    - ``instance``: an object exported by ``module`` (an axios-style instance), or
+      the ``export`` (``default`` or a name) of the npm ``package``, imported
+      wherever it is used; ``export.get/post/put/patch/delete/head/options(url, ...)``
+      and ``export.request({url, method})`` are calls, and ``base_path`` is
+      prepended to every URL.
     - ``global``: a global function ``name`` (``fetch``); with ``same_origin_only``
       an absolute URL is another service and yields neither a call nor a diagnostic.
 
@@ -297,6 +298,7 @@ class ClientSpec:
 
     kind: ClientKind
     module: str | None = None
+    package: str | None = None
     export: str | None = None
     name: str | None = None
     default_method: str = "GET"
@@ -310,7 +312,7 @@ class ClientSpec:
     def as_request(self) -> dict:
         """The ``clients`` entry of a ``routes`` helper request (unset fields omitted)."""
         out: dict = {"kind": self.kind}
-        for key in ("module", "export", "name", "url_arg", "init_arg", "options_arg", "url_property"):
+        for key in ("module", "package", "export", "name", "url_arg", "init_arg", "options_arg", "url_property"):
             value = getattr(self, key)
             if value is not None:
                 out[key] = value

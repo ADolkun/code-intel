@@ -69,7 +69,7 @@ function validateClients(raw) {
     if (!CLIENT_KINDS.includes(spec.kind)) {
       throw new ProtocolError(`${where}.kind must be one of ${CLIENT_KINDS.join(", ")}, got ${JSON.stringify(spec.kind)}`);
     }
-    const named = spec.kind === "global" ? ["name"] : ["module", "export"];
+    const named = spec.kind === "global" ? ["name"] : [spec.package === undefined ? "module" : "package", "export"];
     for (const key of [...named, "default_method"]) {
       if (typeof spec[key] !== "string" || spec[key] === "") {
         throw new ProtocolError(`${where}.${key} must be a non-empty string`);
@@ -84,9 +84,10 @@ function validateClients(raw) {
     }
     const out = {
       kind: spec.kind,
-      module: spec.kind === "global" ? null : spec.module,
+      module: spec.kind === "global" || spec.package !== undefined ? null : spec.module,
+      package: spec.package === undefined ? null : spec.package,
       export: spec.kind === "global" ? null : spec.export,
-      label: spec.kind === "global" ? spec.name : spec.export,
+      label: spec.kind === "global" ? spec.name : spec.package !== undefined && spec.export === "default" ? spec.package : spec.export,
       defaultMethod: spec.default_method.toUpperCase(),
       urlArg: optionalIndex(spec, "url_arg", where),
       initArg: optionalIndex(spec, "init_arg", where),
@@ -206,6 +207,7 @@ class RoutesAnalyzer {
     this.builderByDecl = new Map(); // declaration node -> exported builder name
     this.clientNames = new Set();
     this.globalClients = new Map(); // global function name -> client spec
+    this.packageClients = []; // instance clients imported from an npm package
     this.builderNames = new Set();
     this.consumed = new Set(); // expression nodes read while evaluating a client or builder URL
     this.handledRefs = new Set(); // client identifiers that are the callee of a read call
@@ -317,6 +319,7 @@ class RoutesAnalyzer {
   resolveClients() {
     for (const spec of this.req.clients) {
       if (spec.kind === "global") this.globalClients.set(spec.label, spec);
+      else if (spec.package !== null) this.packageClients.push(spec);
       else this.resolveClient(spec);
     }
   }
@@ -832,7 +835,7 @@ class RoutesAnalyzer {
         return;
       }
       const member = this.instanceMemberOf(node.expression);
-      const spec = member ? member.spec : this.clientOf(node.expression);
+      const spec = member ? member.spec : this.clientOf(node.expression) || this.packageClientOf(node.expression);
       if (!spec) return;
       const nameNode = member ? member.object : this.calleeName(node.expression);
       this.handledRefs.add(nameNode);
@@ -867,9 +870,31 @@ class RoutesAnalyzer {
     const member = this.calleeName(e);
     if (!member || !(INSTANCE_VERBS.has(member.text) || member.text === INSTANCE_REQUEST)) return null;
     const object = this.calleeName(e.expression);
-    const spec = object && this.clientOf(e.expression);
+    const spec = object && (this.clientOf(e.expression) || this.packageClientOf(e.expression));
     if (!spec || (spec !== UNRESOLVED && spec.kind !== "instance")) return null;
     return { spec, object, name: member.text };
+  }
+
+  // The configured package instance an identifier is an import of
+  // (`import axios from "axios"`, `import { http as h } from "ky"`), through the
+  // import alone: the package is outside the program, so nothing resolves.
+  packageClientOf(expr) {
+    const ts = this.ts;
+    const id = unwrap(ts, expr);
+    if (this.packageClients.length === 0 || !ts.isIdentifier(id)) return null;
+    const sym = this.checker.getSymbolAtLocation(id);
+    const decl = sym && sym.flags & ts.SymbolFlags.Alias && sym.declarations && sym.declarations[0];
+    if (!decl) return null;
+    let exported;
+    if (ts.isImportClause(decl)) exported = "default";
+    else if (ts.isImportSpecifier(decl)) exported = nameText(ts, decl.propertyName || decl.name);
+    else return null;
+    for (let owner = decl.parent; owner; owner = owner.parent) {
+      if (!ts.isImportDeclaration(owner)) continue;
+      const from = owner.moduleSpecifier;
+      return this.packageClients.find((spec) => spec.package === from.text && spec.export === exported) || null;
+    }
+    return null;
   }
 
   // How a reference to an instance is used as the object of a member access:

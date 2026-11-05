@@ -14,6 +14,7 @@ import re
 import subprocess
 import tokenize
 from collections.abc import Iterable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -131,10 +132,13 @@ def iter_source_files(
     *,
     stage: str = "walk sources",
     generated_parent: Path | None = None,
+    visible: AbstractSet[str] | None = None,
 ) -> list[SourceFile]:
     """Every file under ``root`` ending in one of ``suffixes``, sorted by ``rel``.
 
-    Skips ``SKIP_DIRS``, every dot directory and symlinks. With
+    Skips ``SKIP_DIRS``, every dot directory and symlinks. With ``visible``
+    (``RepoFiles.files``: tracked plus untracked-not-ignored), a file whose
+    ``rel`` is not in it is skipped, so ignored build output is never read. With
     ``generated_parent`` (frontend walks pass the frontend root), the
     ``FRONTEND_GENERATED_DIRS`` that are direct children of that directory are
     skipped too. A directory that
@@ -190,6 +194,8 @@ def iter_source_files(
                 continue
             path = Path(entry.path)
             rel = rel_posix(path, repo_root)
+            if visible is not None and rel not in visible:
+                continue
             try:
                 stamp = FileStamp.from_stat(_stat(entry))
             except OSError as exc:
