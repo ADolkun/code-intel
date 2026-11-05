@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
 import pytest
 
-from code_intel import code_paths
+from code_intel import code_paths, ts_bridge
 
 REQUIRE_TOOLCHAIN_ENV = "CODE_INTEL_REQUIRE_TOOLCHAIN"
 
@@ -90,3 +91,73 @@ def unavailable(message: str) -> NoReturn:
     if toolchain_required():
         pytest.fail(f"{message} ({REQUIRE_TOOLCHAIN_ENV}=1)", pytrace=False)
     pytest.skip(message)
+
+
+@pytest.fixture(scope="session")
+def typescript_toolchain() -> ts_bridge.Toolchain:
+    """The real toolchain: ``CODE_INTEL_TYPESCRIPT_DIR``, else the install ``code-intel setup`` made."""
+    toolchain = ts_bridge.find_toolchain(Path(__file__).resolve().parent.parent)
+    if not toolchain.available:
+        problem = toolchain.problem
+        detail = (
+            f"{problem.message}. Fix: {problem.fix}"
+            if problem
+            else "ts_bridge.find_toolchain reported no problem, yet node or TypeScript is missing"
+        )
+        unavailable(f"TypeScript toolchain unavailable: {detail}")
+    return toolchain
+
+
+@dataclass
+class FactsRun:
+    root: Path
+    response: dict
+    by_rel: dict[str, dict] = field(default_factory=dict)  # tree key -> file entry
+
+
+@pytest.fixture(scope="session")
+def facts_helper(
+    typescript_toolchain: ts_bridge.Toolchain, tmp_path_factory: pytest.TempPathFactory
+) -> Callable[..., FactsRun]:
+    """``run(files) -> FactsRun``: write ``{relative path: source}`` to a fresh
+    directory and run the helper's ``facts`` mode over every file once.
+
+    Results are memoized per tree, so a module can batch its fixtures into one
+    tree (one helper process) and look files up in ``by_rel``.
+    """
+    memo: dict[tuple, FactsRun] = {}
+
+    def run(
+        files: Mapping[str, str],
+        *,
+        snippet_max: int = 500,
+        signature_max: int = 200,
+        attribute_tags: tuple[str, ...] = (),
+    ) -> FactsRun:
+        key = (tuple(sorted(files.items())), snippet_max, signature_max, attribute_tags)
+        if key in memo:
+            return memo[key]
+        root = tmp_path_factory.mktemp("facts")
+        paths: dict[str, Path] = {}
+        for rel, source in files.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8", newline="")
+            paths[rel] = path
+        response = ts_bridge.run_helper(
+            typescript_toolchain,
+            "facts",
+            {
+                "files": [str(p) for p in paths.values()],
+                "snippet_max": snippet_max,
+                "signature_max": signature_max,
+                "attribute_tags": list(attribute_tags),
+            },
+            timeout_s=ts_bridge.FACTS_TIMEOUT_S,
+        )
+        entries = {entry["path"]: entry for entry in response["files"]}
+        result = FactsRun(root=root, response=response, by_rel={rel: entries[str(p)] for rel, p in paths.items()})
+        memo[key] = result
+        return result
+
+    return run
