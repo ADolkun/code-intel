@@ -9,6 +9,7 @@ each behaviour is a named case. Backend routes are synthetic
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import subprocess
@@ -22,7 +23,7 @@ from fixture_repo import MINIMAL_CONFIG, git_init, make_repo
 from test_dependency_resolver import FakeResolver, FakeSources
 
 from code_intel import cli, include_model, route_map, ts_bridge
-from code_intel.backend_model import BackendModel, LiveRoute, Located, RouteKind
+from code_intel.backend_model import BackendModel, CapturedEndpoint, Library, LiveRoute, Located, RouteKind
 from code_intel.code_paths import TS_SUFFIXES, iter_source_files
 from code_intel.config import FrontendConfig, parse_config
 from code_intel.problems import Problem, diagnostic, limitation
@@ -1285,7 +1286,77 @@ def test_build_routes_summary_separates_routes_calls_and_rows() -> None:
         "handler": "h0",
         "file": "backend/case/routes.py",
         "line": 10,
+        "library": None,
     }
+
+
+def library_route(method: str, path: str, order: int, handler: str = "me") -> LiveRoute:
+    """A route installed code defines, mounted by the include at backend/app/main.py:170."""
+    return replace(
+        live(method, path, order, handler=handler),
+        file="backend/app/main.py",
+        line=170,
+        registered_file="backend/app/main.py",
+        registered_line=170,
+        endpoint=CapturedEndpoint(
+            f"fastapi_users.router.users:get_users_router.<locals>.{handler}",
+            Library("fastapi-users", "15.0.5", "fastapi_users/router/users.py", 46),
+            (),
+        ),
+    )
+
+
+def test_a_library_route_matches_calls_but_is_in_neither_backend_only_nor_coverage() -> None:
+    m = model(live("GET", "/a", 0), library_route("GET", "/users/me", 1), library_route("POST", "/users/x", 2, "x"))
+    scan = scan_of(
+        call([{"text": "/a"}], line=1, function="one"),
+        call([{"text": "/users/me"}], line=2, function="me"),
+        call([{"text": "/users/me"}], line=3, function="again"),
+    )
+    result = route_map.build_routes(m, scan)
+    s = result["summary"]
+    assert (s["backend_routes"], s["matched_routes"], s["backend_only"], s["coverage_pct"]) == (1, 1, 0, 100.0)
+    assert (s["library_routes"], s["matched_library_routes"]) == (2, 1)
+    assert (s["frontend_calls"], s["matched_calls"], s["frontend_only"], s["match_rows"]) == (3, 3, 0, 3)
+    assert [r["path"] for r in result["backend_routes"]] == ["/a"]
+    assert [(r["path"], (r["library"] or {}).get("dist")) for r in result["library_routes"]] == [
+        ("/users/me", "fastapi-users"),
+        ("/users/x", "fastapi-users"),
+    ]
+    assert result["backend_only"] == []
+    library_matches = [m for m in result["matches"] if m["backend"]["library"] is not None]
+    assert [m["backend"]["path"] for m in library_matches] == ["/users/me", "/users/me"]
+    assert library_matches[0]["backend"]["file"] == "backend/app/main.py"
+    assert library_matches[0]["backend"]["library"] == {
+        "dist": "fastapi-users",
+        "version": "15.0.5",
+        "file": "fastapi_users/router/users.py",
+        "line": 46,
+    }
+    assert result["matches"][0]["backend"]["library"] is None
+
+
+def test_a_library_route_without_a_caller_is_not_backend_only_and_a_call_that_hits_none_is_frontend_only() -> None:
+    m = model(live("GET", "/a", 0), library_route("GET", "/users/me", 1))
+    result = route_map.build_routes(m, scan_of(call([{"text": "/nothing"}], line=1)))
+    assert result["backend_only"][0]["path"] == "/a"
+    assert [r["path"] for r in result["backend_only"]] == ["/a"]
+    assert result["summary"]["matched_library_routes"] == 0
+    assert [c["path"] for c in result["frontend_only"]] == ["/nothing"]
+
+
+def test_the_report_names_where_the_library_defines_a_matched_handler_and_counts_library_routes() -> None:
+    m = model(live("GET", "/a", 0), library_route("GET", "/users/me", 1))
+    result = route_map.build_routes(m, scan_of(call([{"text": "/users/me"}], line=2, function="me")))
+    out = io.StringIO()
+    route_map.print_report(result, out=out)
+    text = out.getvalue()
+    assert "handler me()  [backend/app/main.py:170 · fastapi-users 15.0.5 fastapi_users/router/users.py:46]" in text
+    assert "  Backend routes:  1 (0 matched, 1 backend-only)" in text
+    assert "  Library routes:  1 (1 matched)" in text
+    plain = io.StringIO()
+    route_map.print_report(route_map.build_routes(model(live("GET", "/a", 0)), scan_of()), out=plain)
+    assert "Library routes" not in plain.getvalue()
 
 
 def test_dedupe_keeps_same_line_calls_in_different_files_and_columns() -> None:

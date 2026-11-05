@@ -8,10 +8,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
-from code_intel.backend_model import DepKind, DepMarker, DepVia, IncludeModelKind, MountState, RouteKind
+from code_intel.backend_model import DepKind, DepMarker, DepVia, IncludeModelKind, Library, MountState, RouteKind
 
 SCHEMA_VERSION = 2
 FACTS_SCHEMA = 1
@@ -83,6 +84,33 @@ class DiApp(TypedDict):
     include_model_reason: str | None
 
 
+class LibraryRow(TypedDict):
+    """Where installed code defines a callable, from the library capture."""
+
+    dist: str
+    version: str
+    file: str  # relative to the distribution's install directory
+    line: int
+
+
+def library_row(library: Library | None) -> LibraryRow | None:
+    if library is None:
+        return None
+    return {"dist": library.dist, "version": library.version, "file": library.file, "line": library.line}
+
+
+def library_text(library: LibraryRow) -> str:
+    return f"{library['dist']} {library['version']} {library['file']}:{library['line']}"
+
+
+def route_where(row: Mapping[str, Any]) -> str:
+    """``file:line`` of a route row, and for a route installed code defines, where it does:
+    ``backend/app/main.py:170 · fastapi-users 15.0.5 fastapi_users/router/users.py:46``."""
+    where = f"{row['file']}:{row['line']}"
+    library = row.get("library")
+    return f"{where} · {library_text(library)}" if library else where
+
+
 class DiDependencyFunction(TypedDict):
     id: str
     name: str
@@ -96,6 +124,12 @@ class DiDependencyFunction(TypedDict):
     aliases: list[str]
     # Only for an ``external`` kind: the expression the module-level name is assigned.
     bound_to: NotRequired[str]
+    # An ``external`` the library capture fills: the id FastAPI reports for what it is bound to.
+    runtime_id: NotRequired[str]
+    # An ``unresolved`` target that names a callable of installed code: its dotted name.
+    external: NotRequired[str]
+    # A ``library`` target, or an ``external`` the capture fills: the definition of the installed callable.
+    library: NotRequired[LibraryRow]
 
 
 class DiDepRow(TypedDict):
@@ -119,6 +153,8 @@ class DiRoute(TypedDict):
     line: int
     mount: MountState
     order: int
+    # Installed code defines the handler: ``file``/``line`` are then the include_router call that mounts it.
+    library: LibraryRow | None
     chain: list[str]
     app_deps: list[str]
     router_deps: list[str]
@@ -147,12 +183,22 @@ class DiSummary(TypedDict):
     files_scanned: int
 
 
+class DiLibrary(TypedDict):
+    """What of the library capture the analysis applied."""
+
+    file: str
+    includes: int
+    routes: int
+    dependencies: int
+
+
 class DiResult(TypedDict):
     schema_version: Literal[2]
     complete: bool
     diagnostics: list[DiagnosticDict]
     analysis_limitations: list[LimitationDict]
     app: DiApp
+    library: DiLibrary | None
     dependency_functions: dict[str, DiDependencyFunction]
     routes: list[DiRoute]
     unmounted_routes: list[DiRoute]
@@ -190,6 +236,7 @@ class BackendRouteRow(TypedDict):
     line: int
     mount: MountState
     order: int
+    library: LibraryRow | None  # as in ``DiRoute``
 
 
 class FrontendCallRow(TypedDict):
@@ -221,6 +268,7 @@ class MatchBackendSide(TypedDict):
     handler: str
     file: str
     line: int
+    library: LibraryRow | None
 
 
 class MatchFrontendSide(TypedDict):
@@ -246,7 +294,11 @@ FrontendOnlyRow = MatchFrontendSide
 
 
 class RoutesSummary(TypedDict):
+    # Routes the repository defines; the ones installed code adds are counted apart
+    # (``library_routes``), and neither coverage nor ``backend_only`` involves them.
     backend_routes: int
+    library_routes: int
+    matched_library_routes: int
     frontend_calls: int
     matched_routes: int
     matched_calls: int
@@ -264,6 +316,7 @@ class RoutesResult(TypedDict):
     diagnostics: list[DiagnosticDict]
     analysis_limitations: list[LimitationDict]
     backend_routes: list[BackendRouteRow]
+    library_routes: list[BackendRouteRow]
     frontend_calls: list[FrontendCallRow]
     matches: list[MatchRow]
     backend_only: list[BackendOnlyRow]

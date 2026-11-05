@@ -909,3 +909,118 @@ def test_the_doc_check_body_text_is_its_finding_lines_only(tmp_path: Path) -> No
     assert findings and notes, "the fixture has findings and a limitation"
     assert body.text.splitlines() == findings
     assert body.payload["finding_count"] == len(result.findings)
+
+
+# ── Library routes and dependencies ──────────────────────────────────────
+
+USERS_ME = {"dist": "fastapi-users", "version": "15.0.5", "file": "fastapi_users/router/users.py", "line": 46}
+MOUNTED_AT = "backend/app/main.py:170 · fastapi-users 15.0.5 fastapi_users/router/users.py:46"
+
+
+def _library_match() -> Any:
+    from mcp_fixtures import match
+
+    return match(
+        backend_side("GET", "/users/me", "me", file="backend/app/main.py", line=170, library=USERS_ME),
+        frontend_side("GET", "/users/me", "me", line=274, def_line=273),
+    )
+
+
+def test_a_library_route_shows_the_include_that_mounts_it_and_where_the_library_defines_it() -> None:
+    data = routes_result([_library_match(), pair("/a", "a", "fa")])
+    text = presenters.route_match(
+        queries.route_match(data, path="/users/me", handler=None, frontend_func=None, match="exact", limit=None)
+    ).text
+    assert f"Backend:  me()  [{MOUNTED_AT}]" in text
+    assert "[backend/service_backend" not in text
+
+
+def test_the_route_summary_counts_library_routes_apart_and_only_when_there_are_some() -> None:
+    data = routes_result([_library_match(), pair("/a", "a", "fa")])
+    text = presenters.route_match(
+        queries.route_match(data, path=None, handler=None, frontend_func=None, match="exact", limit=None)
+    ).text
+    assert "  Library routes:  1 (1 matched)" in text
+    assert "  Backend routes:  1" in text and "  Coverage:        100.0%" in text
+    plain = presenters.route_match(
+        queries.route_match(
+            routes_result([pair("/a", "a", "fa")]),
+            path=None,
+            handler=None,
+            frontend_func=None,
+            match="exact",
+            limit=None,
+        )
+    ).text
+    assert "Library routes" not in plain
+
+
+def test_a_library_route_is_listed_with_the_routes_that_fit_when_the_frontend_is_missing() -> None:
+    from mcp_fixtures import frontend_unavailable_diagnostic
+
+    data = routes_result([_library_match()], diagnostics=[frontend_unavailable_diagnostic()], complete=False)
+    body = presenters.route_match(
+        queries.route_match(data, path="/users/me", handler=None, frontend_func=None, match="exact", limit=None)
+    )
+    assert f"  GET /users/me  →  me()  [{MOUNTED_AT}]" in body.text
+
+
+def test_di_routes_text_shows_where_the_library_defines_a_handler() -> None:
+    data = di_result(routes=[di_route("me", "/users/me", file="backend/app/main.py", line=170, library=USERS_ME)])
+    text = presenters.di_deps(
+        queries.di_deps(data, handler="me", path=None, method=None, match="exact", limit=None)
+    ).text
+    assert text.splitlines()[0] == f"GET /users/me  →  me()  [{MOUNTED_AT}]"
+
+
+def test_dependency_targets_show_the_binding_a_capture_filled_and_the_dist_of_a_library_callable() -> None:
+    bearer = "fastapi.security.oauth2:OAuth2PasswordBearer()"
+    user = "app.core.auth:current_active_user"
+    data = di_result(
+        [
+            dep(user, kind="external", sub=[bearer], bound_to="fastapi_users.current_user(active=True)"),
+            dep(
+                bearer,
+                kind="library",
+                file=None,
+                line=None,
+                library={"dist": "fastapi", "version": "0.162.0", "file": "fastapi/security/oauth2.py", "line": 536},
+            ),
+        ],
+        [di_route("me", "/me", deps=[use(user, "current_active_user", "direct", param="u")], all_deps=[user, bearer])],
+    )
+    listing = presenters.di_deps(
+        queries.di_deps(data, handler=None, path=None, method=None, match="exact", limit=None)
+    ).text
+    assert "  current_active_user (external)  [backend/service_backend/deps.py:1]" in listing
+    assert "-> OAuth2PasswordBearer  = fastapi_users.current_user(active=True)" in listing
+    assert "  OAuth2PasswordBearer (library)  [fastapi 0.162.0 fastapi/security/oauth2.py:536]" in listing
+    usage = presenters.di_reverse(queries.di_reverse(data, bearer, limit=None)).text
+    assert usage.startswith("OAuth2PasswordBearer  [fastapi 0.162.0 fastapi/security/oauth2.py:536]")
+    bound = presenters.di_reverse(queries.di_reverse(data, user, limit=None)).text
+    assert "  Bound to: fastapi_users.current_user(active=True)" in bound
+
+
+def test_status_text_names_the_library_capture_its_applied_counts_and_why_it_is_stale() -> None:
+    block = {
+        "file": ".code-intel/library-capture.json",
+        "present": True,
+        "app": "app.main:app",
+        "distributions": {"fastapi": "0.162.0", "fastapi-users": "15.0.5"},
+        "entries": {"includes": 3, "routes": 8, "dependencies": 3},
+        "applied": {"file": ".code-intel/library-capture.json", "includes": 3, "routes": 8, "dependencies": 2},
+        "problems": [],
+        "stale": ["fastapi-users was captured at 15.0.4"],
+    }
+    text = presenters.status(_snapshot(library_capture=block)).text
+    assert (
+        "  Library capture: .code-intel/library-capture.json: 3 includes (8 routes), 2 dependencies applied; "
+        "fastapi 0.162.0, fastapi-users 15.0.5; stale: 1 (run code-intel capture)"
+    ) in text
+    unbuilt = presenters.status(_snapshot(library_capture={**block, "applied": None, "stale": []})).text
+    assert ": 3 includes (8 routes), 3 dependencies; fastapi 0.162.0" in unbuilt and "stale" not in unbuilt
+    missing = presenters.status(_snapshot(library_capture={**block, "present": False})).text
+    assert "does not exist; run code-intel capture" in missing
+    payload = presenters.status(_snapshot(library_capture=block)).payload
+    assert payload["library_capture"] == block
+    assert "Library capture" not in presenters.status(_snapshot()).text

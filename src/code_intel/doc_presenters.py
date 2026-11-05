@@ -83,7 +83,8 @@ def _rows_block(title: str, rows: Page[Any], noun: str, render: Any) -> list[str
 
 def _definition_line(result: doc_queries.DocRefs, row: Mapping[str, Any]) -> str:
     if result.kind == "route":
-        return f"Live route: {row['method']} {row['path']}  {row['handler']}()  [{row['file']}:{row['line']}]"
+        library = f" · {row['library']}" if row.get("library") else ""
+        return f"Live route: {row['method']} {row['path']}  {row['handler']}()  [{row['file']}:{row['line']}{library}]"
     container = f" in {row['container']}" if row.get("container") else ""
     return f"  {row['kind']:<10} {row['file']}:{row['line']}{container}"
 

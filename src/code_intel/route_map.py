@@ -48,6 +48,8 @@ from code_intel.result_types import (
     MatchFrontendSide,
     MatchRow,
     RoutesResult,
+    library_row,
+    route_where,
 )
 
 STAGE = "frontend routes"
@@ -279,6 +281,7 @@ def _backend_row(route: LiveRoute) -> BackendRouteRow:
         "line": route.line,
         "mount": route.mount,
         "order": route.order,
+        "library": library_row(route.library),
     }
 
 
@@ -289,6 +292,7 @@ def _backend_side(route: LiveRoute) -> MatchBackendSide:
         "handler": route.handler,
         "file": route.file,
         "line": route.line,
+        "library": library_row(route.library),
     }
 
 
@@ -414,12 +418,15 @@ def build_routes(model: BackendModel, scan: FrontendScan | FrontendUnavailable) 
     diagnostics = [p.as_diagnostic() for p in found_diagnostics]
     limitations = [p.as_limitation() for p in found_limitations]
     complete = not diagnostics
-    backend_routes = [_backend_row(r) for r in sorted(model.routes, key=lambda r: r.order)]
-    backend_only = [
-        _backend_side(r) for r in sorted(model.routes, key=lambda r: r.order) if r.order not in matched.orders
-    ]
+    ordered = sorted(model.routes, key=lambda r: r.order)
+    repository = [r for r in ordered if r.library is None]
+    installed = [r for r in ordered if r.library is not None]
+    matched_installed = {r.order for r in installed} & matched.orders
+    matched_repository = matched.orders - matched_installed
+    backend_routes = [_backend_row(r) for r in repository]
+    backend_only = [_backend_side(r) for r in repository if r.order not in matched.orders]
     call_ids = {(row["file"], row["line"], row["column"]) for row, _ in rows}
-    coverage = _coverage(len(matched.orders), len(backend_routes)) if complete else None
+    coverage = _coverage(len(matched_repository), len(backend_routes)) if complete else None
     return {
         "schema_version": SCHEMA_VERSION,
         "complete": complete,
@@ -427,6 +434,7 @@ def build_routes(model: BackendModel, scan: FrontendScan | FrontendUnavailable) 
         "diagnostics": diagnostics,
         "analysis_limitations": limitations,
         "backend_routes": backend_routes,
+        "library_routes": [_backend_row(r) for r in installed],
         "frontend_calls": [row for row, _ in rows],
         "matches": [m for _, m in matched.matches],
         "backend_only": backend_only,
@@ -434,8 +442,10 @@ def build_routes(model: BackendModel, scan: FrontendScan | FrontendUnavailable) 
         "unmounted_routes": [_backend_row(r) for r in model.unmounted_routes],
         "summary": {
             "backend_routes": len(backend_routes),
+            "library_routes": len(installed),
+            "matched_library_routes": len(matched_installed),
             "frontend_calls": len(call_ids),
-            "matched_routes": len(matched.orders),
+            "matched_routes": len(matched_repository),
             "matched_calls": len(matched.calls),
             "match_rows": len(matched.matches),
             "backend_only": len(backend_only),
@@ -457,6 +467,7 @@ def build_backend_model(repo_root: Path, backend: BackendConfig) -> BackendModel
         backend.app,
         repo_root,
         lock=backend.lock,
+        library=backend.capture.file if backend.capture is not None else None,
         visible=list_repo_files(repo_root).files,
     )
 
@@ -507,7 +518,7 @@ def print_report(result: RoutesResult, *, unmatched_only: bool = False, out: Any
             b, f = m["backend"], m["frontend"]
             tag = "" if m["confidence"] == "exact" else f"  (possible: {m['reason']})"
             w(f"  {b['method']:<7} {b['path']}  ←  {_fmt_front(f)}{tag}")
-            w(f"          handler {b['handler']}()  [{b['file']}:{b['line']}]")
+            w(f"          handler {b['handler']}()  [{route_where(b)}]")
     w(f"\nBackend only ({len(result['backend_only'])})")
     for r in result["backend_only"]:
         w(f"  {r['method']:<7} {r['path']}  {r['handler']}()  [{r['file']}:{r['line']}]")
@@ -517,6 +528,8 @@ def print_report(result: RoutesResult, *, unmatched_only: bool = False, out: Any
     s = result["summary"]
     w("\nSummary")
     w(f"  Backend routes:  {s['backend_routes']} ({s['matched_routes']} matched, {s['backend_only']} backend-only)")
+    if s["library_routes"]:
+        w(f"  Library routes:  {s['library_routes']} ({s['matched_library_routes']} matched)")
     w(
         f"  Frontend calls:  {s['frontend_calls']} ({s['matched_calls']} matched, {s['frontend_only']} unmatched rows, "
         f"{s['test_calls_skipped']} test-file calls skipped)"

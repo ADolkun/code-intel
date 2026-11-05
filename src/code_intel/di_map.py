@@ -31,9 +31,13 @@ from code_intel.result_types import (
     SCHEMA_VERSION,
     DiDependencyFunction,
     DiDepRow,
+    DiLibrary,
     DiResult,
     DiRoute,
     DiRouter,
+    library_row,
+    library_text,
+    route_where,
 )
 
 if TYPE_CHECKING:
@@ -69,6 +73,7 @@ def _route_row(route: LiveRoute, uses: list[DepUse], closure: list[DepTarget]) -
         "line": route.line,
         "mount": route.mount,
         "order": route.order,
+        "library": library_row(route.library),
         "chain": list(route.chain),
         "app_deps": displays("app"),
         "router_deps": displays("router"),
@@ -111,6 +116,7 @@ _FORMS = {
     "lambda": "a lambda",
     "factory_result": "a factory's result",
     "external": "an external object",
+    "library": "a callable of installed code",
     "unresolved": "an unresolved target",
 }
 
@@ -179,6 +185,12 @@ def _registry(
         }
         if target.bound_to:
             out[target_id]["bound_to"] = target.bound_to
+        if target.runtime_id:
+            out[target_id]["runtime_id"] = target.runtime_id
+        if target.external:
+            out[target_id]["external"] = target.external
+        if (installed := library_row(target.library)) is not None:
+            out[target_id]["library"] = installed
     return out, shared
 
 
@@ -205,7 +217,9 @@ def build_di(model: BackendModel, resolver: DependencyResolver | NameResolver | 
     dep = (
         resolver
         if isinstance(resolver, DependencyResolver)
-        else DependencyResolver(resolver if resolver is not None else model.resolver, model.sources)
+        else DependencyResolver(
+            resolver if resolver is not None else model.resolver, model.sources, library=model.library
+        )
     )
     targets: list[DepTarget] = []
     all_uses: list[DepUse] = []
@@ -250,6 +264,7 @@ def build_di(model: BackendModel, resolver: DependencyResolver | NameResolver | 
         )
 
     registry, shared = _registry(dep, targets, all_uses)
+    dep.stale_entries()
     diagnostics = _dedupe(model.diagnostics, problems.Problem.as_diagnostic)
     limitations = _dedupe([*model.limitations, *dep.problems, *shared], problems.Problem.as_limitation)
     return {
@@ -258,6 +273,7 @@ def build_di(model: BackendModel, resolver: DependencyResolver | NameResolver | 
         "diagnostics": diagnostics,
         "analysis_limitations": limitations,
         "app": include_models.app_block(model),
+        "library": _library_block(model, dep),
         "dependency_functions": registry,
         "routes": route_rows,
         "unmounted_routes": unmounted_rows,
@@ -270,6 +286,17 @@ def build_di(model: BackendModel, resolver: DependencyResolver | NameResolver | 
             "dependency_functions": len(registry),
             "files_scanned": model.files_scanned,
         },
+    }
+
+
+def _library_block(model: BackendModel, dep: DependencyResolver) -> DiLibrary | None:
+    if model.library is None:
+        return None
+    return {
+        "file": model.library.file,
+        "includes": sum(1 for node in model.routers if node.id.startswith("library:")),
+        "routes": sum(1 for route in model.routes if route.library is not None),
+        "dependencies": dep.applied_entries,
     }
 
 
@@ -301,7 +328,13 @@ def format_text(result: DiResult) -> str:
     lines.append(f"\nDependency targets ({len(funcs)})")
     lines.append("─" * 72)
     for target_id, entry in funcs.items():
-        where = f"{entry['file']}:{entry['line']}" if entry["file"] else "?"
+        where = (
+            f"{entry['file']}:{entry['line']}"
+            if entry["file"]
+            else library_text(entry["library"])
+            if "library" in entry
+            else "?"
+        )
         subs = ", ".join(label(s) for s in entry["sub_deps"]) or "(leaf)"
         aliases = f"  [aliases: {', '.join(entry['aliases'])}]" if entry["aliases"] else ""
         bound = f"  = {entry['bound_to']}" if "bound_to" in entry else ""
@@ -315,7 +348,7 @@ def format_text(result: DiResult) -> str:
         lines.append(f"\nUnmounted routes ({len(result['unmounted_routes'])}), not live")
         lines.append("─" * 72)
         for route in result["unmounted_routes"]:
-            lines.append(f"  {route['method']:<6} {route['path']}  [{route['file']}:{route['line']}]")
+            lines.append(f"  {route['method']:<6} {route['path']}  [{route_where(route)}]")
     lines.extend(_summary_lines(result))
     return "\n".join(lines)
 
@@ -326,7 +359,7 @@ def _route_lines(
     """One route: its handler, then its dependencies by where they are declared."""
     lines = [
         f"\n  {route['method']:<6} {route['path']}",
-        f"    Handler: {route['handler']}  [{route['file']}:{route['line']}]",
+        f"    Handler: {route['handler']}  [{route_where(route)}]",
     ]
     for via, title in (("app", "App"), ("router", "Router"), ("route decorator", "Route"), ("direct", "Direct")):
         labels = [
@@ -373,6 +406,7 @@ def compute(repo_root: Path, backend: BackendConfig) -> DiResult:
         backend.app,
         repo_root,
         lock=backend.lock,
+        library=backend.capture.file if backend.capture is not None else None,
         visible=list_repo_files(repo_root).files,
     )
     return build_di(model)

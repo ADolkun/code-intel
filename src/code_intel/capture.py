@@ -10,6 +10,10 @@ shows at exactly those places to ``.code-intel/library-capture.json``.
     code-intel capture --check      # compare with the committed file, write nothing
     code-intel capture --python P   # use P instead of the configured interpreter
 
+A dependency behind a router the capture fills shows only once that router is
+applied, so the gaps are read again with the capture so far applied, until none
+is new.
+
 It refuses (exit 2, nothing written) when an installed version of ``fastapi``
 or of a captured distribution differs from the repository's lock, since the
 file would describe code the lock does not install. ``--check`` exit codes:
@@ -19,17 +23,16 @@ file would describe code the lock does not install. ``--check`` exit codes:
 from __future__ import annotations
 
 import argparse
-import ast
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from code_intel import library_capture, problems, runner, toolchain_pins
-from code_intel.backend_model import External, Located
 from code_intel.config import BackendConfig, CaptureConfig
 from code_intel.library_capture import CaptureFormatError, LibraryCapture
+from code_intel.library_view import LibraryView
 
 if TYPE_CHECKING:
     from code_intel.cli import Context
@@ -54,8 +57,9 @@ class Gaps:
     externals: tuple[str, ...]  # dotted names of installed callables the package uses as dependencies
 
 
-def static_gaps(repo_root: Path, backend: BackendConfig) -> Gaps:
-    """The fillable gaps of the backend, found without importing anything."""
+def static_gaps(repo_root: Path, backend: BackendConfig, library: LibraryView | None = None) -> Gaps:
+    """The fillable gaps of the backend, found without importing anything. ``library``
+    is a capture to apply first: what is still a gap with it applied."""
     from code_intel import di_map, router_graph
     from code_intel.repo_files import RepoFilesError, list_repo_files
 
@@ -64,7 +68,13 @@ def static_gaps(repo_root: Path, backend: BackendConfig) -> Gaps:
     except RepoFilesError as exc:
         raise CaptureError(str(exc)) from exc
     model = router_graph.build_backend_model(
-        repo_root / backend.root, backend.package, backend.app, repo_root, lock=backend.lock, visible=visible
+        repo_root / backend.root,
+        backend.package,
+        backend.app,
+        repo_root,
+        lock=backend.lock,
+        library=library,
+        visible=visible,
     )
     di = di_map.build_di(model)
     if di["diagnostics"]:
@@ -92,26 +102,9 @@ def static_gaps(repo_root: Path, backend: BackendConfig) -> Gaps:
     for entry in di["dependency_functions"].values():
         if entry["kind"] == "external":
             bindings.add(entry["id"])
-        elif entry["kind"] == "unresolved":
-            dotted = _external_name(model.resolver, entry["module"], entry["qualname"])
-            if dotted is not None:
-                externals.add(dotted)
+        elif "external" in entry:
+            externals.add(entry["external"])
     return Gaps(tuple(includes), tuple(sorted(bindings)), tuple(sorted(externals)))
-
-
-def _external_name(resolver: Any, module: str, text: str) -> str | None:
-    """The dotted name ``text`` (as written in ``module``) resolves to, when it is
-    one name outside the package."""
-    try:
-        node = ast.parse(text, mode="eval").body
-    except SyntaxError:
-        return None
-    if not isinstance(node, (ast.Name, ast.Attribute)):
-        return None
-    targets = resolver.resolve_expr(Located(module, node))
-    if len(targets) == 1 and isinstance(targets[0], External):
-        return targets[0].dotted
-    return None
 
 
 def _request(backend: BackendConfig, gaps: Gaps) -> dict[str, Any]:
@@ -122,43 +115,54 @@ def _request(backend: BackendConfig, gaps: Gaps) -> dict[str, Any]:
     }
 
 
-def _assemble(backend: BackendConfig, gaps: Gaps, result: Mapping[str, Any]) -> tuple[LibraryCapture, list[str]]:
-    """The capture for what the oracle recorded, and a note for each gap it could not fill."""
-    includes: list[Any] = []
-    dependencies: list[Any] = []
-    callables: dict[str, Any] = {}
-    notes: list[str] = []
-    for gap, record in zip(gaps.includes, result["includes"], strict=True):
-        label = f"include_router at {gap.file}:{gap.site.line} ({gap.site.router})"
-        if "reason" in record:
-            notes.append(f"{label}: {record['reason']}")
-            continue
-        callables.update(record["callables"])
-        includes.append(
-            {"file": gap.file, "router": gap.site.router, "occurrence": gap.site.occurrence, "routes": record["routes"]}
+@dataclass
+class _Recorded:
+    """What the oracle recorded over one or more runs, and a note for each gap it could not fill."""
+
+    includes: list[Any] = field(default_factory=list)
+    dependencies: list[Any] = field(default_factory=list)
+    callables: dict[str, Any] = field(default_factory=dict)
+    versions: dict[str, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+
+    def add(self, gaps: Gaps, result: Mapping[str, Any]) -> None:
+        for gap, record in zip(gaps.includes, result["includes"], strict=True):
+            label = f"include_router at {gap.file}:{gap.site.line} ({gap.site.router})"
+            if "reason" in record:
+                self.notes.append(f"{label}: {record['reason']}")
+                continue
+            self.callables.update(record["callables"])
+            self.includes.append(
+                {
+                    "file": gap.file,
+                    "router": gap.site.router,
+                    "occurrence": gap.site.occurrence,
+                    "routes": record["routes"],
+                }
+            )
+        requested = [("binding", name) for name in gaps.bindings] + [("external", name) for name in gaps.externals]
+        for (key, name), record in zip(requested, result["dependencies"], strict=True):
+            if "reason" in record:
+                self.notes.append(f"dependency {name}: {record['reason']}")
+                continue
+            self.callables.update(record["callables"])
+            self.dependencies.append({key: name, "id": record["id"], "sub": record["sub"]})
+        self.versions.update(result["versions"])
+
+    def capture(self, backend: BackendConfig) -> LibraryCapture:
+        used = {"fastapi", *(location["dist"] for location in self.callables.values())}
+        for include in self.includes:
+            used.update(route["location"]["dist"] for route in include["routes"])
+        return library_capture.from_json(
+            {
+                "format": library_capture.FORMAT,
+                "app": backend.app,
+                "distributions": {name: self.versions[name] for name in sorted(used)},
+                "includes": self.includes,
+                "dependencies": self.dependencies,
+                "callables": self.callables,
+            }
         )
-    requested = [("binding", name) for name in gaps.bindings] + [("external", name) for name in gaps.externals]
-    for (key, name), record in zip(requested, result["dependencies"], strict=True):
-        if "reason" in record:
-            notes.append(f"dependency {name}: {record['reason']}")
-            continue
-        callables.update(record["callables"])
-        dependencies.append({key: name, "id": record["id"], "sub": record["sub"]})
-    versions = result["versions"]
-    used = {"fastapi", *(location["dist"] for location in callables.values())}
-    for include in includes:
-        used.update(route["location"]["dist"] for route in include["routes"])
-    capture = library_capture.from_json(
-        {
-            "format": library_capture.FORMAT,
-            "app": backend.app,
-            "distributions": {name: versions[name] for name in sorted(used)},
-            "includes": includes,
-            "dependencies": dependencies,
-            "callables": callables,
-        }
-    )
-    return capture, notes
 
 
 def check_versions(capture: LibraryCapture, repo_root: Path, backend: BackendConfig) -> None:
@@ -184,11 +188,15 @@ def check_versions(capture: LibraryCapture, repo_root: Path, backend: BackendCon
         )
 
 
+# A dependency behind a router the capture fills shows only once that router is applied,
+# so the gaps are read again until none is new; this bounds a chain of such routers.
+MAX_PASSES = 4
+
+
 def make_capture(
     repo_root: Path, backend: BackendConfig, capture_config: CaptureConfig, python: Path
 ) -> tuple[LibraryCapture, list[str]]:
     """Runs the app under ``python`` and returns the capture of the gaps found statically, with notes on the unfilled ones."""
-    gaps = static_gaps(repo_root, backend)
     arguments = [
         "--import-root",
         str(repo_root / backend.root),
@@ -197,13 +205,28 @@ def make_capture(
         "--app",
         backend.app,
     ]
+    recorded = _Recorded()
+    gaps = static_gaps(repo_root, backend)
+    asked: set[tuple[str, str]] = set()
     try:
-        result = runner.run_oracle(python, arguments, dict(capture_config.env), request=_request(backend, gaps))
-        capture, notes = _assemble(backend, gaps, result)
+        for _ in range(MAX_PASSES):
+            result = runner.run_oracle(python, arguments, dict(capture_config.env), request=_request(backend, gaps))
+            recorded.add(gaps, result)
+            asked |= {("binding", name) for name in gaps.bindings} | {("external", name) for name in gaps.externals}
+            view = LibraryView(capture_config.file, recorded.capture(backend), ())
+            later = static_gaps(repo_root, backend, view)
+            gaps = Gaps(
+                (),
+                tuple(name for name in later.bindings if ("binding", name) not in asked),
+                tuple(name for name in later.externals if ("external", name) not in asked),
+            )
+            if not gaps.bindings and not gaps.externals:
+                break
+        capture = recorded.capture(backend)
     except (runner.OracleRunError, CaptureFormatError) as exc:
         raise CaptureError(str(exc)) from exc
     check_versions(capture, repo_root, backend)
-    return capture, notes
+    return capture, recorded.notes
 
 
 def compare(path: Path, capture: LibraryCapture) -> list[str]:

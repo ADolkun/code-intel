@@ -509,8 +509,9 @@ def outcomes_of(repo: Path) -> dict[str, verify.Outcome]:
 def test_a_clean_checkout_passes_every_check(repo: Path) -> None:
     results = outcomes_of(repo)
     assert {name: (o.status, o.rows) for name, o in results.items()} == {
-        check.name: ("pass", ()) for check in verify.CHECKS
+        check.name: (("skipped", ()) if check.needs_capture else ("pass", ())) for check in verify.CHECKS
     }
+    assert results["library-capture"].detail == "the config has no [backend.capture] table"
     assert results["handler-locations"].detail == "2 routes"
     assert results["call-sites"].detail == "1 frontend calls"
     assert results["python-index"].detail == "3 module-level definitions"
@@ -519,7 +520,7 @@ def test_a_clean_checkout_passes_every_check(repo: Path) -> None:
 def test_a_stale_doc_reference_does_not_fail_verify_but_a_lost_file_does(repo: Path) -> None:
     (repo / "docs" / "guide.md").write_text(GUIDE + "\nGone: `backend/service_backend/gone.py`.\n", encoding="utf-8")
     git(repo, "add", "-A")
-    assert {o.status for o in outcomes_of(repo).values()} == {"pass"}
+    assert {o.status for o in outcomes_of(repo).values()} == {"pass", "skipped"}
     (repo / "backend" / "service_backend" / "broken.py").write_text("def (:\n", encoding="utf-8")
     git(repo, "add", "-A")
     results = outcomes_of(repo)
@@ -551,7 +552,7 @@ def test_the_command_prints_one_line_per_check_and_exits_0(repo: Path) -> None:
     assert code == 0
     assert (
         text.splitlines()[-1]
-        == f"verify: {len(verify.CHECKS)} checks, {len(verify.CHECKS)} passed, 0 failed, 0 could not run, 0 skipped"
+        == f"verify: {len(verify.CHECKS)} checks, {len(verify.CHECKS) - 1} passed, 0 failed, 0 could not run, 1 skipped"
     )
     code, text = run_cli(repo, "handler-locations", "call-sites")
     assert code == 0 and text.count("PASS") == 2

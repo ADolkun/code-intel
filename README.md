@@ -8,7 +8,8 @@ It answers the questions general code search cannot:
 - which backend handler a frontend API call hits, and which calls a handler has;
 - where a React component is rendered;
 - which definition a same-name symbol means;
-- which docs describe a file, route or symbol, and whether they still match the code.
+- which docs describe a file, route or symbol, and whether they still match the code;
+- which routes and dependencies installed libraries add (a fastapi-users router, `current_user(...)`), through [a committed capture](#library-routers-and-dependencies) of the running app.
 
 The same analyses check the docs against the code in CI (`code-intel doc-check`), check themselves against the source and against the running app (`verify`, `runtime-check`), and report their own counts (`summary`).
 
@@ -35,7 +36,7 @@ A helper that crashes while Node and TypeScript are present is reported the same
 A repository pins the tool by commit in one file, `.code-intel/requirements.txt`:
 
 ```
-code-intel @ git+https://github.com/ADolkun/code-intel@<full commit sha>  # v0.1.0
+code-intel @ git+https://github.com/ADolkun/code-intel@<full commit sha>  # v0.2.0
 ```
 
 A full SHA is immutable, so `uv` serves later launches from its cache without fetching. Every caller (the MCP client, CI, a git hook) uses the same launcher from the repository root:
@@ -99,10 +100,10 @@ Every command takes `--repo-root PATH` (default: the git work tree containing th
 | `mcp` | Serve the [tools](#tools) over stdio. | |
 | `setup` | Install the [TypeScript](#install-and-launch) the frontend analysis needs. | 0, 1 failed |
 | `doc-check [--json]` | Check the [docs](#docs-check) and the agent instruction files against the code. | 0 no findings, 1 findings, 2 could not run or incomplete |
-| `verify [CHECK …]` | Check the analyzers against each other and against the source; see [Verification](#verification). | 0 passed, 1 a check failed, 2 a check could not run |
+| `verify [CHECK …]` | Check the analyzers against each other and against the source; see [Verification](#verification). Its `library-capture` check starts the app. | 0 passed, 1 a check failed, 2 a check could not run |
 | `summary` | Markdown counts and coverage of the analysis, one table per analyzer. | 0, 1 a section failed |
 | `runtime-check [--python PYTHON] [--set K=V …] [--env-file FILE]` | Compare the static route analysis with the running app. | 0, 1 unexplained difference, 2 could not run |
-| `capture [--check] [--python PYTHON]` | Record what installed code contributes to the app (routers library factories build, library dependency trees) in `.code-intel/library-capture.json`; `--check` compares without writing. Needs `[backend.capture]`. | 0, 1 `--check` found a difference, 2 could not run or the environment differs from the lock |
+| `capture [--check] [--python PYTHON]` | Record what installed code contributes to the app (routers library factories build, library dependency trees) in `.code-intel/library-capture.json`; `--check` compares without writing; see [Library routers and dependencies](#library-routers-and-dependencies). Needs `[backend.capture]`. | 0, 1 `--check` found a difference, 2 could not run or the environment differs from the lock |
 | `dump di [--json]` | Dependency-injection map: every route with its dependencies in FastAPI order. | 0, 1 could not run, 2 incomplete |
 | `dump routes [--json] [--unmatched]` | Backend routes matched with frontend calls. | 0, 1 could not run, 2 incomplete |
 | `dump jsx (COMPONENT \| --all) [--root DIR] [--include-tests] [--no-self-close] [--json]` | JSX usage of a component, or every element. | 0, 2 frontend unavailable |
@@ -139,6 +140,10 @@ package = "app"
 app = "app.main:app"                   # module:attribute, or module:factory() for an app factory
 lock = "backend/uv.lock"               # the locked FastAPI decides the include model
 python_version_file = "backend/.python-version"
+
+[backend.capture]                      # optional: the library capture and runtime-check's defaults
+python = "backend/.venv/bin/python"    # an interpreter with the app's dependencies installed
+env = { FEATURE_FLAG = "true" }        # synthetic values only: the app is imported with nothing else
 
 [frontend]
 root = "frontend"
@@ -205,6 +210,16 @@ instruction_map = { file = "AGENTS.md", heading = "Scoped instruction map" }
 | `app` | yes | The FastAPI app as `module:attribute`, or `module:factory()` for an app factory. A factory validates but is not analysed yet: it is reported as `unresolved_app`, and `runtime-check` can still import it. |
 | `lock` | no | A `uv.lock` (or any file in that format) whose locked `fastapi` version picks the [include model](#how-the-backend-analysis-works). Without it the model is `unknown`. |
 | `python_version_file` | no | A `.python-version` file. Backend analysis is refused (`runtime_incompatible`) on an interpreter older than the version it names. |
+
+### `[backend.capture]`
+
+Optional. Its presence turns on the [library capture](#library-routers-and-dependencies): the analysis applies the capture file, and `capture`, `verify`'s `library-capture` check and `runtime-check` can start the app.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `python` | yes | An interpreter with the app's dependencies installed (a virtual environment's, for example). Repository-relative; it need not exist for `config-check`. |
+| `file` | no | The capture file. Default `.code-intel/library-capture.json`. |
+| `env` | no | Environment variables the import sees besides `PATH`, `HOME`, `TMPDIR`, `LANG` and `LC_ALL`. Synthetic values only: the file is committed and shown in messages. |
 
 ### `[frontend]`
 
@@ -304,6 +319,8 @@ DELETE /api/items/{item_id}  →  delete_item()  [backend/shop/main.py:20]
 
 `di_reverse` matches `dep_function` against, in order, an exact `module:qualname` id, an exact short name (for a factory call written `name(arguments)`, the name: `require_role("admin")` matches `require_role`, and arguments are not filtered), and an exact guard alias. Text with a `(` that is not a whole `name(arguments)` call (`get_db(x`) is an `invalid_argument`. When `limit` cuts a group, the note names the limit that shows every group, because the limit is shared. When several definitions share the name, the reply has one group per definition, each with its own file, line and routes; nothing is merged. A route that gets the dependency in several ways is labelled with the first that applies, in the order `direct`, `route decorator`, `router`, `app`, and otherwise `transitive`.
 
+With a [library capture](#library-routers-and-dependencies), a dependency of installed code is a target of kind `library`, shown with its distribution and the definition (`OAuth2PasswordBearer  [fastapi 0.162.0 fastapi/security/oauth2.py:536]`), and an external binding the capture filled shows the expression it is bound to and its captured sub-dependencies (`current_active_user (external) … = fastapi_users.current_user(active=True)`). The route a library defines shows its handler as `me()  [backend/app/main.py:170 · fastapi-users 15.0.5 fastapi_users/router/users.py:46]`: the repository `include_router` that mounts it, then where the library defines the handler.
+
 ```
 get_session  [backend/shop/deps.py:4]  shop.deps:get_session
   Kind: function
@@ -319,6 +336,8 @@ get_session  [backend/shop/deps.py:4]  shop.deps:get_session
 ### `route_match` / `route_unmatched`
 
 The summary reports `Backend routes`, `Frontend calls` (non-test, with the number of test-file calls skipped), `Matched routes` (backend routes with at least one caller), `Matched calls` (frontend calls with a backend route), `Match rows` (route/call pairs) and `Coverage` (matched routes over backend routes; `n/a` while the analysis is incomplete). A `possible` match is marked `(possible: <reason>)` in text; see [Matching](#matching).
+
+**Library routes** (routes installed code adds, known through a [library capture](#library-routers-and-dependencies)) match calls like any route, but are kept out of `backend_routes`, `backend_only` and coverage: the repository neither owns them nor decides whether they are called. The summary counts them apart (`Library routes: 8 (3 matched)`; `library_routes`, `matched_library_routes`) and the JSON lists them under `library_routes`; every route row has `library`, `null` or `{dist, version, file, line}`. For such a row `file` and `line` are the repository's `include_router` call.
 
 `path` matching for these lookups:
 
@@ -346,7 +365,7 @@ When nothing matches but the handler, function or path exists, the reply falls b
 | Calls misread | frontend `decode_failed`, `typescript_syntax_error` | every match and orphan figure, either way |
 | Routes missed | backend `list_failed`, `stat_failed`, `read_failed`, `decode_failed`, `parse_failed`, `analysis_failed`, `unresolved_app`, `unresolved_include`, `unresolved_route_router`, `opaque_router_call`, `asgi_mount`, `unsupported_route_registration`, `unsupported_router_argument`, `router_include_cycle` | routes, matched calls and backend-only up, frontend-only down; matched routes, match rows and coverage either way |
 | Routes misplaced | `unresolved_route_path`, `unresolved_route_prefix`, `unresolved_include_prefix`, `unresolved_mount_path` (the route is kept under an `<unresolved: …>` path that matches no call) | matched calls up, frontend-only down; the rest either way |
-| Routes changed | `opaque_router_change`, `custom_router_class`, `recursive_router_call`, `router_call_limit`, `unimported_router_change` | every route-based figure, either way |
+| Routes changed | `opaque_router_change`, `custom_router_class`, `recursive_router_call`, `router_call_limit`, `unimported_router_change`, `library_capture_stale` | every route-based figure, either way |
 | Calls caught by a mount | every routes-missed finding but `unresolved_route_router` and `router_include_cycle`, `unresolved_mount_path`, and `mount_shadows_route` | matches and coverage down, backend-only and frontend-only up: a mount takes every request under its path |
 
 Not counted: `unresolved_http_method` (an unknown method matches any route), `unresolved_prop_value` (kept as a possible variant), routes judged not live (`unmounted_router`, `deferred_router_mount`, `deferred_route_registration`), routes kept although they may not run (`conditional_router_mount`, `conditional_import`), `unresolved_route_methods` (ANY), `unresolved_redirect_slashes` (True) and DI-only findings.
@@ -441,7 +460,7 @@ Without the frontend toolchain no frontend definitions are indexed, so a `symbol
 
 ### `status`
 
-Reports the FastAPI version `backend.lock` locks and the include model it gives (`fastapi`: `fastapi_version`, `include_model`, `include_model_reason`, `source`, `summary`), `complete`, per-analyzer state (`not_run`, `complete`, `incomplete` or `failed`, with the failed step and error), cache freshness (`backend_model`, `di`, `routes`), the toolchain probe and the deduplicated diagnostics and limitations of the loaded analyses. A cache whose sources were modified within the last two seconds stays loaded but is not `fresh` until the window has passed (see [Freshness](#freshness-and-the-restart-rule)).
+Reports the FastAPI version `backend.lock` locks and the include model it gives (`fastapi`: `fastapi_version`, `include_model`, `include_model_reason`, `source`, `summary`), `complete`, per-analyzer state (`not_run`, `complete`, `incomplete` or `failed`, with the failed step and error), cache freshness (`backend_model`, `di`, `routes`), the toolchain probe, the deduplicated diagnostics and limitations of the loaded analyses and, with `[backend.capture]`, the `library_capture` block (the file, its app and distributions, how many includes, routes and dependencies it holds and, once DI is built, how many were applied, and the stale findings; the status never builds anything or starts the app). A cache whose sources were modified within the last two seconds stays loaded but is not `fresh` until the window has passed (see [Freshness](#freshness-and-the-restart-rule)).
 
 The toolchain state is `ok`, `unavailable` (the probe found a problem) or `helper_failed` (the probe is fine, but the last TypeScript helper run in some mode crashed). `helper_failures` maps each helper mode whose last run crashed (`facts`, `routes`) to its problem; an entry clears when a run in that mode succeeds. The probe itself never runs the helper:
 
@@ -500,11 +519,11 @@ Rows use `file` and `line` (frontend rows add `def_line`); route matches nest `b
 | --- | --- |
 | `unmounted_router` | a router with registrations is not reachable from the app; its routes are listed under `unmounted_routes`, not as live routes |
 | `unimported_router_change` | a module that nothing imports when the app is imported changes another module's router; the change is not counted |
-| `unresolved_include` | an `include_router` child could not be resolved to a router (for example a router built by an installed library's factory function) |
+| `unresolved_include` | an `include_router` child could not be resolved to a router (for example a router built by an installed library's factory function that the [library capture](#library-routers-and-dependencies) has no entry for; the message then says so) |
 | `unresolved_include_prefix` | an `include_router` `prefix=` could not be evaluated |
 | `unresolved_dependencies` | a `dependencies=` value or element could not be evaluated to `Depends`/`Security` calls |
 | `unresolved_route_path` | a route path could not be evaluated; the route is reported as `<unresolved: …>` and never matches |
-| `unresolved_dependency` | a `Depends`/`Security` target could not be resolved to a callable, or FastAPI would reject the declaration; also the label of an `external` dependency, whose own sub-dependencies are unknown |
+| `unresolved_dependency` | a `Depends`/`Security` target could not be resolved to a callable, or FastAPI would reject the declaration; also the label of an `external` dependency the library capture has no entry for, whose own sub-dependencies are unknown |
 | `opaque_router_call` | a router or app is passed to code that may add routes or dependencies the analyzer cannot see |
 | `opaque_router_change` | a router's routes, prefix or dependencies are changed in place, or its route list is handed on, so routes the analysis counts may be moved or removed |
 | `asgi_mount` | `mount()` of a non-FastAPI ASGI app; its routes are not analyzed |
@@ -524,6 +543,7 @@ Rows use `file` and `line` (frontend rows add `def_line`); route matches nest `b
 | `mount_shadows_route` | a route registered after a mount that the mount's path overlaps is not reached for those requests (Starlette dispatches to the mount first); matching still pairs calls with it |
 | `unresolved_route_methods` | a `methods=` value the analysis cannot evaluate; the route is reported as `ANY`. `methods=None` is FastAPI's default `GET` and is not reported |
 | `unresolved_redirect_slashes` | an app's `redirect_slashes=` could not be evaluated; it is reported as `True` |
+| `library_capture_stale` | the library capture does not match the code: a captured distribution's version differs from the lock (the capture is still applied), or an entry matches nothing the analysis finds, names a callable the package lacks, or is for another app (not applied); the message names it and says to run `code-intel capture` |
 | `opaque_decorator` | a package decorator returns a wrapper that does not copy the function's metadata (`functools.wraps` or `functools.update_wrapper`), so FastAPI reads the wrapper's signature, not the function's |
 | `shared_dependency_id` | callables FastAPI reads with different parameters share one dependency id (a `functools.partial` and its function, a factory and the closure it returns, two definitions of one name). The id's `dependency_functions` entry lists one form's sub-dependencies; the message names the id and both lists |
 | `unresolved_http_method` | a frontend call's HTTP method could not be evaluated; it is reported as `UNKNOWN` |
@@ -559,7 +579,7 @@ Under `copy`, a registration in a function that can only run after the import, o
 
 - A router or app passed to code outside the package (`add_pagination(app)`) is an `opaque_router_call`, because that code may add routes or dependencies. A router changed in place (`app.router.routes.clear()`, `app.dependencies = []`) or whose route list is bound to a name or passed on is an `opaque_router_change`.
 - **App factories.** `app = "module:factory()"` validates but is not analysed yet: it is an `unresolved_app` diagnostic. [`runtime-check`](#verification) can still import such an app.
-- **Library routers.** A router built by an installed library's factory function (`include_router(auth_lib.get_users_router())`) is not followed yet: it is an `unresolved_include` limitation, and its routes are missing from the route tools and the docs check. A doc naming one of them needs a `[[docs.ignore]]` entry with a reason. Likewise a `Depends(name)` that resolves to a module-level name bound to a call result (`current_user = auth_lib.current_user(active=True)`) is an `external` dependency: it is identified by the defining binding (`module:current_user`) with the bound expression shown, so every importing module shares one id, and it is an `unresolved_dependency` limitation because its own sub-dependencies are unknown.
+- **Library routers and dependencies.** Installed code is not read. Without a [library capture](#library-routers-and-dependencies), a router built by an installed library's factory (`include_router(auth_lib.get_users_router())`) is an `unresolved_include` limitation and its routes are missing from the route tools and the docs check, and a `Depends(name)` that resolves to a module-level name bound to a call result (`current_user = auth_lib.current_user(active=True)`) is an `external` dependency, identified by the defining binding (`module:current_user`) with the bound expression shown, and an `unresolved_dependency` limitation because its sub-dependencies are unknown. The capture fills both.
 - A name bound by a `match` capture pattern is not evaluated, so an include of it is `unresolved_include`; so is an include of a loop variable.
 - A `global` rebinding of a router name inside any function makes uses of that module-level name ambiguous, so the registrations or includes that read it are reported.
 - A route registered under a module-level branch is listed with `mount: "conditional"` and no limitation of its own.
@@ -576,6 +596,41 @@ A target the analysis cannot see into is an `unresolved_dependency` limitation i
 **Identity and display.** A dependency is identified by `module:qualname` (a lambda as `module:<lambda>@L<line>`) and displayed by its short name. Classes contribute their `__init__` parameters and instances (`Depends(RoleChecker("admin"))`, or a module-level `checker = RoleChecker(...)`) their `__call__` parameters, so an instance is its own target, `module:RoleChecker()`, next to the class `module:RoleChecker`. A plain method through an instance (`Depends(service.get_items)`) is bound, so FastAPI skips its first parameter, and is `module:Service().get_items`; through the class it is `module:Service.get_items`. A factory call (`Depends(require_role("admin"))`) is identified by the factory and displayed with its arguments; its sub-dependencies come only from the callable it returns. A module-level guard alias (`admin_only = require_role("admin")`) resolves to the factory and is shown as `require_role(…) [as admin_only]`.
 
 Security scopes, `use_cache`, the `scope=` of `Depends` and `app.dependency_overrides` are ignored: none of them changes which dependencies a route declares. A class whose `__init__` comes from a base outside the package (a pydantic model, for one) contributes no sub-dependencies, and no limitation says so. Dataclass dependencies are supported (their fields are the parameters); any other class decorator is reported as `unresolved_dependency`. A `functools.partial` is identified as its function, with the parameters FastAPI reads from it. A package decorator is transparent when it returns the function itself or a wrapper that copies the function's metadata with `functools.wraps` or `functools.update_wrapper`; any other package decorator is reported as `opaque_decorator`.
+
+### Library routers and dependencies
+
+Static analysis reads the repository, never installed code. Two things in installed code decide what a route is and cannot be read from its source: a router a library builds when it runs (`app.include_router(fastapi_users.get_users_router(...))`), and the dependencies of a callable whose signature the library sets at runtime (`current_user = fastapi_users.current_user(active=True)`, then `Depends(current_user)`). `code-intel capture` imports the app once, under the interpreter of `[backend.capture]`, and records only those facts in `.code-intel/library-capture.json`. The analysis applies that file without running anything, so the MCP server, `doc-check` and every other command give the same answer on every machine.
+
+**Workflow.**
+
+1. Add `[backend.capture]` to the config. Install the backend's locked dependencies (`uv sync --locked` in the backend) so the interpreter matches the lock.
+2. Run `code-intel capture`. It finds the gaps statically (each `unresolved_include`, each `external` dependency binding, each installed callable the package uses as a dependency), imports the app, records what the running app shows at exactly those places, and writes the file. A second run writes the same bytes. A gap it cannot fill stays a gap, and its reason is printed (`capture: not captured, include_router at backend/app/main.py:28 (…): pkg.main:own_handler is defined in the backend package`).
+3. Commit the file. `capture --check` (and the `library-capture` check of `verify`) fails when the file differs from what the app builds now; run it in CI with the backend's locked environment. After a lock bump of FastAPI or of a captured library, a change to an `include_router` of installed code or to a library dependency, or when `library_capture_stale` appears, run `capture` again; two branches that both recapture conflict, and running it again resolves that.
+
+`capture` refuses (exit 2, nothing written) when an installed version of `fastapi` or of any captured distribution differs from the lock, naming both versions and `uv sync --locked`, because the file would describe code the lock does not install.
+
+**When code runs.** Repository code runs in exactly three commands: `capture`, the `library-capture` check of `verify`, and `runtime-check`. Each starts the configured interpreter on the packaged oracle in a subprocess, from an empty temporary directory, with a 300 s timeout and a clean environment: `PATH`, `HOME`, `TMPDIR`, `LANG` and `LC_ALL` when set, plus `[backend.capture] env`. `status`, `summary`, `dump`, `doc-check`, `config-check` and every MCP tool never start it.
+
+**What the file holds** (`format: 1`):
+
+- `includes`: for each `include_router` call whose child comes wholly from installed code, the child's routes (method, path relative to the child, handler id and definition, route-level dependencies and their `via`, parameter dependencies), keyed by the call's file, the text of its router argument (`ast.unparse`, so reformatting does not matter) and its occurrence among the calls of that file with the same text;
+- `dependencies`: the dependency tree of each external binding (`binding`: `module:name`) and of each installed callable named in the package (`external`: a dotted name). A node with `sub` is a callable of installed code and the capture owns its subtree; a node without it is a callable of the backend package, which the analysis reads from source on every call;
+- `callables`: where each installed callable is defined (distribution, file inside it, line), and `distributions` the versions installed.
+
+Everything the repository owns is still read from source on every call: an include's prefix and dependencies, the app's dependencies, dispatch order and the sub-dependencies of the repository's own callables. A repository edit therefore rarely stales the capture.
+
+**What it lifts.** A captured router is a router node mounted exactly like a repository router: it takes the include's own prefix and dependencies and its place in dispatch order, and its routes are live routes (`library` set, `file:line` the include) in DI, routes, docs and `runtime-check`. No `unresolved_include` is reported for it. A captured binding keeps its id and the expression it is bound to, gains the captured sub-dependencies and the `runtime_id` FastAPI reports for it, and is no longer an `unresolved_dependency`; an installed callable named in the package becomes a `library` target. `di_reverse` therefore reaches every route a library dependency guards, where it used to stop short by the routes behind `current_user`.
+
+**Freshness.** The capture file is part of the backend fingerprint, so editing or regenerating it rebuilds DI, routes and docs. On every build the analysis checks, without importing anything:
+
+- each captured distribution's version against the lock: on a difference the capture is still applied and a `library_capture_stale` limitation names the distribution, both versions and `code-intel capture`;
+- an `includes` entry that matches no unresolved `include_router` call, an entry for another `app`, and an entry that names a callable of the package the analysis cannot find: not applied, and reported as `library_capture_stale`;
+- a `dependencies` entry that no dependency of the package matches: reported the same way;
+- a gap with no entry while `[backend.capture]` is configured keeps its own limitation, which adds `not in .code-intel/library-capture.json; run code-intel capture`.
+
+A malformed file is a `parse_failed` diagnostic on it. What static checks cannot see is a value passed to a library factory changing in another module; the `library-capture` check catches it.
+
+**Limits.** A router that is not wholly from installed code (a repository handler passed into the factory), or whose include did not run once while the app was imported, is not captured. A package callable that returns a closure it defines is identified by FastAPI as its factory, so its parameters cannot be told from the closure's and the entry is not applied. A library that adds routes to a router it is handed (an app-level `get_app()`) is not captured. Library routes are never reported as backend-only or counted in coverage.
 
 ### How the frontend analysis works
 
@@ -695,7 +750,7 @@ Two file-level findings complete the list: `orphaned doc` for a doc matching the
 
 **Pages.** Without Node or TypeScript, `react-router` pages are unavailable and a bare path that only a page could satisfy is `not_checked` (`frontend_pages_unavailable`); install the toolchain in the job (`code-intel setup`) to check them.
 
-**Library routes.** A route added by code the analysis cannot see into (see [Known gaps](#how-the-backend-analysis-works)) is missing from the analyzed list, so a doc naming it fails with `route not found`, with the limitation printed below. Giving every such doc an ignore entry is the intended fix, since treating the limitation as "not confirmed" would leave the route check unable to fail.
+**Library routes.** A route installed code adds is live once the [library capture](#library-routers-and-dependencies) has it, so a doc naming it resolves like any route, and a lookup of the route names the repository `include_router` that mounts it and where the library defines the handler. Without a capture entry it is missing from the analyzed list, so a doc naming it fails with `route not found`, with the limitation printed below. Giving every such doc an ignore entry is the intended fix, since treating the limitation as "not confirmed" would leave the route check unable to fail.
 
 **Ignore entries.** An ignore entry suppresses the failing references of one kind in one file whose text, as written, equals `text`, and needs a `reason`. A link's text is its target percent-decoded, and the entry may give it either way. An entry that suppresses nothing is itself a finding (`unused ignore entry`), so entries go away with the drift they covered. An entry for a reference that cannot be checked locally still counts as used.
 
@@ -731,7 +786,7 @@ With an `[agents]` table the docs check also validates the instruction files cod
 Every cache is keyed by a fingerprint of exactly the files it reads (and of the config file), so any edit, addition or deletion is picked up by the next call; `refresh` is only for troubleshooting.
 
 - **TypeScript facts** are cached per file by stamp. The cache as a whole is keyed by the Node version, path and binary stamp, the TypeScript directory and version, the stamp of the compiler file the helper loads, and a digest of the helper scripts, so upgrading TypeScript or Node, or reinstalling or patching the same version, drops it automatically.
-- **The backend model** is keyed by the stamps of every `.py` file under the backend package, the Python version file and the lock; a rebuild re-parses and re-analyzes only the changed modules, then reassembles the graph. DI is built from the model.
+- **The backend model** is keyed by the stamps of every `.py` file under the backend package, the Python version file, the lock and the library capture file; a rebuild re-parses and re-analyzes only the changed modules, then reassembles the graph. DI is built from the model.
 - **The frontend routes scan** is keyed by the stamps of every frontend source file plus the tsconfig and the lockfile, and the toolchain stamp. A missing frontend or an unusable toolchain is cached like a scan until that key changes; a crashed helper is not cached as an answer, so the next routes call runs it again.
 - **Routes** are keyed by the backend fingerprint and the scan's key. After a backend-only edit the cached scan is matched against the rebuilt backend model, so the helper does not run again.
 - **Stamps.** A file's stamp is its modification time, size, inode and status-change time (ctime). As with git's `core.trustctime`, ctime is what catches a same-size rewrite whose modification time was set back: the kernel updates ctime on every content or metadata change, and nothing can set it back. On Windows ctime is the creation time, so there only the other three fields count.
@@ -784,17 +839,18 @@ Three commands check the analyses on the repository they run in. They assert rel
 
 ### `verify`
 
-Runs fifteen checks, one line each (`PASS`, `FAIL`, `ERROR` for a check that could not run, `SKIPPED`), and lists up to 20 offending rows under a failing one. Name checks on the command line to run only those.
+Runs sixteen checks, one line each (`PASS`, `FAIL`, `ERROR` for a check that could not run, `SKIPPED`), and lists up to 20 offending rows under a failing one. Name checks on the command line to run only those.
 
 | Check | The relation |
 | --- | --- |
 | `backend-content` | The backend model lost no content, and every limitation kind it reported is registered. |
-| `handler-locations` | Every live route's `file:line` holds its handler's `def` (a lambda endpoint's line holds the `lambda` its id names), and its `module:qualname` id resolves to that definition. |
+| `handler-locations` | Every live route's `file:line` holds its handler's `def` (a lambda endpoint's line holds the `lambda` its id names), and its `module:qualname` id resolves to that definition. For a route installed code defines, the line holds the `include_router` call that mounts it. |
 | `python-index` | Every module-level Python function and class is in the symbol index. |
 | `routes-content` | The routes scan lost no content. |
-| `di-matches-routes` | The dependency map and the routes scan list the same routes. |
+| `di-matches-routes` | The dependency map and the routes scan (repository and library routes) list the same routes. |
 | `call-sites` | Every frontend call row points at a call of its kind: the callee is where `callee_line:callee_column` says (judged by position, so an aliased import, a callee on the next line and a concatenated URL pass), and a WebSocket row starts a URL expression. |
 | `matched-backends-are-live` | Every matched backend row is a live route. |
+| `library-capture` | The capture file equals what `capture` records now. It starts the app, like `capture` and `runtime-check`, and is `SKIPPED` without `[backend.capture]`; it is `ERROR` (with the fix) when the interpreter is missing or the app does not import. |
 | `jsx-oracle` | The helper's JSX elements equal an independent walk of the TypeScript AST (`oracles/jsx_oracle.cjs`) in file, tag, line, column, kind, parent and test flag. |
 | `declaration-oracle` | The helper's declarations equal an independent walk (`oracles/decl_oracle.cjs`) in name, line, column, kind, end line, scope, container, exported and test flag. |
 | `docs-content` | The docs report lost no content. |
@@ -804,7 +860,7 @@ Runs fifteen checks, one line each (`PASS`, `FAIL`, `ERROR` for a check that cou
 | `docs-code-words` | The symbol check's two sources agree: a Python definition the index holds is also an identifier word of its file. |
 | `docs-lookups` | `doc_refs` finds a documented route, a documented symbol and a doc's inbound links the way the report holds them. |
 
-The two oracle checks compare only git-visible files. The `docs-*` checks are skipped when the config has no `[docs]` table. Checks that need the frontend toolchain report `ERROR` with the `setup` fix when it is missing. Exit code: 0 when every check passed or was skipped, 1 when a check failed, 2 when a check could not run and none failed.
+The two oracle checks compare only git-visible files. The `docs-*` checks are skipped when the config has no `[docs]` table and `library-capture` when it has no `[backend.capture]` table. Checks that need the frontend toolchain report `ERROR` with the `setup` fix when it is missing. Exit code: 0 when every check passed or was skipped, 1 when a check failed, 2 when a check could not run and none failed.
 
 ### `summary`
 
@@ -819,14 +875,16 @@ code-intel runtime-check --python backend/.venv/bin/python \
   --set FEATURE_FLAG=true --env-file .env.test
 ```
 
-`--python` defaults to `python` in `[backend.capture]`; without either the check cannot run. A relative `--python` is taken from the current directory, then the repository root; it is not resolved through links, so a virtual environment's interpreter is found. `--set KEY=VALUE` (repeatable) and `--env-file FILE` (`KEY=VALUE` lines; an existing variable wins) add to the `env` of `[backend.capture]`; together they set what the app needs to import and mount its routers; give the flags and synthetic secrets the routes depend on, never real secrets. The app is imported from an empty temporary working directory with a clean environment: only `PATH`, `HOME`, `TMPDIR`, `LANG` and `LC_ALL` (when set) are inherited, so a local `.env`, a stray file or an ambient variable cannot change the routes. Version 0.1 inherited the whole environment.
+`--python` defaults to `python` in `[backend.capture]`; without either the check cannot run. A relative `--python` is taken from the current directory, then the repository root; it is not resolved through links, so a virtual environment's interpreter is found. `--set KEY=VALUE` (repeatable) and `--env-file FILE` (`KEY=VALUE` lines; an existing variable wins) add to the `env` of `[backend.capture]`; together they set what the app needs to import and mount its routers; give the flags and synthetic secrets the routes depend on, never real secrets. The app is imported from an empty temporary working directory with a clean environment: only `PATH`, `HOME`, `TMPDIR`, `LANG` and `LC_ALL` (when set) are inherited, so a local `.env`, a stray file or an ambient variable cannot change the routes. Version 0.1 inherited the whole environment; since 0.2 it does not.
 
 It compares routes, handlers and their `def` locations, dispatch order, route-level and parameter dependencies, dependency closures and `redirect_slashes`, and prints the differences by class: `route_missing`, `route_extra`, `order_mismatch`, `handler_mismatch`, `location_mismatch`, `route_deps_mismatch`, `via_mismatch`, `param_deps_mismatch`, `closure_mismatch` and `redirect_slashes_mismatch`. A note appears when the app ran on a different FastAPI version than the one the analysis follows (the locked one), because the include model may differ.
 
 Some differences are known blind spots of a static analysis; they are listed as **explained**, with their reason, and do not fail the check:
 
-- a route the runtime serves from installed code (a handler outside the repository, or under a virtual environment or `site-packages`), when the analysis reported a limitation that can hide routes (`unresolved_include`, `opaque_router_call`, …), is explained by those limitations, listed with their locations;
-- a dependency difference located at a dependency the analysis cannot see into (an `external` or `unresolved` dependency) is explained when the runtime dependency standing in its place, and everything beneath it, accounts for the whole difference. Every other dependency of the route, at every depth, must still agree.
+- a route the runtime serves from installed code (the oracle attributes the handler to an installed distribution), when the analysis reported a limitation that can hide routes (`unresolved_include`, `opaque_router_call`, `library_capture_stale`, …), is explained by those limitations, listed with their locations;
+- a dependency difference located at a dependency the analysis cannot see into (an `external` or `unresolved` dependency the [library capture](#library-routers-and-dependencies) has no entry for) is explained when the runtime dependency standing in its place, and everything beneath it, accounts for the whole difference. Every other dependency of the route, at every depth, must still agree.
+
+What the capture fills is compared like everything else: an installed handler's location compares as (distribution, file inside it, line) against the route's `library`, and an external binding the capture filled stands for the id FastAPI reports for it (`runtime_id`; several bindings can share one, as `current_user(active=True)` and `current_user(superuser=True)` do).
 
 Everything else is **unexplained**: an extra route, a changed handler or location, a different order, a dependency that differs where the analysis can see. Exit code: 0 when nothing is unexplained, 1 otherwise, 2 when the check could not run (no usable interpreter, the app did not import — the error is shown —, or the analysis is incomplete).
 
@@ -834,7 +892,7 @@ Everything else is **unexplained**: an extra route, a changed handler or locatio
 
 The tests compare the analyzers with the tools they model instead of with hand-written expectations:
 
-- **FastAPI oracle** (`oracles/fastapi_oracle.py`): imports a FastAPI app and walks `app.routes` (through `fastapi.routing.iter_route_contexts` on FastAPI 0.137.2 and later, so a live include's routes carry its prefix and dependencies), recording each route's method, path, endpoint, `def` line, route-level dependencies, parameter dependencies and closure, in Starlette order. The oracle tests write every case to a temporary directory, run the oracle once, and require the analyzers to produce the same routes and dependencies. To add a case, add an entry to `CASES` in `oracles/fastapi_cases.py` (routes) or `DEPENDENCY_CASES` in `oracles/fastapi_dependency_cases.py` (dependencies). A case FastAPI builds in a way the analyzer cannot read from source goes in the `INEXACT` tables with the limitation kinds that explain the difference: it must report them, and the test fails once the case matches the runtime, so the entry gets removed. The route cases run under both include models.
+- **FastAPI oracle** (`oracles/fastapi_oracle.py`): imports a FastAPI app and walks `app.routes` (through `fastapi.routing.iter_route_contexts` on FastAPI 0.137.2 and later, so a live include's routes carry its prefix and dependencies), recording each route's method, path, endpoint, `def` line, route-level dependencies, parameter dependencies and closure, in Starlette order. The oracle tests write every case to a temporary directory, run the oracle once, and require the analyzers to produce the same routes and dependencies. To add a case, add an entry to `CASES` in `oracles/fastapi_cases.py` (routes) or `DEPENDENCY_CASES` in `oracles/fastapi_dependency_cases.py` (dependencies). A case FastAPI builds in a way the analyzer cannot read from source goes in the `INEXACT` tables with the limitation kinds that explain the difference: it must report them, and the test fails once the case matches the runtime, so the entry gets removed. The route cases run under both include models. The library cases (`tests/library_cases.py`) put an installed library in a temporary site directory (a router factory that is a method of a generic-subscripted class, a module-level factory, a router that includes a nested one, a signature set at runtime, a closure, a class used as `Depends()`, a callable passed in from the package), run `capture`, the analysis and the oracle, and require zero differences under both include models.
 - **`fastapi_oracle.py --compare RUNTIME.json DI.json`** reports the differences by the classes above and exits 1 when any class is non-empty; `runtime-check` is this comparison plus the explanations.
 - **TypeScript oracles** (`oracles/jsx_oracle.cjs`, `oracles/decl_oracle.cjs`, compared by `oracles/compare_facts.py`): independent walks of the TypeScript AST that the helper's JSX elements and declarations must equal exactly, on fixtures and, through `verify`, on the repository.
 - **Docs check** tests: Markdown lines and GitHub slugs, git-visible files against real git repositories in temporary directories, what counts as a real use of a name, every reference kind, rule, status, config error and ignore entry over fixture repositories, and the CLI's output and exit codes. Planted drift (a stale path, a broken anchor, a removed route, an orphaned doc) must print its exact `path:line: message` line and exit 1, end to end over a real git checkout.
@@ -852,7 +910,7 @@ CODE_INTEL_REQUIRE_TOOLCHAIN=1 uv run pytest -n auto
 
 The dependency groups `fastapi-live` (default) and `fastapi-copy` select the FastAPI the oracle tests run against; install one at a time: `uv sync --no-default-groups --group dev --group fastapi-copy`. Tests that need Node, TypeScript, git or FastAPI skip when they are missing; `CODE_INTEL_REQUIRE_TOOLCHAIN=1` (set in CI) turns those skips into failures. The code has no type-check suppressions; keep it that way.
 
-Layout of `src/code_intel/`: `server.py` registers the tools, validates arguments and maps failures to error bodies; `analysis_runtime.py` owns every cache, its freshness and the analyzer-code staleness check; `queries.py` and `doc_queries.py` hold the pure filtering, matching and suggestion logic; `presenters.py` and `doc_presenters.py` render text and JSON through one envelope. Backend: `py_sources.py`, `py_escapes.py`, `py_values.py`, `router_bases.py`, `router_graph.py`, `include_model.py`, `dependency_resolver.py` and `di_map.py`. Frontend: `ts_bridge.py`, `ts_facts.py`, `ts/*.cjs`, `route_map.py`, `route_matching.py`, `jsx_usage.py`, `symbol_resolve.py`. Docs: `markdown_facts.py`, `repo_files.py`, `code_words.py`, `doc_rules.py`, `doc_refs.py`, `doc_report.py`, `doc_resolvers.py`, `pages.py`, `agent_files.py`, `doc_check.py`. Commands: `cli.py`, `setup.py`, `verify.py`, `summary.py`, `runtime_check.py`.
+Layout of `src/code_intel/`: `server.py` registers the tools, validates arguments and maps failures to error bodies; `analysis_runtime.py` owns every cache, its freshness and the analyzer-code staleness check; `queries.py` and `doc_queries.py` hold the pure filtering, matching and suggestion logic; `presenters.py` and `doc_presenters.py` render text and JSON through one envelope. Backend: `py_sources.py`, `py_escapes.py`, `py_values.py`, `router_bases.py`, `router_graph.py`, `include_model.py`, `dependency_resolver.py` and `di_map.py`; the library capture is `library_capture.py` (the file format), `library_view.py` (what the analysis applies and checks), `capture.py` and `runner.py` (the command and the clean-environment subprocess). Frontend: `ts_bridge.py`, `ts_facts.py`, `ts/*.cjs`, `route_map.py`, `route_matching.py`, `jsx_usage.py`, `symbol_resolve.py`. Docs: `markdown_facts.py`, `repo_files.py`, `code_words.py`, `doc_rules.py`, `doc_refs.py`, `doc_report.py`, `doc_resolvers.py`, `pages.py`, `agent_files.py`, `doc_check.py`. Commands: `cli.py`, `setup.py`, `verify.py`, `summary.py`, `runtime_check.py`.
 
 ## License
 

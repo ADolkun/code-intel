@@ -28,7 +28,7 @@ from mcp_fixtures import (
     use,
 )
 
-from code_intel import doc_queries, problems, queries
+from code_intel import doc_presenters, doc_queries, problems, queries
 from code_intel.doc_report import SymbolRow
 
 GET_DB = "service_backend.core.database:get_db"
@@ -756,6 +756,25 @@ def test_a_route_query_matches_by_path_and_compatible_method(doc_report) -> None
     assert [r["text"] for r in other_method.mentions.items] == ["/items/{item_id}/checkout"], (
         "only the mention without a method"
     )
+
+
+def test_a_route_installed_code_defines_names_the_include_and_where_the_library_defines_it(tmp_path) -> None:
+    library = {"dist": "extlib", "version": "1.2.3", "file": "extlib/router.py", "line": 7}
+    route = di_route(
+        "checkout",
+        "/items/{item_id}/checkout",
+        method="POST",
+        file=DOC_LOOKUP_ROUTE_FILE,
+        line=1,
+        library=library,
+    )
+    report = doc_lookup_report(tmp_path / "repo", route=route)
+    result = doc_queries.doc_refs_lookup(report, route="POST /items/{id}/checkout", limit=None)
+    assert result.definitions is not None
+    assert result.definitions.items[0]["library"] == "extlib 1.2.3 extlib/router.py:7"
+    assert len(_mentions(result)) == 2, "the mentions resolve against the library route"
+    text = doc_presenters.doc_refs(result).text
+    assert f"[{DOC_LOOKUP_ROUTE_FILE}:1 · extlib 1.2.3 extlib/router.py:7]" in text
 
 
 def test_a_symbol_query_matches_whole_first_and_last_parts(doc_report) -> None:

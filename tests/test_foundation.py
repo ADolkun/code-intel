@@ -265,6 +265,7 @@ def test_rel_posix_inside_and_outside_repo(tmp_path: Path) -> None:
 
 
 EXPECTED_LIMITATIONS = {
+    "library_capture_stale",
     "unmounted_router",
     "unresolved_include",
     "unresolved_include_prefix",

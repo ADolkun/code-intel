@@ -30,6 +30,7 @@ from code_intel.result_types import (
     DiResult,
     DiRoute,
     FrontendCallRow,
+    LibraryRow,
     LimitationDict,
     MatchBackendSide,
     MatchFrontendSide,
@@ -63,13 +64,20 @@ def dep(
     sub: Sequence[str] = (),
     trans: Sequence[str] = (),
     aliases: Sequence[str] = (),
+    bound_to: str | None = None,
+    library: LibraryRow | None = None,
 ) -> DiDependencyFunction:
     module, qualname = dep_id.split(":", 1)
+    optional: dict[str, Any] = {}
+    if bound_to is not None:
+        optional["bound_to"] = bound_to
+    if library is not None:
+        optional["library"] = library
     return cast(
         DiDependencyFunction,
         {
             "id": dep_id,
-            "name": qualname.split(".")[-1],
+            "name": qualname.split(".")[-1].removesuffix("()"),
             "module": module,
             "qualname": qualname,
             "kind": kind,
@@ -78,6 +86,7 @@ def dep(
             "sub_deps": list(sub),
             "transitive_deps": list(trans),
             "aliases": list(aliases),
+            **optional,
         },
     )
 
@@ -108,6 +117,7 @@ def di_route(
     all_deps: Sequence[str] = (),
     file: str = ROUTE_FILE,
     module: str = ROUTE_MODULE,
+    library: LibraryRow | None = None,
 ) -> DiRoute:
     rows = list(deps)
 
@@ -126,6 +136,7 @@ def di_route(
             "line": line,
             "mount": "static",
             "order": 0,
+            "library": library,
             "chain": ["service_backend.main:app"],
             "app_deps": displays("app"),
             "router_deps": displays("router"),
@@ -158,6 +169,7 @@ def di_result(
             "diagnostics": [cast(DiagnosticDict, d) for d in diagnostics],
             "analysis_limitations": [cast(LimitationDict, lim) for lim in limitations],
             "app": {"id": "service_backend.main:app", "redirect_slashes": False},
+            "library": None,
             "dependency_functions": {f["id"]: f for f in funcs},
             "routes": route_rows,
             "unmounted_routes": [],
@@ -177,8 +189,10 @@ def di_result(
 # ── Routes JSON v2 ───────────────────────────────────────────────────────
 
 
-def backend_side(method: str, path: str, handler: str, *, line: int = 1, file: str = ROUTE_FILE) -> MatchBackendSide:
-    return {"method": method, "path": path, "handler": handler, "file": file, "line": line}
+def backend_side(
+    method: str, path: str, handler: str, *, line: int = 1, file: str = ROUTE_FILE, library: LibraryRow | None = None
+) -> MatchBackendSide:
+    return {"method": method, "path": path, "handler": handler, "file": file, "line": line, "library": library}
 
 
 def frontend_side(
@@ -237,13 +251,15 @@ def routes_result(
     b_only = list(backend_only)
     f_only = list(frontend_only)
     backend_routes: list[BackendRouteRow] = []
+    library_routes: list[BackendRouteRow] = []
     seen: set[tuple] = set()
     for b in [m["backend"] for m in match_rows] + b_only:
         key = (b["method"], b["path"], b["handler"])
         if key in seen:
             continue
         seen.add(key)
-        backend_routes.append(
+        rows = library_routes if b["library"] else backend_routes
+        rows.append(
             cast(
                 BackendRouteRow,
                 {
@@ -251,7 +267,7 @@ def routes_result(
                     "kind": "websocket" if b["method"] == "WS" else "http",
                     "handler_id": f"{ROUTE_MODULE}:{b['handler']}",
                     "mount": "static",
-                    "order": len(backend_routes),
+                    "order": len(backend_routes) + len(library_routes),
                 },
             )
         )
@@ -271,7 +287,12 @@ def routes_result(
                 },
             )
         )
-    matched_routes = len({(m["backend"]["method"], m["backend"]["path"]) for m in match_rows})
+    matched_routes = len(
+        {(m["backend"]["method"], m["backend"]["path"]) for m in match_rows if not m["backend"]["library"]}
+    )
+    matched_library = len(
+        {(m["backend"]["method"], m["backend"]["path"]) for m in match_rows if m["backend"]["library"]}
+    )
     matched_calls = len({(m["frontend"]["file"], m["frontend"]["line"]) for m in match_rows})
     return cast(
         RoutesResult,
@@ -281,6 +302,7 @@ def routes_result(
             "diagnostics": [cast(DiagnosticDict, d) for d in diagnostics],
             "analysis_limitations": [cast(LimitationDict, lim) for lim in limitations],
             "backend_routes": backend_routes,
+            "library_routes": library_routes,
             "frontend_calls": calls,
             "matches": match_rows,
             "backend_only": b_only,
@@ -288,6 +310,8 @@ def routes_result(
             "unmounted_routes": [],
             "summary": {
                 "backend_routes": len(backend_routes),
+                "library_routes": len(library_routes),
+                "matched_library_routes": matched_library,
                 "frontend_calls": len(calls),
                 "matched_routes": matched_routes,
                 "matched_calls": matched_calls,
@@ -825,7 +849,11 @@ def doc_lookup_two_owner_report(root: Path) -> Any:
 
 
 def doc_lookup_report(
-    root: Path, *, route_limitations: Iterable[dict] = (), extra_problems: Sequence[problems.Problem] = ()
+    root: Path,
+    *,
+    route_limitations: Iterable[dict] = (),
+    extra_problems: Sequence[problems.Problem] = (),
+    route: DiRoute | None = None,
 ) -> Any:
     """A real `doc_refs.DocReport` over `doc_lookup_repo` (no git, no Node)."""
     from code_intel import doc_refs
@@ -833,7 +861,7 @@ def doc_lookup_report(
     doc_lookup_repo(root)
     return doc_refs.build_report(
         repo_files_on_disk(root),
-        [doc_lookup_route()],
+        [route or doc_lookup_route()],
         [],
         list(route_limitations),
         DOC_LOOKUP_SYMBOLS,

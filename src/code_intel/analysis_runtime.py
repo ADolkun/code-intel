@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from code_intel import code_paths, doc_rules, loaded_code, problems, ts_bridge
+from code_intel import code_paths, doc_rules, library_view, loaded_code, problems, ts_bridge
 from code_intel import include_model as include_models
 from code_intel.code_paths import GIT_CREATIONFLAGS as _GIT_CREATIONFLAGS
 from code_intel.code_paths import GIT_ERRORS as _GIT_ERRORS
@@ -189,7 +189,12 @@ def _real_backend_builder() -> Callable[[Path, BackendConfig, Any, AbstractSet[s
         builder = builders.get(key)
         if builder is None or previous_sources is None or builder.sources is not previous_sources:
             builder = router_graph.BackendBuilder(
-                repo_root / backend.root, backend.package, backend.app, repo_root, lock=backend.lock
+                repo_root / backend.root,
+                backend.package,
+                backend.app,
+                repo_root,
+                lock=backend.lock,
+                library=backend.capture.file if backend.capture is not None else None,
             )
             builders.clear()
             builders[key] = builder
@@ -559,6 +564,8 @@ class StatusSnapshot:
     fastapi: dict[str, Any] = field(default_factory=dict)
     # ``{"path": <config file>, "error": <why it cannot be used> | None}``.
     config: dict[str, Any] = field(default_factory=dict)
+    # The library capture (``library_view``): None without ``[backend.capture]``.
+    library_capture: dict[str, Any] | None = None
 
     @property
     def analysis(self) -> dict[str, Any]:
@@ -1006,9 +1013,12 @@ class AnalysisRuntime:
                     rel,
                 )
             # The lock decides the include_router model (include_model.py), the
-            # version file whether the backend may be analyzed at all.
+            # version file whether the backend may be analyzed at all, the
+            # library capture which routes and dependencies installed code adds.
             extras = [posixpath.join(backend.root, "pyproject.toml")]
             extras += [rel for rel in (backend.python_version_file, backend.lock) if rel]
+            if backend.capture is not None:
+                extras.append(backend.capture.file)
             return self._fingerprint(package, code_paths.PY_SUFFIXES, extras, "fingerprint backend sources", visible)
 
     def _frontend_fingerprint(self, analyzer: str, config: Config, visible: AbstractSet[str]) -> _Fingerprint:
@@ -1582,6 +1592,7 @@ class AnalysisRuntime:
                 counts_errors=counts_errors,
                 code_unconfirmed=self.code_unconfirmed(code),
                 fastapi={} if config is None else self._fastapi_status(config),
+                library_capture=None if config is None else self._library_status(config, limitations),
                 config={"path": code_paths.rel_posix(self.config_file.path, self.repo_root), "error": config_error},
             )
 
@@ -1593,6 +1604,29 @@ class AnalysisRuntime:
             "include_model_reason": model.reason,
             "source": model.source,
             "summary": include_models.describe(model),
+        }
+
+    def _library_status(self, config: Config, limitations: list[dict]) -> dict[str, Any] | None:
+        """The capture file as the analysis reads it now, what the loaded DI applied of it
+        (None until it is built), and why it is stale. The status never builds anything."""
+        capture = config.backend.capture
+        if capture is None:
+            return None
+        view = library_view.read(self.repo_root, capture.file, app=config.backend.app, lock=config.backend.lock)
+        file = view.capture
+        return {
+            "file": capture.file,
+            "present": (self.repo_root / capture.file).is_file(),
+            "app": file["app"] if file is not None else None,
+            "distributions": dict(file["distributions"]) if file is not None else {},
+            "entries": {
+                "includes": len(file["includes"]) if file is not None else 0,
+                "routes": sum(len(i["routes"]) for i in file["includes"]) if file is not None else 0,
+                "dependencies": len(file["dependencies"]) if file is not None else 0,
+            },
+            "applied": None if self._di is None else self._di.get("library"),
+            "problems": [p.message for p in view.problems],
+            "stale": [lim["message"] for lim in limitations if lim["kind"] == "library_capture_stale"],
         }
 
     def _analyzer_status(self, name: str) -> dict[str, Any]:

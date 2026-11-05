@@ -21,6 +21,7 @@ from code_intel.config import CaptureConfig
 from code_intel.oracles import fastapi_oracle
 
 LIB = "backend/.venv/lib/python3.14/site-packages/extlib/router.py"
+INSTALLED = {"dist": "extlib", "file": "extlib/router.py", "line": 3}
 
 
 def dep(dep_id: str, param: str | None = None, sub: list[dict[str, Any]] | None = None, **extra: Any) -> dict[str, Any]:
@@ -92,7 +93,10 @@ def gap(kind: str = "unresolved_include", line: int = 150) -> dict[str, Any]:
 
 
 def test_a_route_from_installed_code_is_explained_by_a_limitation_that_can_hide_routes() -> None:
-    runtime_rows = [runtime_route(), runtime_route("/auth/login", file=LIB, handler_id="extlib.router:login")]
+    runtime_rows = [
+        runtime_route(),
+        runtime_route("/auth/login", file=LIB, library=INSTALLED, handler_id="extlib.router:login"),
+    ]
     di = di_with([analyzer_route()], limitations=[gap(line=150), gap("opaque_router_call", 160)])
     [(cls, reason)] = classified(runtime_rows, di)
     assert cls == "route_missing"
@@ -103,7 +107,7 @@ def test_a_route_from_installed_code_is_explained_by_a_limitation_that_can_hide_
 
 
 def test_a_missing_route_is_unexplained_without_a_limitation_or_when_its_handler_is_the_repositorys() -> None:
-    installed = runtime_route("/auth/login", file=LIB)
+    installed = runtime_route("/auth/login", file=LIB, library=INSTALLED)
     assert classified([installed], di_with([])) == [("route_missing", None)]
     own = runtime_route("/own")
     assert classified([own], di_with([], limitations=[gap()])) == [("route_missing", None)]
@@ -111,11 +115,11 @@ def test_a_missing_route_is_unexplained_without_a_limitation_or_when_its_handler
     assert classified([installed], harmless) == [("route_missing", None)]
 
 
-def test_a_route_with_no_source_file_counts_as_installed() -> None:
-    assert runtime_check.is_installed(None)
-    assert runtime_check.is_installed("/usr/lib/python3/site-packages/x.py")
-    assert runtime_check.is_installed("backend/venv/lib/x.py")
-    assert not runtime_check.is_installed("backend/app/api.py")
+def test_only_a_route_the_oracle_attributes_to_a_distribution_counts_as_installed() -> None:
+    di = di_with([], limitations=[gap()])
+    in_site_packages = runtime_route("/a", file="/usr/lib/python3/site-packages/x.py")
+    assert classified([in_site_packages], di) == [("route_missing", None)]
+    assert classified([runtime_route("/a", library=INSTALLED)], di)[0][1] is not None
 
 
 def test_an_extra_route_a_changed_handler_and_a_moved_def_are_never_explained() -> None:
@@ -207,6 +211,75 @@ def test_a_difference_in_a_dependency_the_analysis_can_see_is_not_explained_by_i
         function(USER, "external"),
     )
     assert classified(runtime_rows, di) == [("param_deps_mismatch", None), ("closure_mismatch", None)]
+
+
+def filled_user_function() -> dict[str, Any]:
+    """The external binding the library capture filled: its sub-dependencies are the captured ones."""
+    return {**function(USER, "external", ["app.core.auth:get_manager", "extlib:bearer"]), "runtime_id": LIB_USER}
+
+
+def filled_di(route: dict[str, Any]) -> dict[str, Any]:
+    return di_with(
+        [route],
+        filled_user_function(),
+        function("app.core.auth:get_manager", sub_deps=[SESSION]),
+        function(SESSION),
+        function("extlib:bearer", "library"),
+    )
+
+
+def test_a_dependency_the_capture_filled_is_compared_as_the_id_the_runtime_reports() -> None:
+    runtime_rows = [
+        runtime_route(
+            param_deps=[lib_user_tree()], closure=[LIB_USER, "app.core.auth:get_manager", SESSION, "extlib:bearer"]
+        )
+    ]
+    route = analyzer_route(
+        deps=[direct(USER, "user")], all_deps=[USER, "app.core.auth:get_manager", SESSION, "extlib:bearer"]
+    )
+    assert classified(runtime_rows, filled_di(route)) == []
+    assert fastapi_oracle.compare({"routes": runtime_rows}, filled_di(route)) == dict.fromkeys(
+        fastapi_oracle.CLASSES, []
+    )
+
+
+def test_a_filled_dependency_is_not_opaque_so_a_difference_beneath_it_is_not_explained() -> None:
+    di = filled_di(analyzer_route())
+    assert runtime_check.opaque_ids(di) == frozenset()
+    runtime_rows = [
+        runtime_route(
+            param_deps=[dep(LIB_USER, "user", [dep("app.core.auth:other", "m"), dep("extlib:bearer", "jwt")])],
+            closure=[LIB_USER, "app.core.auth:other", "extlib:bearer"],
+        )
+    ]
+    route = analyzer_route(
+        deps=[direct(USER, "user")], all_deps=[USER, "app.core.auth:get_manager", SESSION, "extlib:bearer"]
+    )
+    assert classified(runtime_rows, filled_di(route)) == [("closure_mismatch", None)]
+
+
+def test_an_external_with_no_capture_entry_is_still_opaque() -> None:
+    other = "app.core.auth:current_superuser"
+    di = di_with([], function(other, "external"), function("unresolved:a:B", "unresolved"), filled_user_function())
+    assert runtime_check.opaque_ids(di) == frozenset({other, "unresolved:a:B"})
+
+
+def test_an_installed_handler_is_located_by_distribution_file_and_line() -> None:
+    runtime_rows = [runtime_route("/me", file=LIB, library=INSTALLED, handler_id="extlib.router:me")]
+    analyzer = analyzer_route(
+        "/me",
+        file="backend/app/main.py",
+        line=170,
+        library={**INSTALLED, "version": "1.2.3"},
+        handler_id="extlib.router:me",
+    )
+    assert classified(runtime_rows, di_with([analyzer])) == []
+    moved = {**analyzer, "library": {**INSTALLED, "line": 4, "version": "1.2.3"}}
+    assert classified(runtime_rows, di_with([moved])) == [("location_mismatch", None)]
+    elsewhere = {**analyzer, "library": {**INSTALLED, "file": "extlib/other.py", "version": "1.2.3"}}
+    assert classified(runtime_rows, di_with([elsewhere])) == [("location_mismatch", None)]
+    unattributed = {**analyzer, "library": None, "file": LIB, "line": 3}
+    assert classified(runtime_rows, di_with([unattributed])) == [("location_mismatch", None)]
 
 
 def test_a_runtime_dependency_the_analysis_has_no_stand_in_for_is_not_explained() -> None:

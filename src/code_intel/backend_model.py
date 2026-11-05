@@ -13,10 +13,13 @@ import ast
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from code_intel.code_paths import FileStamp
 from code_intel.problems import Problem
+
+if TYPE_CHECKING:
+    from code_intel.library_view import LibraryView
 
 RouterKind = Literal["APIRouter", "FastAPI"]
 RouteKind = Literal["http", "websocket"]
@@ -25,7 +28,9 @@ MountState = Literal["static", "conditional", "deferred"]
 LayerVia = Literal["app", "router", "route decorator"]
 DepVia = Literal["app", "router", "route decorator", "direct"]
 DepMarker = Literal["Depends", "Security"]
-DepKind = Literal["function", "class", "instance", "method", "lambda", "factory_result", "external", "unresolved"]
+DepKind = Literal[
+    "function", "class", "instance", "method", "lambda", "factory_result", "external", "library", "unresolved"
+]
 BindingKind = Literal[
     "assign",
     "annotated_assign",
@@ -276,10 +281,42 @@ class IncludeEdge:
 
 
 @dataclass(frozen=True)
+class Library:
+    """Where installed code defines a callable: its distribution, the version installed
+    when the capture was made, and the file (relative to the distribution) and line."""
+
+    dist: str
+    version: str
+    file: str
+    line: int
+
+
+@dataclass(frozen=True)
+class CapturedNode:
+    """A dependency the library capture records. ``sub`` is None for a callable of the
+    backend package, whose own dependencies the analysis reads from source."""
+
+    id: str
+    param: str | None
+    library: Library | None  # where installed code defines it; None for a callable of the package
+    sub: tuple[CapturedNode, ...] | None
+
+
+@dataclass(frozen=True)
+class CapturedEndpoint:
+    """The handler of a route that installed code defines, and the dependencies of its parameters."""
+
+    handler_id: str
+    library: Library
+    params: tuple[CapturedNode, ...]
+
+
+@dataclass(frozen=True)
 class DepLayer:
     via: LayerVia
     owner: str  # RouterNode.id, or an edge label for include dependencies
     dependencies: tuple[Located, ...] | Unknown
+    captured: tuple[CapturedNode, ...] = ()  # a library router's layer, read from the capture
 
 
 # A path part the analysis could not evaluate shows as `<unresolved: text>`.
@@ -306,7 +343,13 @@ class LiveRoute:
     mount: MountState
     layers: tuple[DepLayer, ...]  # FastAPI order: app, includes and routers, decorator
     order: int  # global emission index = Starlette dispatch order
-    endpoint: Located
+    endpoint: Located | CapturedEndpoint
+
+    @property
+    def library(self) -> Library | None:
+        """Where installed code defines the handler; for such a route ``file``/``line`` are the
+        ``include_router`` call that mounts it."""
+        return self.endpoint.library if isinstance(self.endpoint, CapturedEndpoint) else None
 
 
 IncludeModelKind = Literal["copy", "live", "unknown"]
@@ -343,6 +386,7 @@ class BackendModel:
     sources: Any
     resolver: NameResolver
     include_model: IncludeModel = NO_INCLUDE_MODEL
+    library: LibraryView | None = None
 
 
 # ── Dependencies ─────────────────────────────────────────────────────────
@@ -352,8 +396,9 @@ class BackendModel:
 class DepTarget:
     # "{module}:{qualname}", "{module}:{qualname}()" for an instance (FastAPI reads its
     # __call__), "{module}:{class}().{method}" for a method bound to an instance,
-    # "module:<lambda>@L{line}", "unresolved:{module}:{text}", or for an external
-    # binding "{module}:{name}" of the module-level name it is bound to
+    # "module:<lambda>@L{line}", "unresolved:{module}:{text}", for an external
+    # binding "{module}:{name}" of the module-level name it is bound to, or for
+    # a ``library`` callable the id FastAPI reports
     id: str
     module: str
     qualname: str
@@ -371,6 +416,13 @@ class DepTarget:
     form: str = ""
     # The expression an external binding is assigned (``fastapi_users.current_user(active=True)``).
     bound_to: str = ""
+    # For an unresolved target that names a callable of installed code
+    # (``fastapi.security.OAuth2PasswordRequestForm``), its dotted name.
+    external: str = ""
+    # For an external binding the capture fills: the id FastAPI reports for what it is bound to.
+    runtime_id: str = ""
+    # The definition of an installed callable (a ``library`` target, or an external binding the capture fills).
+    library: Library | None = None
 
 
 @dataclass(frozen=True)

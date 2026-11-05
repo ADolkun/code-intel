@@ -119,6 +119,28 @@ def test_interpreter_and_project_files_are_part_of_the_backend_fingerprint(
     assert fakes.calls["build_backend_model"] == 2
 
 
+def test_the_library_capture_file_is_part_of_the_backend_fingerprint_only_when_configured(
+    tmp_path: Path, fakes: FakeAnalyzers
+) -> None:
+    configured = make_repo(tmp_path / "configured")
+    write_config(
+        configured, config_toml().replace("\n[frontend]", '\n[backend.capture]\npython = "bin/python"\n\n[frontend]', 1)
+    )
+    rt = make_runtime(configured, fakes)
+    rt.get_di()
+    write(configured / ".code-intel" / "library-capture.json", "{}\n", 3000)
+    rt.get_di()
+    assert fakes.calls["build_backend_model"] == 2
+
+    fakes.calls.clear()
+    plain = make_repo(tmp_path / "plain")
+    other = make_runtime(plain, fakes)
+    other.get_di()
+    write(plain / ".code-intel" / "library-capture.json", "{}\n", 3000)
+    other.get_di()
+    assert fakes.calls["build_backend_model"] == 1
+
+
 def test_frontend_edits_do_not_rebuild_the_backend_model(repo: Path, fakes: FakeAnalyzers) -> None:
     rt = make_runtime(repo, fakes)
     rt.get_di()

@@ -307,7 +307,15 @@ def _route_definitions(routes: Iterable[Any], method: str | None, path: str, pre
     ]
     rows.sort(key=lambda r: (r.path, r.method, r.file, r.line))
     return [
-        {"method": r.method, "path": r.path, "kind": r.kind, "handler": r.handler, "file": r.file, "line": r.line}
+        {
+            "method": r.method,
+            "path": r.path,
+            "kind": r.kind,
+            "handler": r.handler,
+            "file": r.file,
+            "line": r.line,
+            **({"library": r.library} if r.library else {}),
+        }
         for r in rows
     ]
 
