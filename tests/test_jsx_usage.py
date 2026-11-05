@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
-from fixture_repo import MINIMAL_CONFIG
+from fixture_repo import MINIMAL_CONFIG, git_init
 
 from code_intel import code_paths, jsx_usage, ts_bridge, ts_facts
 from code_intel.oracles import compare_facts
@@ -1210,17 +1210,25 @@ def _cli(repo: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedPro
 
 
 def _cli_repo(tmp_path: Path, files: dict[str, str], config: str = MINIMAL_CONFIG) -> Path:
+    """A git work tree (the CLI reads only git-visible files) with ``files`` under ``frontend/``."""
+    git_init(tmp_path)
     _write_tree(tmp_path, files)
     (tmp_path / ".code-intel").mkdir()
     (tmp_path / ".code-intel" / "config.toml").write_text(config, encoding="utf-8")
     return tmp_path
 
 
+@pytest.mark.usefixtures("module_git")
 def test_jsx_usage_cli_all_json(typescript_toolchain, tmp_path: Path) -> None:
     repo = _cli_repo(
         tmp_path,
-        {"a.tsx": "export const A = () => <X />;\n", "__tests__/a.test.tsx": "const T = () => <X />;\n"},
+        {
+            "a.tsx": "export const A = () => <X />;\n",
+            "__tests__/a.test.tsx": "const T = () => <X />;\n",
+            "gen/ignored.tsx": "export const G = () => <X />;\n",
+        },
     )
+    (repo / ".gitignore").write_text("/frontend/gen/\n", encoding="utf-8")
     env = {**os.environ, ts_bridge.TS_DIR_ENV: str(typescript_toolchain.typescript_dir)}
     done = _cli(repo, "--all", "--json", env=env)
     assert done.returncode == 0, done.stderr
@@ -1238,7 +1246,9 @@ def test_jsx_usage_cli_all_json(typescript_toolchain, tmp_path: Path) -> None:
     assert [(u["file"], u["line"], u["parent_function"]) for u in usages] == [("frontend/a.tsx", 1, "A")]
 
 
+@pytest.mark.usefixtures("module_git")
 def test_jsx_usage_cli_scans_the_configured_frontend_root(typescript_toolchain, tmp_path: Path) -> None:
+    git_init(tmp_path)
     config = MINIMAL_CONFIG.replace('root = "frontend"', 'root = "web/app"').replace("frontend/", "web/app/")
     for rel in ("web/app/src/a.tsx", "web/app/coverage/report.tsx", "frontend/b.tsx"):
         path = tmp_path / rel

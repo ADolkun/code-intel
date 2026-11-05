@@ -121,6 +121,7 @@ def hermetic_git(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
 
 def git_init(root: Path) -> Path:
     """Make ``root`` a git work tree (nothing committed): its files are untracked, so visible unless ignored."""
+    root.mkdir(parents=True, exist_ok=True)
     if not (root / ".git").exists():
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     return root

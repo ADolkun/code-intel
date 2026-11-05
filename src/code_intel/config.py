@@ -413,17 +413,40 @@ def parse_config(text: str, display: str = CONFIG_REL, path: Path | None = None)
     return config
 
 
+@dataclass(frozen=True)
+class ConfigFile:
+    """Where the config is read from: ``path`` (absolute) and ``display``, how errors name it."""
+
+    path: Path
+    display: str
+
+    @classmethod
+    def locate(cls, repo_root: Path, config_path: Path | None = None) -> ConfigFile:
+        """``config_path``, or ``<repo_root>/.code-intel/config.toml``."""
+        if config_path is not None:
+            return cls(config_path.resolve(), str(config_path))
+        return cls((repo_root / CONFIG_REL).resolve(), CONFIG_REL)
+
+    def read_bytes(self) -> bytes:
+        """The file's bytes. Raises ``ConfigError``."""
+        try:
+            return self.path.read_bytes()
+        except OSError as exc:
+            raise ConfigError(self.display, f"cannot read the config ({type(exc).__name__}: {exc})") from exc
+
+    def parse(self, data: bytes) -> Config:
+        """``data`` (this file's bytes) validated. Raises ``ConfigError``."""
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ConfigError(self.display, f"the config is not UTF-8 ({exc})") from exc
+        return parse_config(text, self.display, self.path)
+
+
 def load_config(repo_root: Path, config_path: Path | None = None) -> Config:
     """Read and validate the config: ``config_path``, or ``<repo_root>/.code-intel/config.toml``.
 
     Raises ``ConfigError``.
     """
-    display = str(config_path) if config_path is not None else CONFIG_REL
-    path = (config_path if config_path is not None else repo_root / CONFIG_REL).resolve()
-    try:
-        text = path.read_bytes().decode("utf-8-sig")
-    except OSError as exc:
-        raise ConfigError(display, f"cannot read the config ({type(exc).__name__}: {exc})") from exc
-    except UnicodeDecodeError as exc:
-        raise ConfigError(display, f"the config is not UTF-8 ({exc})") from exc
-    return parse_config(text, display, path)
+    file = ConfigFile.locate(repo_root, config_path)
+    return file.parse(file.read_bytes())

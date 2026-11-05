@@ -2114,8 +2114,6 @@ def test_a_methods_none_route_matches_only_get(tmp_path: Path) -> None:
 def test_report_names_the_summary_figures_findings_can_move() -> None:
     import io
 
-    pytest.importorskip("code_intel.queries")
-
     lim = limitation("asgi_mount", stage="build router graph", file="m.py", line=2, message="m")
     scan = scan_of(call([{"text": "/a"}], function="fa"))
     result = route_map.build_routes(model(live("GET", "/a", 0), live("GET", "/b", 1), limitations=(lim,)), scan)

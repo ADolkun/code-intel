@@ -360,12 +360,19 @@ def _summary_lines(result: DiResult) -> list[str]:
 
 
 def compute(repo_root: Path, backend: BackendConfig) -> DiResult:
-    """Build the backend model for ``repo_root`` and return its DI JSON."""
+    """Build the backend model for ``repo_root`` from its git-visible files and
+    return its DI JSON. Raises ``RepoFilesError`` when git cannot list them."""
     # Imported here so consumers that bring their own model do not load the graph builder.
     from code_intel import router_graph
+    from code_intel.repo_files import list_repo_files
 
     model = router_graph.build_backend_model(
-        repo_root / backend.root, backend.package, backend.app, repo_root, lock=backend.lock
+        repo_root / backend.root,
+        backend.package,
+        backend.app,
+        repo_root,
+        lock=backend.lock,
+        visible=list_repo_files(repo_root).files,
     )
     return build_di(model)
 
@@ -384,7 +391,13 @@ def run(args: argparse.Namespace, context: Context) -> int:
         print(f"Error: {package_dir}: backend package directory not found", file=sys.stderr)
         return 1
 
-    result = compute(repo_root, backend)
+    from code_intel.repo_files import RepoFilesError
+
+    try:
+        result = compute(repo_root, backend)
+    except RepoFilesError as exc:
+        print(f"code-intel: {exc}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(result, indent=2))
     else:

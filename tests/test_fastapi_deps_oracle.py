@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from code_intel import di_map, include_model
+from code_intel import di_map, include_model, queries
 from code_intel.oracles import case_package
 from code_intel.oracles.fastapi_dependency_cases import DEPENDENCY_CASES, INEXACT_DEPENDENCIES
 from code_intel.result_types import DiResult
@@ -201,7 +201,6 @@ def test_class_and_instance_are_distinct_targets(fastapi_oracle_results) -> None
 
 
 def test_class_and_instance_are_distinct_reverse_groups(fastapi_oracle_results) -> None:
-    queries = pytest.importorskip("code_intel.queries")
     di = _di(fastapi_oracle_results, "d24")
     usage = queries.di_reverse(di, "Checker", limit=None)
     assert isinstance(usage, queries.DependencyUsage)
@@ -229,7 +228,6 @@ def test_an_external_object_is_one_dependency_in_every_importing_module(fastapi_
 
 
 def test_an_external_object_is_one_reverse_group(fastapi_oracle_results) -> None:
-    queries = pytest.importorskip("code_intel.queries")
     usage = queries.di_reverse(_di(fastapi_oracle_results, "d29"), "key_header", limit=None)
     assert isinstance(usage, queries.DependencyUsage)
     (group,) = usage.groups
