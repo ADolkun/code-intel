@@ -24,6 +24,13 @@ const DEFAULT_LIMITS = { max_url_variants: 16, max_eval_depth: 32 };
 const RAW_MAX = 300;
 const HOOK_NAME_RE = /^use[A-Z0-9]/;
 const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"]);
+const CLIENT_KINDS = ["call", "options", "instance", "global"];
+// The members of an `instance` client that make a request: the method is the
+// member name, except `request`, which reads it from its config object.
+const INSTANCE_VERBS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
+const INSTANCE_REQUEST = "request";
+// A URL another service serves: it has a scheme, or starts with `//`.
+const ABSOLUTE_URL_RE = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 // Highest first: a variant's origin is the strongest source that shaped it.
 const ORIGIN_RANK = ["prop_flow", "builder", "conditional", "const", "literal"];
 // Wrappers whose first argument is the component itself.
@@ -59,27 +66,40 @@ function validateClients(raw) {
   return raw.map((spec, i) => {
     const where = `clients[${i}]`;
     if (!spec || typeof spec !== "object") throw new ProtocolError(`${where} must be an object`);
-    for (const key of ["module", "export", "default_method"]) {
+    if (!CLIENT_KINDS.includes(spec.kind)) {
+      throw new ProtocolError(`${where}.kind must be one of ${CLIENT_KINDS.join(", ")}, got ${JSON.stringify(spec.kind)}`);
+    }
+    const named = spec.kind === "global" ? ["name"] : ["module", "export"];
+    for (const key of [...named, "default_method"]) {
       if (typeof spec[key] !== "string" || spec[key] === "") {
         throw new ProtocolError(`${where}.${key} must be a non-empty string`);
       }
     }
-    if (spec.kind !== "client" && spec.kind !== "download") {
-      throw new ProtocolError(`${where}.kind must be "client" or "download", got ${JSON.stringify(spec.kind)}`);
+    const basePath = spec.base_path === undefined ? "" : spec.base_path;
+    if (typeof basePath !== "string" || (basePath !== "" && !basePath.startsWith("/"))) {
+      throw new ProtocolError(`${where}.base_path must be a string starting with "/", got ${JSON.stringify(spec.base_path)}`);
+    }
+    if (spec.same_origin_only !== undefined && typeof spec.same_origin_only !== "boolean") {
+      throw new ProtocolError(`${where}.same_origin_only must be a boolean, got ${JSON.stringify(spec.same_origin_only)}`);
     }
     const out = {
-      module: spec.module,
-      export: spec.export,
       kind: spec.kind,
+      module: spec.kind === "global" ? null : spec.module,
+      export: spec.kind === "global" ? null : spec.export,
+      label: spec.kind === "global" ? spec.name : spec.export,
       defaultMethod: spec.default_method.toUpperCase(),
       urlArg: optionalIndex(spec, "url_arg", where),
       initArg: optionalIndex(spec, "init_arg", where),
       optionsArg: optionalIndex(spec, "options_arg", where),
       urlProperty: typeof spec.url_property === "string" ? spec.url_property : null,
+      basePath: basePath.replace(/\/+$/, ""),
+      sameOriginOnly: spec.same_origin_only === true,
     };
-    if (out.kind === "client" && out.urlArg === null) throw new ProtocolError(`${where}: a client needs url_arg`);
-    if (out.kind === "download" && (out.optionsArg === null || out.urlProperty === null)) {
-      throw new ProtocolError(`${where}: a download client needs options_arg and url_property`);
+    if ((out.kind === "call" || out.kind === "global") && out.urlArg === null) {
+      throw new ProtocolError(`${where}: a ${out.kind} client needs url_arg`);
+    }
+    if (out.kind === "options" && (out.optionsArg === null || out.urlProperty === null)) {
+      throw new ProtocolError(`${where}: an options client needs options_arg and url_property`);
     }
     return out;
   });
@@ -117,6 +137,7 @@ function validate(request) {
     throw new ProtocolError("websocket_marker must be a non-empty string or null");
   }
   return {
+    repoRoot: path.resolve(requireString(request, "repo_root")),
     frontendRoot: path.resolve(requireString(request, "frontend_root")),
     tsconfig: requireString(request, "tsconfig", { nullable: true }),
     files,
@@ -184,6 +205,7 @@ class RoutesAnalyzer {
     this.clientByDecl = new Map(); // declaration node -> client spec
     this.builderByDecl = new Map(); // declaration node -> exported builder name
     this.clientNames = new Set();
+    this.globalClients = new Map(); // global function name -> client spec
     this.builderNames = new Set();
     this.consumed = new Set(); // expression nodes read while evaluating a client or builder URL
     this.handledRefs = new Set(); // client identifiers that are the callee of a read call
@@ -259,7 +281,7 @@ class RoutesAnalyzer {
   }
 
   moduleSymbol(relModule) {
-    const sf = this.program.getSourceFile(path.join(this.req.frontendRoot, relModule));
+    const sf = this.program.getSourceFile(path.join(this.req.repoRoot, relModule));
     if (!sf) return { sf: null, symbol: null };
     return { sf, symbol: this.checker.getSymbolAtLocation(sf) || null };
   }
@@ -293,11 +315,14 @@ class RoutesAnalyzer {
   }
 
   resolveClients() {
-    for (const spec of this.req.clients) this.resolveClient(spec);
+    for (const spec of this.req.clients) {
+      if (spec.kind === "global") this.globalClients.set(spec.label, spec);
+      else this.resolveClient(spec);
+    }
   }
 
   // One configured client: its declarations and names, or the missing module
-  // (`lib/api.ts`) or export (`lib/api.ts#apiJson`).
+  // (`frontend/src/lib/api.ts`) or export (`frontend/src/lib/api.ts#apiJson`).
   resolveClient(spec) {
     const { sf, symbol } = this.moduleSymbol(spec.module);
     if (!sf) {
@@ -801,32 +826,84 @@ class RoutesAnalyzer {
     const ts = this.ts;
     walkNodes(ts, src.sf, (node) => {
       if (!ts.isCallExpression(node)) return;
-      const spec = this.clientOf(node.expression);
+      const global = this.globalClientOf(node.expression);
+      if (global) {
+        this.clientCall(node, global, src);
+        return;
+      }
+      const member = this.instanceMemberOf(node.expression);
+      const spec = member ? member.spec : this.clientOf(node.expression);
       if (!spec) return;
-      const nameNode = this.calleeName(node.expression);
+      const nameNode = member ? member.object : this.calleeName(node.expression);
       this.handledRefs.add(nameNode);
       if (this.insideDeclarations(node, this.clientByDecl)) return;
       if (spec === UNRESOLVED) this.addUnresolved(src, node, nameNode.text, "client_not_resolved");
+      else if (spec.kind === "instance") this.instanceCall(node, spec, member ? member.name : INSTANCE_REQUEST, src);
       else this.clientCall(node, spec, src);
     });
   }
 
+  // The configured global function a callee names (`fetch`), unless a local
+  // binding or an import shadows it. The hermetic program has no lib files, so
+  // a real global has no declaration at all.
+  globalClientOf(callee) {
+    const id = unwrap(this.ts, callee);
+    if (!this.ts.isIdentifier(id)) return null;
+    const spec = this.globalClients.get(id.text);
+    if (!spec) return null;
+    const sym = this.checker.getSymbolAtLocation(id);
+    if (!sym) return spec;
+    if (sym.flags & this.ts.SymbolFlags.Alias) return null;
+    return (sym.declarations || []).every((d) => d.getSourceFile().isDeclarationFile) ? spec : null;
+  }
+
+  // For `api.get(...)`, `api["post"](...)`: the instance, the node naming it and
+  // the member called. Null when the callee is not a request member of a
+  // configured instance; the spec is UNRESOLVED when `api` may be one.
+  instanceMemberOf(callee) {
+    const ts = this.ts;
+    const e = unwrap(ts, callee);
+    if (!(ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e))) return null;
+    const member = this.calleeName(e);
+    if (!member || !(INSTANCE_VERBS.has(member.text) || member.text === INSTANCE_REQUEST)) return null;
+    const object = this.calleeName(e.expression);
+    const spec = object && this.clientOf(e.expression);
+    if (!spec || (spec !== UNRESOLVED && spec.kind !== "instance")) return null;
+    return { spec, object, name: member.text };
+  }
+
+  // How a reference to an instance is used as the object of a member access:
+  // "request" (`api.get`), "setup" (`api.interceptors`), or null when it is not
+  // the object of one.
+  instanceMemberUse(target) {
+    const ts = this.ts;
+    const c = parentThroughTransparent(ts, target);
+    const access = c && c.parent;
+    if (!access || !(ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access)) || access.expression !== c.node) {
+      return null;
+    }
+    const member = this.calleeName(access);
+    return member && (INSTANCE_VERBS.has(member.text) || member.text === INSTANCE_REQUEST) ? "request" : "setup";
+  }
+
+  // `call` and `global` clients take the URL at `urlArg` and the method from
+  // the init object at `initArg`; `options` clients take both from one object.
   clientCall(call, spec, src) {
     const ts = this.ts;
     const args = call.arguments;
-    const needed = spec.kind === "client" ? spec.urlArg : spec.optionsArg;
+    const needed = spec.kind === "options" ? spec.optionsArg : spec.urlArg;
     const spreadAt = args.findIndex((a) => ts.isSpreadElement(a));
     if (spreadAt !== -1 && spreadAt <= Math.max(needed, spec.initArg === null ? -1 : spec.initArg)) {
-      this.addUnresolved(src, call, spec.export, "spread_arguments");
+      this.addUnresolved(src, call, spec.label, "spread_arguments");
       return;
     }
     let urlExpr;
     let urlEnv = new Map();
     let method = { method: spec.defaultMethod, source: "default" };
-    if (spec.kind === "client") {
+    if (spec.kind !== "options") {
       urlExpr = args[spec.urlArg];
       if (!urlExpr) {
-        this.addUnresolved(src, call, spec.export, "url_not_static");
+        this.addUnresolved(src, call, spec.label, "url_not_static");
         return;
       }
       if (spec.initArg !== null) method = this.methodOf(args[spec.initArg], spec, src, call);
@@ -834,25 +911,66 @@ class RoutesAnalyzer {
       const options = args[spec.optionsArg] && this.objectLiteralOf(args[spec.optionsArg], new Map(), 0);
       const prop = options && this.propertyValue(options.object, spec.urlProperty, options.env);
       if (!options || prop.value === null || prop.ambiguous) {
-        this.addUnresolved(src, call, spec.export, "options_not_object");
+        this.addUnresolved(src, call, spec.label, "options_not_object");
         return;
       }
       urlExpr = prop.value;
       urlEnv = options.env;
     }
+    this.emitClientCall(call, spec, urlExpr, urlEnv, method, src);
+  }
+
+  // A call on an `instance` client: `member` is a verb (its URL is the first
+  // argument, its method the verb) or `request`, which reads `url` and `method`
+  // from its config object. Calling the instance itself reads the same object.
+  instanceCall(call, spec, member, src) {
+    const ts = this.ts;
+    const args = call.arguments;
+    if (args.length > 0 && ts.isSpreadElement(args[0])) {
+      this.addUnresolved(src, call, spec.label, "spread_arguments");
+      return;
+    }
+    let urlExpr;
+    let urlEnv = new Map();
+    let method = { method: member.toUpperCase(), source: "member" };
+    if (member === INSTANCE_REQUEST) {
+      const options = args[0] && this.objectLiteralOf(args[0], new Map(), 0);
+      const prop = options && this.propertyValue(options.object, "url", options.env);
+      if (!options || prop.value === null || prop.ambiguous) {
+        this.addUnresolved(src, call, spec.label, "options_not_object");
+        return;
+      }
+      urlExpr = prop.value;
+      urlEnv = options.env;
+      method = this.methodOf(args[0], spec, src, call);
+    } else {
+      urlExpr = args[0];
+      if (!urlExpr) {
+        this.addUnresolved(src, call, spec.label, "url_not_static");
+        return;
+      }
+    }
+    this.emitClientCall(call, spec, urlExpr, urlEnv, method, src);
+  }
+
+  emitClientCall(call, spec, urlExpr, urlEnv, method, src) {
     const ctx = this.newContext({ propFlow: true, record: true, src });
     const variants = this.finishVariants(this.evalExpr(urlExpr, urlEnv, ctx, 0), ctx, src, call);
     this.emitCall(src, call, urlExpr, variants, {
       kind: spec.kind,
-      client: spec.export,
+      client: spec.label,
       builder: null,
       method,
-      unresolvedClient: spec.export,
+      unresolvedClient: spec.label,
       callee: this.calleeName(call.expression),
+      basePath: spec.basePath,
+      sameOriginOnly: spec.sameOriginOnly,
     });
   }
 
-  emitCall(src, node, urlExpr, variants, info) {
+  emitCall(src, node, urlExpr, allVariants, info) {
+    let variants = info.basePath ? allVariants.map((v) => withBasePath(v, info.basePath)) : allVariants;
+    if (info.sameOriginOnly) variants = variants.filter((v) => !isAbsoluteUrl(v.parts));
     const paths = variants.filter((v) => startsWithPath(v.parts));
     // A variant that starts with a value the evaluator cannot read is not
     // static; one that starts with known text other than "/" is not a path.
@@ -896,7 +1014,7 @@ class RoutesAnalyzer {
         "unresolved_http_method",
         src,
         call,
-        `${spec.export} call: HTTP method could not be evaluated (${why}); reported as UNKNOWN`,
+        `${spec.label} call: HTTP method could not be evaluated (${why}); reported as UNKNOWN`,
       );
       return { method: "UNKNOWN", source: "unresolved" };
     };
@@ -1025,9 +1143,13 @@ class RoutesAnalyzer {
       // A member reference is resolved through its object, like a callee.
       const target = node === name ? node : node.parent;
       const spec = this.clientOf(target);
-      if (!spec || this.insideDeclarations(node, this.clientByDecl) || this.isAliasInitializer(node)) return;
+      if (!spec || this.insideDeclarations(node, this.clientByDecl)) return;
+      // `const f = api.get` names a request member, not the instance, so `f`
+      // is not followed: the reference itself is what is reported.
+      const use = spec !== UNRESOLVED && spec.kind === "instance" ? this.instanceMemberUse(target) : null;
+      if (use === "setup" || (use === null && this.isAliasInitializer(node))) return;
       if (spec === UNRESOLVED) this.addUnresolved(src, target, name.text, "client_not_resolved");
-      else this.addUnresolved(src, target, spec.export, "client_reference_not_called");
+      else this.addUnresolved(src, target, spec.label, "client_reference_not_called");
     });
   }
 
@@ -1852,6 +1974,19 @@ function compress(parts) {
     } else out.push(p);
   }
   return out;
+}
+
+function isAbsoluteUrl(parts) {
+  return parts.length > 0 && parts[0].text !== undefined && ABSOLUTE_URL_RE.test(parts[0].text);
+}
+
+// What an axios-style instance requests: `baseURL` joined to a relative URL
+// with exactly one slash between. An absolute URL is left as it is.
+function withBasePath(v, basePath) {
+  const first = v.parts[0];
+  if (first === undefined || first.text === undefined || isAbsoluteUrl(v.parts)) return v;
+  const text = first.text.startsWith("/") ? first.text : `/${first.text}`;
+  return { ...v, parts: [{ text: basePath + text }, ...v.parts.slice(1)] };
 }
 
 function startsWithPath(parts) {

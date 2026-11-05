@@ -461,7 +461,7 @@ class RoutesCallJson(TypedDict):
     function: str | None
     def_line: int | None
     method: FrontendMethod
-    method_source: Literal["default", "init", "unresolved"]
+    method_source: Literal["default", "init", "member", "unresolved"]
     urls: list[UrlVariantJson]
     raw: str
     callee: str | None  # the callee name as written; None for WebSocket strings
