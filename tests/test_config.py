@@ -118,6 +118,36 @@ def test_an_unknown_client_kind_is_an_error() -> None:
     )
 
 
+def test_an_instance_client_can_be_an_npm_package_export() -> None:
+    text = (
+        MINIMAL_CONFIG
+        + '\n[[frontend.clients]]\nkind = "instance"\npackage = "axios"\n'
+        + '\n[[frontend.clients]]\nkind = "instance"\npackage = "ky"\nexport = "ky"\nbase_path = "/api"\n'
+    )
+    default, named = parse(text).frontend.clients
+    assert (default.package, default.module, default.export, default.base_path) == ("axios", None, "default", "")
+    assert (named.package, named.module, named.export, named.base_path) == ("ky", None, "ky", "/api")
+    assert default.as_request() == {
+        "kind": "instance",
+        "package": "axios",
+        "export": "default",
+        "default_method": "GET",
+    }
+
+
+def test_an_instance_client_names_a_module_or_a_package_not_both() -> None:
+    both = '\n[[frontend.clients]]\nkind = "instance"\npackage = "axios"\nmodule = "m.ts"\nexport = "a"\n'
+    assert error_of(MINIMAL_CONFIG + both) == (
+        "cfg.toml: 'module' and 'package' in [[frontend.clients]] #1 are mutually exclusive"
+    )
+    assert "'package' in [[frontend.clients]] #1 must be a non-empty string" in error_of(
+        MINIMAL_CONFIG + '\n[[frontend.clients]]\nkind = "instance"\npackage = ""\n'
+    )
+    assert "unknown key 'package'" in error_of(
+        MINIMAL_CONFIG + '\n[[frontend.clients]]\nkind = "call"\nmodule = "m.ts"\nexport = "a"\npackage = "p"\n'
+    )
+
+
 def test_missing_required_keys_are_named() -> None:
     assert error_of(MINIMAL_CONFIG.replace('package = "service_backend"\n', "")) == (
         "cfg.toml: missing required key 'package' in [backend]"

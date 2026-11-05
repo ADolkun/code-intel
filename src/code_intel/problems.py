@@ -12,7 +12,10 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from code_intel.result_types import DiagnosticDict, LimitationDict
 
 Category = Literal["content_lost", "resolver"]
 
@@ -181,16 +184,22 @@ class Problem:
     def is_diagnostic(self) -> bool:
         return self.category is not None
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> DiagnosticDict | LimitationDict:
+        return self.as_limitation() if self.category is None else self.as_diagnostic()
+
+    def as_limitation(self) -> LimitationDict:
+        return {
+            "kind": self.kind,
+            "stage": self.stage,
+            "file": self.file,
+            "line": self.line,
+            "message": self.message,
+        }
+
+    def as_diagnostic(self) -> DiagnosticDict:
         if self.category is None:
-            return {
-                "kind": self.kind,
-                "stage": self.stage,
-                "file": self.file,
-                "line": self.line,
-                "message": self.message,
-            }
-        out: dict = {
+            raise ValueError(f"{self.kind} is a limitation, not a diagnostic")
+        out: DiagnosticDict = {
             "kind": self.kind,
             "category": self.category,
             "stage": self.stage,
@@ -411,6 +420,21 @@ def runtime_is_compatible(minimum: tuple[int, int], version_info: tuple[int, ...
     """
     running = tuple((sys.version_info[:2] if version_info is None else version_info)[:2])
     return running >= tuple(minimum)
+
+
+def runtime_refusal(repo_root: Path, python_version_file: str | None) -> str | None:
+    """The message for refusing to analyze when this interpreter is older than the repo's
+    minimum Python (``python_version_file``, repo-relative), else None."""
+    minimum = min_python_version(repo_root / python_version_file if python_version_file else None)
+    if runtime_is_compatible(minimum):
+        return None
+    running = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    required = "{}.{}".format(*minimum)
+    return (
+        f"Error: Python {running} is older than the repo minimum {required}. "
+        f"Backend source uses syntax this interpreter cannot parse, so results would be "
+        f"silently incomplete. Re-run with Python >={required} (e.g. `uv run --python {required}`)."
+    )
 
 
 def interpreter_likely_cause(minimum: tuple[int, int], version_info: tuple[int, ...] | None = None) -> str | None:
