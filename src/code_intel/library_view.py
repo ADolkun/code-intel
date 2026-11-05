@@ -58,9 +58,30 @@ class LibraryView:
     capture: LibraryCapture | None
     problems: tuple[Problem, ...]
 
-    @property
-    def hint(self) -> str:
+    def absent(self, attempted: bool) -> str:
+        """What a gap's message adds when the capture has no entry for it. A gap the capture
+        recorded as unfilled is not helped by capturing again."""
+        if attempted:
+            return " (the capture could not fill it; code-intel capture prints why)"
         return f" (not in {self.file}; {FIX})"
+
+    def _unfilled(self) -> library_capture.Unfilled:
+        return (
+            library_capture.unfilled_of(self.capture)
+            if self.capture is not None
+            else {"includes": [], "dependencies": []}
+        )
+
+    def attempted_include(self, file: str, router: str, occurrence: int) -> bool:
+        return any(library_capture.include_key(i) == (file, router, occurrence) for i in self._unfilled()["includes"])
+
+    def attempted_binding(self, binding_id: str, bound_to: str) -> bool:
+        return any(
+            d.get("binding") == binding_id and d.get("bound_to") == bound_to for d in self._unfilled()["dependencies"]
+        )
+
+    def attempted_external(self, dotted: str) -> bool:
+        return any(d.get("external") == dotted for d in self._unfilled()["dependencies"])
 
     def stale(self, message: str) -> Problem:
         return limitation(

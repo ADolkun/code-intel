@@ -15,7 +15,7 @@ import test_verify
 from fixture_repo import hermetic_git
 from library_cases import COMPLETE, GAPS, LibraryCase
 from library_fixture import checkout, lock_text
-from test_capture import CAPTURE_FILE, edit_main, run_capture
+from test_capture import CAPTURE_FILE, bind_unfilled_dependency, edit_main, run_capture
 
 from code_intel import (
     di_map,
@@ -134,7 +134,21 @@ def test_the_library_routers_are_router_nodes_with_the_include_as_their_place(ca
 def test_no_unresolved_include_is_reported_for_a_captured_router_and_the_mixed_one_stays(captured: Path) -> None:
     messages = limitations(di_of(captured), "unresolved_include")
     assert len(messages) == 1 and "make_mixed_router" in messages[0]
-    assert "(not in .code-intel/library-capture.json; run code-intel capture)" in messages[0]
+    assert "(the capture could not fill it; code-intel capture prints why)" in messages[0]
+    assert "run code-intel capture" not in messages[0]
+
+
+def test_a_gap_the_capture_could_not_fill_says_so_instead_of_asking_for_a_capture(captured: Path) -> None:
+    bind_unfilled_dependency(captured, "get_manager")
+    run_capture(captured)
+    di = di_of(captured)
+    unresolved = limitations(di, "unresolved_dependency")
+    assert any(
+        "Depends(mine)" in m and "(the capture could not fill it; code-intel capture prints why)" in m
+        for m in unresolved
+    )
+    assert not any("Depends(mine)" in m and "run code-intel capture" in m for m in unresolved)
+    assert limitations(di, "library_capture_stale") == []
 
 
 def test_an_include_that_a_condition_guards_is_conditional_like_any_other(captured: Path) -> None:

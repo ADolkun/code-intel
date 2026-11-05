@@ -12,6 +12,13 @@ app (``format: 1``); the analysis reads it without running anything.
   text of the expression it is bound to) and of installed callables named in the
   package (``external``, a dotted name).
 - ``callables``: where each installed dependency callable is defined.
+- ``unfilled`` (optional, never empty): the gaps the capture tried and could not
+  fill, or filled with something the analysis does not apply, so that
+  ``capture --if-stale`` does not start the app again for them. It has
+  ``includes`` (by the same file, router text and occurrence as an include) and
+  ``dependencies`` (by ``binding`` with ``bound_to``, or ``external``, as a
+  dependency), and only those keys: the reason the app gave can hold a path of
+  the machine that captured. A gap whose identity changed is not in it.
 
 A dependency node with ``sub`` is a callable of installed code and the capture
 owns its subtree; a node without it is a callable of the backend package, whose
@@ -78,6 +85,23 @@ class CapturedDependency(TypedDict):
     external: NotRequired[str]
 
 
+class UnfilledInclude(TypedDict):
+    file: str
+    router: str
+    occurrence: int
+
+
+class UnfilledDependency(TypedDict):
+    binding: NotRequired[str]
+    bound_to: NotRequired[str]
+    external: NotRequired[str]
+
+
+class Unfilled(TypedDict):
+    includes: list[UnfilledInclude]
+    dependencies: list[UnfilledDependency]
+
+
 class LibraryCapture(TypedDict):
     format: int
     app: str
@@ -85,6 +109,7 @@ class LibraryCapture(TypedDict):
     includes: list[CapturedInclude]
     dependencies: list[CapturedDependency]
     callables: dict[str, Location]
+    unfilled: NotRequired[Unfilled]
 
 
 def empty(app: str) -> LibraryCapture:
@@ -238,12 +263,16 @@ def _include(value: object, where: str) -> CapturedInclude:
     }
 
 
-def _dependency(value: object, where: str) -> CapturedDependency:
-    data = _object(value, where, ("id", "sub"), ("binding", "bound_to", "external"))
+def _check_dependency_identity(data: dict[str, object], where: str) -> None:
     if ("binding" in data) == ("external" in data):
         raise _fail(where, "needs exactly one of 'binding' and 'external'")
     if ("bound_to" in data) != ("binding" in data):
         raise _fail(where, "missing 'bound_to'" if "binding" in data else "unknown key 'bound_to'")
+
+
+def _dependency(value: object, where: str) -> CapturedDependency:
+    data = _object(value, where, ("id", "sub"), ("binding", "bound_to", "external"))
+    _check_dependency_identity(data, where)
     dependency: CapturedDependency = {
         "id": _text(data["id"], f"{where}.id"),
         "sub": _nodes(data["sub"], f"{where}.sub"),
@@ -254,6 +283,44 @@ def _dependency(value: object, where: str) -> CapturedDependency:
     if "external" in data:
         dependency["external"] = _text(data["external"], f"{where}.external")
     return dependency
+
+
+def _unfilled_include(value: object, where: str) -> UnfilledInclude:
+    data = _object(value, where, ("file", "router", "occurrence"))
+    return {
+        "file": _text(data["file"], f"{where}.file"),
+        "router": _text(data["router"], f"{where}.router"),
+        "occurrence": _number(data["occurrence"], f"{where}.occurrence"),
+    }
+
+
+def _unfilled_dependency(value: object, where: str) -> UnfilledDependency:
+    data = _object(value, where, (), ("binding", "bound_to", "external"))
+    _check_dependency_identity(data, where)
+    dependency: UnfilledDependency = {}
+    if "binding" in data:
+        dependency["binding"] = _text(data["binding"], f"{where}.binding")
+        dependency["bound_to"] = _text(data["bound_to"], f"{where}.bound_to")
+    if "external" in data:
+        dependency["external"] = _text(data["external"], f"{where}.external")
+    return dependency
+
+
+def _unfilled(value: object) -> Unfilled:
+    data = _object(value, "unfilled", ("includes", "dependencies"))
+    unfilled: Unfilled = {
+        "includes": [
+            _unfilled_include(item, f"unfilled.includes[{k}]")
+            for k, item in enumerate(_items(data["includes"], "unfilled.includes"))
+        ],
+        "dependencies": [
+            _unfilled_dependency(item, f"unfilled.dependencies[{k}]")
+            for k, item in enumerate(_items(data["dependencies"], "unfilled.dependencies"))
+        ],
+    }
+    if not unfilled["includes"] and not unfilled["dependencies"]:
+        raise _fail("unfilled", "is empty; leave the key out")
+    return unfilled
 
 
 def _library_ids(nodes: list[DepNode]) -> set[str]:
@@ -298,19 +365,28 @@ def from_json(data: object) -> LibraryCapture:
             for callable_id, location in callables.items()
         },
     }
+    if "unfilled" in top:
+        capture["unfilled"] = _unfilled(top["unfilled"])
     _check_consistent(capture)
     return capture
 
 
-def _check_consistent(capture: LibraryCapture) -> None:
+def named_callables(includes: list[CapturedInclude], dependencies: list[CapturedDependency]) -> set[str]:
+    """The ids of the installed callables the entries name; each needs a location in ``callables``."""
     named: set[str] = set()
-    dists = {entry["dist"] for entry in capture["callables"].values()}
-    for include in capture["includes"]:
+    for include in includes:
         for route in include["routes"]:
             named |= _library_ids(route["route_deps"]) | _library_ids(route["param_deps"])
-            dists.add(route["location"]["dist"])
-    for dependency in capture["dependencies"]:
+    for dependency in dependencies:
         named |= {dependency["id"], *_library_ids(dependency["sub"])}
+    return named
+
+
+def _check_consistent(capture: LibraryCapture) -> None:
+    dists = {entry["dist"] for entry in capture["callables"].values()}
+    for include in capture["includes"]:
+        dists.update(route["location"]["dist"] for route in include["routes"])
+    named = named_callables(capture["includes"], capture["dependencies"])
     missing = sorted(named - set(capture["callables"]))
     if missing:
         raise _fail("callables", f"has no location for {missing[0]!r}")
@@ -340,11 +416,11 @@ def dumps(capture: LibraryCapture) -> str:
     return json.dumps(capture, indent=1, sort_keys=True) + "\n"
 
 
-def include_key(include: CapturedInclude) -> tuple[str, str, int]:
+def include_key(include: CapturedInclude | UnfilledInclude) -> tuple[str, str, int]:
     return include["file"], include["router"], include["occurrence"]
 
 
-def dependency_key(dependency: CapturedDependency) -> str:
+def dependency_key(dependency: CapturedDependency | UnfilledDependency) -> str:
     return dependency["binding"] if "binding" in dependency else f"external {dependency.get('external', '')}"
 
 
@@ -366,9 +442,23 @@ def differences(old: LibraryCapture, new: LibraryCapture) -> list[str]:
     new_deps = {dependency_key(d): d for d in new["dependencies"]}
     for key in sorted(old_deps.keys() | new_deps.keys()):
         lines.extend(_entry_change(f"dependency {key}", old_deps.get(key), new_deps.get(key)))
+    old_unfilled, new_unfilled = unfilled_of(old), unfilled_of(new)
+    old_gaps = {include_key(i): i for i in old_unfilled["includes"]}
+    new_gaps = {include_key(i): i for i in new_unfilled["includes"]}
+    for key in sorted(old_gaps.keys() | new_gaps.keys()):
+        label = f"unfilled include {key[0]} {key[1]} #{key[2]}"
+        lines.extend(_entry_change(label, old_gaps.get(key), new_gaps.get(key)))
+    old_gap_deps = {dependency_key(d): d for d in old_unfilled["dependencies"]}
+    new_gap_deps = {dependency_key(d): d for d in new_unfilled["dependencies"]}
+    for key in sorted(old_gap_deps.keys() | new_gap_deps.keys()):
+        lines.extend(_entry_change(f"unfilled dependency {key}", old_gap_deps.get(key), new_gap_deps.get(key)))
     if not lines and old != new:
         lines.append("callables or entry order changed")
     return lines
+
+
+def unfilled_of(capture: LibraryCapture) -> Unfilled:
+    return capture.get("unfilled", {"includes": [], "dependencies": []})
 
 
 def _entry_change(label: str, old: Mapping[str, object] | None, new: Mapping[str, object] | None) -> list[str]:
