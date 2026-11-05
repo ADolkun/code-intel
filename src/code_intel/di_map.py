@@ -212,15 +212,14 @@ def build_di(model: BackendModel, resolver: DependencyResolver | NameResolver | 
     """DI JSON v2 for a backend model.
 
     ``resolver`` is the ``DependencyResolver`` to use, or the name resolver to
-    build one over (default: the model's own).
+    build one over (default: the model's own ``DependencyResolver``).
     """
-    dep = (
-        resolver
-        if isinstance(resolver, DependencyResolver)
-        else DependencyResolver(
-            resolver if resolver is not None else model.resolver, model.sources, library=model.library
-        )
-    )
+    if resolver is None:
+        dep = model.dependencies
+    elif isinstance(resolver, DependencyResolver):
+        dep = resolver
+    else:
+        dep = DependencyResolver(resolver, model.sources, library=model.library)
     targets: list[DepTarget] = []
     all_uses: list[DepUse] = []
     reverse: dict[str, set[str]] = {}

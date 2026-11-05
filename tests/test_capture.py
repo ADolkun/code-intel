@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import io
 import os
+import signal
 import stat
+import subprocess
 import sys
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -67,10 +70,10 @@ def test_the_includes_and_dependencies_the_analysis_cannot_see_are_captured(repo
         ("extlib.make_status_router()", [("GET", "/ping"), ("WS", "/live")]),
         ("extlib.make_nested_router()", [("GET", "/v1/inner/item")]),
     ]
-    assert [(d.get("binding") or d.get("external"), d["id"]) for d in capture["dependencies"]] == [
-        ("pkg.main:current", "extlib:Users.current"),
-        ("extlib.Settings", "extlib:Settings"),
-        ("extlib.signed", "extlib:signed"),
+    assert [(d.get("binding") or d.get("external"), d.get("bound_to"), d["id"]) for d in capture["dependencies"]] == [
+        ("pkg.main:current", "users.current(active=True)", "extlib:Users.current"),
+        ("extlib.Settings", None, "extlib:Settings"),
+        ("extlib.signed", None, "extlib:signed"),
     ]
 
 
@@ -295,7 +298,50 @@ def test_the_clean_environment_keeps_only_the_inherited_names_and_the_configured
     assert runner.clean_environment({"KEY": "v", "LANG": "en"}) == {"PATH": "/bin", "LANG": "en", "KEY": "v"}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the fake interpreter is a shell script")
+def test_a_timeout_kills_the_whole_process_group_so_a_child_holding_the_pipe_cannot_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_file = tmp_path / "child.pid"
+    fake = tmp_path / "python"
+    fake.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pid_file}\nsleep 30\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr(runner, "TIMEOUT_S", 1)
+    began = time.monotonic()
+    with pytest.raises(runner.OracleRunError, match="TimeoutExpired"):
+        runner.run_oracle(fake, [], {})
+    assert time.monotonic() - began < 10
+    child = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(child, signal.SIGKILL)
+        pytest.fail("the child that held the pipe outlived the timeout")
+
+
 # ── Nothing else runs repository code ────────────────────────────────────
+
+NEVER_IMPORTED_BY_THE_SERVER = (
+    "code_intel.runner",
+    "code_intel.capture",
+    "code_intel.verify",
+    "code_intel.runtime_check",
+)
+
+
+def test_importing_the_mcp_server_never_imports_a_module_that_starts_the_app() -> None:
+    probe = (
+        "import sys, code_intel.server\n"
+        f"print([name for name in {NEVER_IMPORTED_BY_THE_SERVER!r} if name in sys.modules])"
+    )
+    done = subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True, check=True)
+    assert done.stdout.strip() == "[]"
+
 
 MARKER_CONFIG_TABLE = '\n[backend.capture]\npython = "bin/python"\n'
 

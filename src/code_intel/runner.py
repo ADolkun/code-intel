@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -55,6 +56,28 @@ def interpreter(option: Path | None, capture: CaptureConfig | None, repo_root: P
     return resolve_python(Path(capture.python), repo_root, label="[backend.capture] python", from_cwd=False)
 
 
+def _run(command: Sequence[str], cwd: str, env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+    """Runs ``command`` in a session of its own; on timeout the whole process group is killed, so a
+    child that inherited the output pipes cannot keep this call waiting."""
+    with subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        cwd=cwd,
+        env=dict(env),
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 def run_oracle(
     python: Path, arguments: Sequence[str], env: Mapping[str, str], *, request: object | None = None
 ) -> dict:
@@ -67,16 +90,7 @@ def run_oracle(
             request_file.write_text(json.dumps(request), encoding="utf-8")
             command += ["--capture", str(request_file)]
         try:
-            proc = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=TIMEOUT_S,
-                cwd=tmp,
-                env=clean_environment(env),
-                check=False,
-            )
+            proc = _run(command, tmp, clean_environment(env))
         except (OSError, subprocess.SubprocessError) as exc:
             raise OracleRunError(f"could not run {python} ({type(exc).__name__}: {exc})") from exc
         if proc.returncode != 0:

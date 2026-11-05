@@ -615,10 +615,18 @@ class DependencyResolver:
         filled: DepTarget | None = None
         if view is not None and entry is not None:
             self._matched.add(("binding", binding.id))
-            subs = self._usable(f"dependency {binding.id}", entry["sub"])
-            if subs is not None:
-                filled = replace(binding, runtime_id=entry["id"], library=view.library(entry["id"]))
-                self._captured[_key(filled)] = subs
+            if entry["bound_to"] != binding.bound_to:
+                self.report_stale(
+                    view.not_applied(
+                        f"dependency {binding.id}",
+                        f"it was captured for {entry['bound_to']}, but the package binds the name to {binding.bound_to}",
+                    )
+                )
+            else:
+                subs = self._usable(f"dependency {binding.id}", entry["sub"])
+                if subs is not None:
+                    filled = replace(binding, runtime_id=entry["id"], library=view.library(entry["id"]))
+                    self._captured[_key(filled)] = subs
         self._filled[binding.id] = filled
         return filled
 
@@ -644,7 +652,9 @@ class DependencyResolver:
         assert view is not None
         missing = self.missing_leaf(nodes)
         if missing is not None:
-            self._stale(view.not_applied(entry, f"it names {missing}, which the analysis cannot find in the package"))
+            self.report_stale(
+                view.not_applied(entry, f"it names {missing}, which the analysis cannot find in the package")
+            )
             return None
         return tuple(view.node(node) for node in nodes)
 
@@ -657,7 +667,8 @@ class DependencyResolver:
         """How many of the capture's dependency entries filled a dependency."""
         return sum(1 for target in self._filled.values() if target is not None)
 
-    def _stale(self, problem: Problem) -> None:
+    def report_stale(self, problem: Problem) -> None:
+        """Record a ``library_capture_stale`` finding once per message."""
         if all(p.message != problem.message for p in self._problems):
             self._problems.append(problem)
 
@@ -670,7 +681,7 @@ class DependencyResolver:
             kind, name = ("binding", entry["binding"]) if "binding" in entry else ("external", entry["external"])
             if (kind, name) not in self._matched:
                 what = "no external dependency binding" if kind == "binding" else "no unresolved dependency"
-                self._stale(view.not_applied(f"{kind} {name}", f"{what} of that name is used"))
+                self.report_stale(view.not_applied(f"{kind} {name}", f"{what} of that name is used"))
 
     def _library_target(self, node: CapturedNode) -> DepTarget:
         """The ``library`` target of an installed callable; its sub-dependencies are the capture's."""

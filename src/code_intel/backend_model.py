@@ -19,6 +19,7 @@ from code_intel.code_paths import FileStamp
 from code_intel.problems import Problem
 
 if TYPE_CHECKING:
+    from code_intel.dependency_resolver import DependencyResolver
     from code_intel.library_view import LibraryView
 
 RouterKind = Literal["APIRouter", "FastAPI"]
@@ -385,6 +386,8 @@ class BackendModel:
     # `py_sources.PySources`; typed loosely so this module stays free of logic imports.
     sources: Any
     resolver: NameResolver
+    # The graph builder's, shared so DI reads the package's callables and reports stale capture entries once.
+    dependencies: DependencyResolver
     include_model: IncludeModel = NO_INCLUDE_MODEL
     library: LibraryView | None = None
 

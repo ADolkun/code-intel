@@ -26,6 +26,7 @@ from code_intel import cli, include_model, route_map, ts_bridge
 from code_intel.backend_model import BackendModel, CapturedEndpoint, Library, LiveRoute, Located, RouteKind
 from code_intel.code_paths import TS_SUFFIXES, iter_source_files
 from code_intel.config import FrontendConfig, parse_config
+from code_intel.dependency_resolver import DependencyResolver
 from code_intel.problems import Problem, diagnostic, limitation
 
 pytestmark = pytest.mark.usefixtures("module_git")
@@ -1220,6 +1221,8 @@ def model(
     limitations: tuple[Problem, ...] = (),
     unmounted: tuple[LiveRoute, ...] = (),
 ) -> BackendModel:
+    sources = FakeSources({})
+    resolver = FakeResolver(sources)
     return BackendModel(
         app_id="case.main:app",
         redirect_slashes=False,
@@ -1231,7 +1234,8 @@ def model(
         limitations=limitations,
         files_scanned=1,
         sources=None,
-        resolver=FakeResolver(FakeSources({})),
+        resolver=resolver,
+        dependencies=DependencyResolver(resolver, sources),
     )
 
 

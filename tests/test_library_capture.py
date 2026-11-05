@@ -39,7 +39,12 @@ def sample() -> dict[str, Any]:
         "distributions": {"extlib": "1.2.3", "fastapi": "0.162.0"},
         "includes": [{"file": "backend/pkg/main.py", "router": "extlib.make()", "occurrence": 1, "routes": [route]}],
         "dependencies": [
-            {"binding": "pkg.main:current", "id": "extlib:current", "sub": [{"id": "extlib:audit", "sub": []}]},
+            {
+                "binding": "pkg.main:current",
+                "bound_to": "extlib.current(active=True)",
+                "id": "extlib:current",
+                "sub": [{"id": "extlib:audit", "sub": []}],
+            },
             {"external": "extlib.Settings", "id": "extlib:Settings", "sub": []},
         ],
         "callables": {
@@ -81,6 +86,7 @@ def mutated(change) -> dict[str, Any]:
     ("change", "message"),
     [
         (lambda d: d.update(format=2), "format: is 2"),
+        (lambda d: d.update(format=True), "format: is True"),
         (lambda d: d.pop("includes"), "missing 'includes'"),
         (lambda d: d["includes"][0].update(occurrence=0), "includes[0].occurrence: must be a positive integer"),
         (lambda d: d["includes"][0].pop("router"), "includes[0]: missing 'router'"),
@@ -89,6 +95,14 @@ def mutated(change) -> dict[str, Any]:
         (lambda d: d["includes"][0]["routes"][0].update(kind="grpc"), "routes[0].kind: must be one of"),
         (lambda d: d["includes"][0]["routes"][0]["route_deps"][0].update(via="app"), "via: must be one of"),
         (lambda d: d["includes"][0]["routes"][0]["location"].update(line=0), "location.line"),
+        (lambda d: d["includes"][0]["routes"][0]["route_deps"][0].pop("via"), "route_deps[0]: missing 'via'"),
+        (lambda d: d["includes"][0]["routes"][0]["param_deps"][0].pop("param"), "param_deps[0]: missing 'param'"),
+        (
+            lambda d: d["includes"][0]["routes"][0]["location"].update(dist="extlib-userz"),
+            "no version for 'extlib-userz'",
+        ),
+        (lambda d: d["dependencies"][0].pop("bound_to"), "dependencies[0]: missing 'bound_to'"),
+        (lambda d: d["dependencies"][1].update(bound_to="x"), "dependencies[1]: unknown key 'bound_to'"),
         (lambda d: d["dependencies"][0].update(external="x"), "exactly one of 'binding' and 'external'"),
         (lambda d: d["dependencies"][1].pop("external"), "exactly one of 'binding' and 'external'"),
         (lambda d: d["callables"].pop("extlib:audit"), "no location for 'extlib:audit'"),
@@ -152,7 +166,9 @@ def test_differences_name_each_added_removed_and_changed_entry() -> None:
     data["distributions"]["extlib"] = "1.2.4"
     data["includes"][0]["routes"][0]["path"] = "/you"
     data["dependencies"].pop(1)
-    data["dependencies"].append({"binding": "pkg.main:other", "id": "extlib:audit", "sub": []})
+    data["dependencies"].append(
+        {"binding": "pkg.main:other", "bound_to": "extlib.other()", "id": "extlib:audit", "sub": []}
+    )
     assert library_capture.differences(old, library_capture.from_json(data)) == [
         "distribution extlib: 1.2.3 -> 1.2.4",
         "include backend/pkg/main.py extlib.make() #1: changed",

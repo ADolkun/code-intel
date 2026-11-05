@@ -552,7 +552,7 @@ class _Builder:
         self._library_nodes: dict[tuple, _LibraryNode] = {}
         # Keys of the capture's include entries that matched a call, applied or not.
         self._library_matched: set[tuple[str, str, int]] = set()
-        self._package_callables = DependencyResolver(self.ev, sources)
+        self.dependencies = DependencyResolver(self.ev, sources, library=library)
         # Calls past the depth limit or the budget: group -> [count, first call, first callee].
         self._skipped_calls: dict[tuple, list] = {}
         self._frame_keys: dict[tuple, tuple] = {}
@@ -2086,9 +2086,9 @@ class _Builder:
         if found is not None:
             return found
         self._library_matched.add(library_capture.include_key(entry))
-        missing = sorted(i for i in library_view.include_package_ids(entry) if self._package_callables.leaf(i) is None)
+        missing = sorted(i for i in library_view.include_package_ids(entry) if self.dependencies.leaf(i) is None)
         if missing:
-            self._report_stale(
+            self.dependencies.report_stale(
                 view.not_applied(
                     f"include {site.router} at {file}:{site.line}",
                     f"it names {missing[0]}, which the analysis cannot find in the package",
@@ -2115,12 +2115,6 @@ class _Builder:
         self._ids.add(ident)
         return ident
 
-    def _report_stale(self, problem: Problem) -> None:
-        key = ("library_capture_stale", problem.message)
-        if key not in self._reported:
-            self._reported.add(key)
-            self.problems.append(problem)
-
     def report_unmatched_captures(self) -> None:
         """A capture entry no unresolved ``include_router`` call matches."""
         view = self.library
@@ -2128,7 +2122,7 @@ class _Builder:
             return
         for include in view.capture["includes"]:
             if library_capture.include_key(include) not in self._library_matched:
-                self._report_stale(
+                self.dependencies.report_stale(
                     view.not_applied(
                         f"include {include['router']} #{include['occurrence']} at {include['file']}",
                         "no unresolved include_router call matches it",
@@ -3335,6 +3329,7 @@ def _build(
     for analysis in builder._analyses.values():
         problems.extend(analysis.facts.problems)
     problems.extend(builder.problems)
+    problems.extend(builder.dependencies.problems)
     diagnostics, limitations = partition(problems)
     limitations.sort(key=lambda p: (p.file or "", p.line or 0, p.kind, p.message))
     return BackendModel(
@@ -3349,6 +3344,7 @@ def _build(
         files_scanned=sources.files_scanned,
         sources=sources,
         resolver=builder.ev,
+        dependencies=builder.dependencies,
         include_model=include_model,
         library=library,
     )

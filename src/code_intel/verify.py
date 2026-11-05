@@ -506,8 +506,7 @@ def check_library_capture(s: Subject) -> Verdict:
 
     backend = s.config.backend
     configured = backend.capture
-    if configured is None:
-        raise CannotRun("the config has no [backend.capture] table")
+    assert configured is not None  # run_check skips the check without the table
     try:
         python = runner.interpreter(None, configured, s.repo_root)
     except runner.OracleRunError as exc:
