@@ -1,8 +1,8 @@
 """Find Node and the helper's TypeScript, and run the TypeScript helper.
 
-TypeScript is the helper's own pinned install (``code-intel setup`` puts it in
-the user cache, shared by every checkout), or the directory named by
-``CODE_INTEL_TYPESCRIPT_DIR``.
+TypeScript is the helper's own pinned install (``code-intel setup``, or the
+first use of a command or tool, puts it in the user cache shared by every
+checkout), or the directory named by ``CODE_INTEL_TYPESCRIPT_DIR``.
 
 The helper (``ts/helper.cjs``) is one-shot: each batch spawns one ``node``
 process, writes one JSON request to stdin and reads one JSON document from
@@ -49,6 +49,8 @@ PROTOCOL_ERROR_EXIT = 2
 FRONTEND_TS_FIX = f'run "code-intel setup" (or set {TS_DIR_ENV} to a typescript package directory)'
 NODE_FIX = f"install Node.js {MIN_NODE_MAJOR} or newer and put node on PATH, or set {NODE_ENV} to the node binary"
 NODE_ENV_FIX = f"set {NODE_ENV} to the path of a Node.js {MIN_NODE_MAJOR}+ binary, or unset it to use node from PATH"
+PROVISIONING_MESSAGE = "TypeScript is not installed yet; it is being installed in the background (one-time, first use)"
+PROVISIONING_FIX = "retry in a minute: the frontend answers once the install finishes"
 HELPER_FIX = "run the helper by hand (see README, Commands) to see the full error"
 
 ProblemCode = Literal[
@@ -59,6 +61,7 @@ ProblemCode = Literal[
     "typescript_unreadable",
     "typescript_unsupported",
     "toolchain_incomplete",
+    "frontend_provisioning",
     "helper_failed",
     "frontend_not_found",
 ]

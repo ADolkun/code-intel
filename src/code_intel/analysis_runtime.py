@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from code_intel import code_paths, doc_rules, library_view, loaded_code, problems, ts_bridge
+from code_intel import code_paths, doc_rules, library_view, loaded_code, problems, provision, ts_bridge
 from code_intel import include_model as include_models
 from code_intel.code_paths import GIT_CREATIONFLAGS as _GIT_CREATIONFLAGS
 from code_intel.code_paths import GIT_ERRORS as _GIT_ERRORS
@@ -718,7 +718,7 @@ class AnalysisRuntime:
         tool_dir: Path = PACKAGE_DIR,
         pin_files: Sequence[Path] = (),
         clock: Callable[[], int] = time.time_ns,
-        find_toolchain: Callable[[Path], Toolchain] = ts_bridge.find_toolchain,
+        find_toolchain: Callable[[Path], Toolchain] = provision.find_toolchain,
         analyzers: Analyzers | None = None,
         version_info: tuple[int, int] | None = None,
         code_loaded_at_ns: int | None = None,

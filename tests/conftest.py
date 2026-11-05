@@ -15,7 +15,7 @@ from typing import NoReturn
 
 import pytest
 
-from code_intel import code_paths, ts_bridge
+from code_intel import code_paths, provision, ts_bridge
 
 REQUIRE_TOOLCHAIN_ENV = "CODE_INTEL_REQUIRE_TOOLCHAIN"
 
@@ -26,6 +26,12 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "real_ctime: keep the kernel's ctime in file stamps where ctime_follows_mtime applies"
     )
+
+
+@pytest.fixture(autouse=True)
+def no_automatic_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that finds no toolchain must not start an npm install; the tests of the install pass their own env."""
+    monkeypatch.setenv(provision.NO_AUTO_ENV, "1")
 
 
 @pytest.fixture

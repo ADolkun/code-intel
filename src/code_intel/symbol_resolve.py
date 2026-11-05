@@ -57,10 +57,11 @@ from code_intel.code_paths import (
 from code_intel.config import Config
 from code_intel.problems import Problem, diagnostic, partition
 from code_intel.protocol_match import BaseRef, ClassRec, ClassTable, MemberRec, ProtocolMatch
+from code_intel.provision import find_toolchain
 from code_intel.py_sources import module_name_for, resolve_relative
 from code_intel.repo_files import RepoFilesError, list_repo_files
 from code_intel.result_types import SCHEMA_VERSION
-from code_intel.ts_bridge import HelperError, ToolchainProblem, find_toolchain, frontend_not_found_problem
+from code_intel.ts_bridge import HelperError, ToolchainProblem, frontend_not_found_problem
 from code_intel.ts_facts import FactsCache, ToolchainUnavailable, TsDecl, facts_problems
 
 Language = Literal["python", "typescript"]

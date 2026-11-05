@@ -4,8 +4,9 @@ The helper's pinned ``package.json`` and ``package-lock.json`` are installed wit
 ``npm ci --ignore-scripts`` into ``install_dir()`` in the user cache. Every
 checkout, worktree and repository shares that install, and a second run finds it
 and does not call npm. The install is built in a staging directory and renamed
-into place, so a run that fails or is killed leaves nothing half-installed and
-two runs at once cannot corrupt each other.
+into place, so a run that fails or is killed leaves nothing half-installed, and
+a lock file makes runs at once take turns: the one that waits finds the winner's
+install and does not call npm. ``provision`` runs the same install on first use.
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +33,30 @@ PACKAGED_FILES = ("package.json", "package-lock.json")
 
 
 class SetupError(RuntimeError):
-    """Setup cannot finish; ``str()`` says why and what to do."""
+    """Setup cannot finish; ``str()`` says why and what to do, ``summary`` is its first line."""
+
+    def __init__(self, message: str, summary: str | None = None) -> None:
+        super().__init__(message)
+        self.summary = summary or message.splitlines()[0]
+
+
+if sys.platform == "win32":
+
+    @contextmanager
+    def _exclusive(path: Path) -> Iterator[None]:
+        # No flock here; the rename in `_build` still keeps the install whole.
+        yield
+
+else:
+    import fcntl
+
+    @contextmanager
+    def _exclusive(path: Path) -> Iterator[None]:
+        """Hold an exclusive lock on ``path`` (created when missing) until the block ends or the process dies."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -46,10 +71,14 @@ def _toolchain(
     return ts_bridge.find_toolchain(Path.cwd(), env={**env, ts_bridge.TS_DIR_ENV: ""}, which=which, run=run)
 
 
-def _npm_failure(proc: subprocess.CompletedProcess) -> str:
+def _npm_failure(proc: subprocess.CompletedProcess) -> SetupError:
     text = (proc.stderr or b"").decode("utf-8", "replace") or (proc.stdout or b"").decode("utf-8", "replace")
-    tail = "\n".join(text.strip().splitlines()[-10:]) or "(no output)"
-    return f"npm ci exited with code {proc.returncode}:\n{tail}"
+    lines = text.strip().splitlines()
+    tail = "\n".join(lines[-10:]) or "(no output)"
+    return SetupError(
+        f"npm ci exited with code {proc.returncode}:\n{tail}",
+        f"npm ci exited with code {proc.returncode} ({lines[0] if lines else 'no output'})",
+    )
 
 
 def _build(target: Path, npm: str, run: Callable[..., Any]) -> None:
@@ -64,7 +93,7 @@ def _build(target: Path, npm: str, run: Callable[..., Any]) -> None:
         except (OSError, subprocess.SubprocessError) as exc:
             raise SetupError(f"could not run npm ({type(exc).__name__}: {exc})") from exc
         if proc.returncode != 0:
-            raise SetupError(_npm_failure(proc))
+            raise _npm_failure(proc)
         try:
             os.rename(stage, target)
         except OSError:
@@ -81,7 +110,8 @@ def install(
     which: Callable[[str], str | None] = shutil.which,
     run: Callable[..., Any] = subprocess.run,
 ) -> tuple[ts_bridge.Toolchain, bool]:
-    """Make the cache install usable. Returns the toolchain and whether npm ran.
+    """Make the cache install usable. Returns the toolchain and whether npm ran
+    (not when another run installed it while this one waited for the lock).
 
     Raises ``SetupError`` when node is missing or too old, npm is missing or
     fails, or the install does not pass the toolchain probe afterwards.
@@ -96,9 +126,16 @@ def install(
     if npm is None:
         raise SetupError("npm not found on PATH (it ships with Node.js)")
     target = ts_bridge.install_dir(env)
-    if target.exists():
-        shutil.rmtree(target)
-    _build(target, npm, run)
+    with _exclusive(target.parent / f".{target.name}.lock"):
+        toolchain = _toolchain(env, which, run)
+        if toolchain.available:
+            return toolchain, False
+        # Under the lock no install is running, so a staging directory is a killed run's.
+        for stale in target.parent.glob(".stage-*"):
+            shutil.rmtree(stale, ignore_errors=True)
+        if target.exists():
+            shutil.rmtree(target)
+        _build(target, npm, run)
     toolchain = _toolchain(env, which, run)
     if not toolchain.available:
         detail = f"{toolchain.problem.message}. Fix: {toolchain.problem.fix}" if toolchain.problem else "unknown"

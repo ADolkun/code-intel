@@ -46,6 +46,7 @@ from code_intel import (
     doc_rules,
     loaded_code,
     presenters,
+    provision,
     queries,
 )
 from code_intel.analysis_runtime import AnalysisFailed, AnalysisRuntime, FrontendFailed, FrontendProblem, InvalidRoot
@@ -168,6 +169,7 @@ def configure(repo_root: Path, config_file: ConfigFile) -> AnalysisRuntime:
         config_file,
         analysis_runtime.watched_files(),
         pin_files=[repo_root / analysis_runtime.PIN_REL],
+        find_toolchain=functools.partial(provision.find_toolchain, background=True),
         code_loaded_at_ns=loaded_code.LOADED_AT_NS,
         code_imported=loaded_code.IMPORTED,
     )
