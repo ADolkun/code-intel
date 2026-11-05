@@ -43,17 +43,23 @@ def _fake_repo(tmp_path: Path, ts_version: str | None = "7.1.0-beta") -> Path:
     return repo
 
 
-def _fake_run(stdout: bytes = b"v24.21.0\n", returncode: int = 0, stderr: bytes = b"", raises=None):
-    calls: list[dict] = []
+class _FakeRun:
+    def __init__(self, stdout: bytes, returncode: int, stderr: bytes, raises: BaseException | None) -> None:
+        self.calls: list[dict] = []
+        self._result = SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+        self._raises = raises
 
-    def run(cmd, **kwargs):
-        calls.append({"cmd": cmd, **kwargs})
-        if raises is not None:
-            raise raises
-        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+    def __call__(self, cmd, **kwargs):
+        self.calls.append({"cmd": cmd, **kwargs})
+        if self._raises is not None:
+            raise self._raises
+        return self._result
 
-    run.calls = calls  # type: ignore[attr-defined]
-    return run
+
+def _fake_run(
+    stdout: bytes = b"v24.21.0\n", returncode: int = 0, stderr: bytes = b"", raises: BaseException | None = None
+) -> _FakeRun:
+    return _FakeRun(stdout, returncode, stderr, raises)
 
 
 def _which(path: str | None = "/usr/local/bin/node"):
@@ -73,8 +79,8 @@ def test_find_toolchain_ok(tmp_path: Path) -> None:
         "7.1.0-beta",
     )
     assert tc.warnings == ()
-    assert run.calls[0]["cmd"] == ["/usr/local/bin/node", "--version"]  # type: ignore[attr-defined]
-    assert run.calls[0]["timeout"] == 5.0  # type: ignore[attr-defined]
+    assert run.calls[0]["cmd"] == ["/usr/local/bin/node", "--version"]
+    assert run.calls[0]["timeout"] == 5.0
     stamp = tc.stamp()
     assert stamp[:2] == ("v24.21.0", "/usr/local/bin/node")
     # No "./sync" export: the compiler is stamped by its package.json.
@@ -298,7 +304,7 @@ def test_find_toolchain_node_override(tmp_path: Path) -> None:
     never = lambda name: None  # noqa: E731
     tc = ts_bridge.find_toolchain(repo, env=_env(tmp_path, {ts_bridge.NODE_ENV: str(node)}), which=never, run=run)
     assert tc.available and (tc.node, tc.node_source) == (str(node), "env")
-    assert run.calls[0]["cmd"] == [str(node), "--version"]  # type: ignore[attr-defined]
+    assert run.calls[0]["cmd"] == [str(node), "--version"]
 
     # A relative path is taken relative to the repo root, not the working
     # directory, and comes back absolute because the helper runs from the repo.
@@ -420,7 +426,7 @@ def test_run_helper_sends_request_over_stdin(tmp_path: Path) -> None:
     tc = _available_toolchain(tmp_path)
     out = ts_bridge.run_helper(tc, "facts", {"files": ["/x.tsx"], "protocol": 99}, timeout_s=7, run=run)
     assert out == {"protocol": 1, "mode": "facts", "files": []}
-    [call] = run.calls  # type: ignore[attr-defined]
+    [call] = run.calls
     assert call["cmd"] == ["/usr/local/bin/node", str(ts_bridge.HELPER)]
     assert call["timeout"] == 7 and call["cwd"] == str(tmp_path) and call["capture_output"]
     sent = json.loads(call["input"])
@@ -432,7 +438,7 @@ def test_run_helper_uses_create_no_window_on_windows(tmp_path: Path, monkeypatch
     monkeypatch.setattr(ts_bridge, "_IS_WINDOWS", True)
     run = _fake_run(stdout=_ok_response())
     ts_bridge.run_helper(_available_toolchain(tmp_path), "facts", {}, timeout_s=1, run=run)
-    assert run.calls[0]["creationflags"] == 0x08000000  # type: ignore[attr-defined]
+    assert run.calls[0]["creationflags"] == 0x08000000
 
 
 @pytest.mark.parametrize(

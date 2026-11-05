@@ -29,14 +29,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from code_intel import code_paths, py_escapes
+from code_intel.ast_nodes import FunctionNode, body_nodes, literal_strings, start_position
 from code_intel.backend_model import Binding, BindingKind, PyModule
 from code_intel.code_paths import FileStamp, SourceFile
 from code_intel.problems import Problem, diagnostic
 
 STAGE = "load backend sources"
 
-_TRY_TYPES: tuple[type, ...] = (ast.Try, ast.TryStar)
-_TYPE_ALIAS_TYPES: tuple[type, ...] = (ast.TypeAlias,)
 # What `ast.parse` raises for source it cannot turn into a tree: bad syntax, a
 # null byte, or nesting deeper than the parser or the C stack allow.
 _PARSE_ERRORS: tuple[type[BaseException], ...] = (SyntaxError, ValueError, RecursionError, MemoryError)
@@ -73,7 +72,6 @@ MUTATING_METHODS = frozenset(
         "__delitem__",
     }
 )
-_FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 
 
 # ── Static truth ─────────────────────────────────────────────────────────
@@ -310,13 +308,12 @@ _LINE_END = re.compile(r"\r\n|\r|\n")
 
 def _source_segment(text: str, node: ast.AST) -> str | None:
     """``ast.get_source_segment`` over the cached lines (columns are UTF-8 offsets)."""
-    try:
-        first, last = node.lineno - 1, node.end_lineno - 1  # type: ignore[attr-defined]
-        start, end = node.col_offset, node.end_col_offset  # type: ignore[attr-defined]
-    except AttributeError:
+    first, last = getattr(node, "lineno", None), getattr(node, "end_lineno", None)
+    start, end = getattr(node, "col_offset", None), getattr(node, "end_col_offset", None)
+    if first is None or last is None or start is None or end is None:
         return None
-    if None in (first, last, start, end):
-        return None
+    first -= 1
+    last -= 1
     lines = _source_lines(text)
     if not 0 <= first <= last < len(lines):
         return None
@@ -336,7 +333,7 @@ def source_text(mod: PyModule, node: ast.AST, limit: int = 200) -> str:
         text = None
     if text is None:
         try:
-            text = ast.unparse(node)  # type: ignore[arg-type]
+            text = ast.unparse(node)
         except _UNPARSE_ERRORS:
             text = f"<{type(node).__name__}>"
     text = " ".join(text.split())
@@ -487,10 +484,10 @@ class ModuleScope:
             self._add(stmt.name, "def", stmt, None, *ctx)
         elif isinstance(stmt, ast.ClassDef):
             self._add(stmt.name, "class", stmt, None, *ctx)
-        elif _TYPE_ALIAS_TYPES and isinstance(stmt, _TYPE_ALIAS_TYPES):
-            name = stmt.name  # type: ignore[attr-defined]
+        elif isinstance(stmt, ast.TypeAlias):
+            name = stmt.name
             if isinstance(name, ast.Name):
-                self._add(name.id, "type_alias", stmt, stmt.value, *ctx)  # type: ignore[attr-defined]
+                self._add(name.id, "type_alias", stmt, stmt.value, *ctx)
         elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
             self._bind_import(stmt, ctx)
         else:
@@ -540,8 +537,8 @@ class ModuleScope:
             for item in stmt.items:
                 if item.optional_vars is not None:
                     self._bind_target(item.optional_vars, None, "with", stmt, *ctx)
-        elif _TRY_TYPES and isinstance(stmt, _TRY_TYPES):
-            for k, handler in enumerate(stmt.handlers):  # type: ignore[attr-defined]
+        elif isinstance(stmt, (ast.Try, ast.TryStar)):
+            for k, handler in enumerate(stmt.handlers):
                 if handler.name:
                     hblocks = (*blocks, (id(stmt), f"handler{k}"))
                     self._add(handler.name, "except", handler, None, index, _end(handler), hblocks, (*cond, True))
@@ -563,7 +560,7 @@ class ModuleScope:
 
     def index_of(self, node: ast.AST) -> int | None:
         """Top-level statement index whose source span holds ``node``, if any."""
-        pos = _start(node)
+        pos = start_position(node)
         if pos is None:
             return None
         k = bisect.bisect_right(self._top_starts, pos) - 1
@@ -590,7 +587,7 @@ class ModuleScope:
     def _use_position(self, at: int | None, node: ast.AST | None) -> tuple[int, int] | None:
         if at is None:
             return None
-        pos = _start(node)
+        pos = start_position(node)
         if pos is None or node is None or self.index_of(node) != at:
             pos = self._top_starts[at] if 0 <= at < len(self._top_starts) else None
         return pos
@@ -711,10 +708,10 @@ class ModuleScope:
                 binding.kind not in ("assign", "annotated_assign")
                 or binding.conditional
                 or not isinstance(value, (ast.List, ast.Tuple))
-                or not all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in value.elts)
             ):
                 return None
-            return tuple(e.value for e in value.elts)  # type: ignore[union-attr]
+            names = literal_strings(value.elts)
+            return None if names is None else tuple(names)
         if self._stars:
             return None  # names a star import brings in are re-exported too
         return tuple(sorted(n for n in self._by_name if not n.startswith("_")))
@@ -727,13 +724,6 @@ def _stmt_start(stmt: ast.stmt) -> tuple[int, int]:
     for dec in getattr(stmt, "decorator_list", ()):
         start = min(start, (dec.lineno, dec.col_offset))
     return start
-
-
-def _start(node: ast.AST | None) -> tuple[int, int] | None:
-    lineno = getattr(node, "lineno", None)
-    if lineno is None:
-        return None
-    return (lineno, getattr(node, "col_offset", 0) or 0)
 
 
 def _end(node: ast.AST) -> tuple[int, int]:
@@ -756,14 +746,14 @@ def _child_blocks(stmt: ast.stmt, static: StaticNames | None = None) -> Iterator
             yield "orelse", stmt.orelse, True
     elif isinstance(stmt, (ast.With, ast.AsyncWith)):
         yield "body", stmt.body, False
-    elif _TRY_TYPES and isinstance(stmt, _TRY_TYPES):
-        yield "body", stmt.body, False  # type: ignore[attr-defined]
-        for k, handler in enumerate(stmt.handlers):  # type: ignore[attr-defined]
+    elif isinstance(stmt, (ast.Try, ast.TryStar)):
+        yield "body", stmt.body, False
+        for k, handler in enumerate(stmt.handlers):
             yield f"handler{k}", handler.body, True
-        if stmt.orelse:  # type: ignore[attr-defined]
-            yield "orelse", stmt.orelse, True  # type: ignore[attr-defined]
-        if stmt.finalbody:  # type: ignore[attr-defined]
-            yield "finalbody", stmt.finalbody, False  # type: ignore[attr-defined]
+        if stmt.orelse:
+            yield "orelse", stmt.orelse, True
+        if stmt.finalbody:
+            yield "finalbody", stmt.finalbody, False
     elif isinstance(stmt, ast.Match):
         for k, case in enumerate(stmt.cases):
             yield f"case{k}", case.body, True
@@ -811,7 +801,7 @@ def _executed_walrus(stmt: ast.stmt) -> Iterator[ast.NamedExpr]:
         todo = [*stmt.decorator_list, *stmt.bases, *(k.value for k in stmt.keywords)]
     elif isinstance(stmt, ast.Match):
         todo = [stmt.subject]
-    elif _TYPE_ALIAS_TYPES and isinstance(stmt, _TYPE_ALIAS_TYPES):
+    elif isinstance(stmt, ast.TypeAlias):
         todo = []
     while todo:
         node = todo.pop()
@@ -889,7 +879,7 @@ def _module_aliases(tree: ast.Module) -> list[tuple[str, tuple[str, tuple[str, .
     through one is a change through the other."""
     out: list[tuple[str, tuple[str, tuple[str, ...]]]] = []
     for node in ast.walk(tree):
-        if isinstance(node, _FUNCTION_TYPES + (ast.ClassDef,)):
+        if isinstance(node, (FunctionNode, ast.ClassDef)):
             continue
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, (ast.Name, ast.Attribute)):
             source = _receiver(node.value)
@@ -949,12 +939,11 @@ def _expand_receivers(
     return out
 
 
-def _function_locals(fn: ast.AST) -> tuple[set[str], set[str]]:
+def _function_locals(fn: FunctionNode) -> tuple[set[str], set[str]]:
     """(local names, names declared ``global``) of one function or lambda scope."""
-    names = _parameter_names(fn.args)  # type: ignore[attr-defined]
+    names = _parameter_names(fn.args)
     declared: set[str] = set()
-    body = fn.body if isinstance(fn.body, list) else [fn.body]  # type: ignore[attr-defined]
-    todo: list[ast.AST] = list(body)
+    todo = body_nodes(fn)
     while todo:
         node = todo.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -1013,33 +1002,33 @@ def _changes_in(
     todo: list[tuple[ast.AST, frozenset[str], bool]] = [(tree, frozenset(), False)]
     while todo:
         node, shadowed, deferred = todo.pop()
-        if isinstance(node, _FUNCTION_TYPES):
+        if isinstance(node, FunctionNode):
             todo.extend(_function_parts(node, shadowed, deferred, rebound))
             continue
         found_receivers = [_receiver(target) for target in _changed(node)]
         found_receivers.append(_set_attribute(node, shadowed))
         for found_receiver in found_receivers:
             if found_receiver is not None and found_receiver[0] not in shadowed:
-                changes.append((found_receiver, deferred, _start(node) or (0, 0)))
+                changes.append((found_receiver, deferred, start_position(node) or (0, 0)))
         todo.extend((child, shadowed, deferred) for child in ast.iter_child_nodes(node))
     return changes, rebound
 
 
 def _function_parts(
-    node: ast.AST, shadowed: frozenset[str], deferred: bool, rebound: set[str]
+    node: FunctionNode, shadowed: frozenset[str], deferred: bool, rebound: set[str]
 ) -> list[tuple[ast.AST, frozenset[str], bool]]:
     """The parts of a function to scan, with the names local there: decorators
     and defaults run where the ``def`` is, the body later. Names the body
     assigns through ``global`` are added to ``rebound``."""
     local, declared = _function_locals(node)
     inner = frozenset((shadowed | local) - declared)
-    body = node.body if isinstance(node.body, list) else [node.body]  # type: ignore[attr-defined]
+    body = body_nodes(node)
     if declared:
         for sub in body:
             for found in ast.walk(sub):
                 if isinstance(found, ast.Name) and isinstance(found.ctx, ast.Store) and found.id in declared:
                     rebound.add(found.id)
-    args = node.args  # type: ignore[attr-defined]
+    args = node.args
     outer = [*getattr(node, "decorator_list", ()), *args.defaults, *(d for d in args.kw_defaults if d is not None)]
     return [*((child, shadowed, deferred) for child in outer), *((child, inner, True) for child in body)]
 
@@ -1304,7 +1293,7 @@ class PySources:
         mod = self.modules.get(module)
         if mod is None:
             try:
-                return ast.unparse(node)[:limit]  # type: ignore[arg-type]
+                return ast.unparse(node)[:limit]
             except _UNPARSE_ERRORS:
                 return f"<{type(node).__name__}>"
         return source_text(mod, node, limit)

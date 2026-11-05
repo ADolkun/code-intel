@@ -896,12 +896,12 @@ def test_the_prefilter_reaches_modules_that_only_import_a_router(tmp_path: Path)
     }
     write(tmp_path, files)
     sources = router_graph.PySources(tmp_path, "pkg", tmp_path).load()
-    # pyrefly: ignore[bad-argument-type]
-    uses = router_bases.prefilter_facts(sources.module("pkg.uses"))
+    uses_module, plain_module = sources.module("pkg.uses"), sources.module("pkg.plain")
+    assert uses_module is not None and plain_module is not None
+    uses = router_bases.prefilter_facts(uses_module)
     assert not uses.direct
     assert uses.touches(frozenset({("pkg.r", "router")}))
-    # pyrefly: ignore[bad-argument-type]
-    assert not router_bases.prefilter_facts(sources.module("pkg.plain")).touches(frozenset({("pkg.r", "router")}))
+    assert not router_bases.prefilter_facts(plain_module).touches(frozenset({("pkg.r", "router")}))
 
 
 def test_a_one_file_edit_rebuilds_to_the_same_model_as_a_cold_build(tmp_path: Path) -> None:

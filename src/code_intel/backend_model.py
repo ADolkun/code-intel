@@ -207,7 +207,7 @@ class RouterEscape:
     """
 
     router: RouterRef
-    call: ast.AST
+    call: ast.expr | ast.stmt
     callee: ast.expr
     context: ExecContext
     seq: int

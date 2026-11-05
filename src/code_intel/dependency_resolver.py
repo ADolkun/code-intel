@@ -39,6 +39,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from code_intel import problems
+from code_intel.ast_nodes import FunctionNode
 from code_intel.backend_model import (
     Def,
     DepKind,
@@ -78,11 +79,10 @@ CLASS_VARS = frozenset({"typing.ClassVar", "typing_extensions.ClassVar"})
 MAX_DEPTH = 32
 TEXT_MAX = 60
 
-_FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
-_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_FUNCTION_NODES = ast.FunctionDef | ast.AsyncFunctionDef
+_ScopeNode = FunctionNode | ast.ClassDef
 # Statement fields whose bodies run in the enclosing scope (no new scope).
 _BLOCK_FIELDS = ("body", "orelse", "finalbody", "handlers", "cases")
-_TYPE_ALIAS_TYPES: tuple[type, ...] = (ast.TypeAlias,)
 _PARSE_ERRORS: tuple[type[BaseException], ...] = (SyntaxError, ValueError, RecursionError, MemoryError)
 
 BOTH_DECLARED_MESSAGE = "FastAPI rejects a dependency declared in both Annotated and the default"
@@ -102,7 +102,7 @@ class _Params:
     """A callable whose parameters FastAPI reads."""
 
     module: str
-    fn: ast.AST  # FunctionDef, AsyncFunctionDef or Lambda
+    fn: FunctionNode
     skip_first: bool
     # What ``functools.partial`` binds: the leading positional parameters it
     # fills, which FastAPI no longer sees, and keyword values, which become
@@ -127,7 +127,7 @@ class _Member:
 
     module: str
     qualname: str
-    node: ast.AST
+    node: _FUNCTION_NODES
     via_instance: bool
 
 
@@ -296,9 +296,8 @@ class DependencyResolver:
     def endpoint_deps(self, endpoint: Located) -> list[DepUse]:
         """Dependencies FastAPI reads from a route handler's parameters."""
         node = endpoint.node
-        if isinstance(node, (*_FUNCTION_NODES, ast.Lambda)):
+        if isinstance(node, FunctionNode):
             return self._param_uses(_Params(endpoint.module, node, skip_first=False))
-        # pyrefly: ignore[bad-argument-type]
         callable_ = self._classify(endpoint.module, node, node, alias=None, depth=0)
         if isinstance(callable_, str):
             self._limit(
@@ -357,7 +356,6 @@ class DependencyResolver:
     def marker_use(self, loc: Located, via: DepVia, param: str | None = None) -> DepUse | None:
         """The use declared by one ``dependencies=`` element (a ``Depends``/``Security`` call)."""
         ctx = loc.node
-        # pyrefly: ignore[bad-argument-type]
         marker = self._marker_of_value(loc.module, loc.node, ctx)
         if marker is None or marker.kind not in DEPENDENCY_MARKERS:
             self._limit(
@@ -403,9 +401,10 @@ class DependencyResolver:
                 f"parameter {arg.arg!r}: {annotation.problem}",
             )
         last = annotation.markers[-1] if annotation.markers else None
-        default_module, default_ctx = default_at or (module, default)
-        # pyrefly: ignore[bad-argument-type]
-        default_marker = self._marker_of_value(default_module, default, default_ctx) if default is not None else None
+        default_marker = None
+        if default is not None:
+            default_module, default_ctx = default_at or (module, default)
+            default_marker = self._marker_of_value(default_module, default, default_ctx)
         depends: _Marker | None = None
         if default_marker is not None and default_marker.kind in DEPENDENCY_MARKERS:
             if last is not None:
@@ -425,7 +424,11 @@ class DependencyResolver:
             depends,
             via="direct",
             param=arg.arg,
-            type_expr=(annotation.type_module, annotation.type_expr, annotation.type_ctx),
+            type_expr=(
+                (annotation.type_module, annotation.type_expr, annotation.type_ctx)
+                if annotation.type_expr is not None
+                else None
+            ),
         )
 
     def _use_from_marker(
@@ -434,7 +437,7 @@ class DependencyResolver:
         *,
         via: DepVia,
         param: str | None,
-        type_expr: tuple[str, ast.expr | None, ast.AST | None] | None,
+        type_expr: tuple[str, ast.expr, ast.AST | None] | None,
     ) -> DepUse:
         call = marker.loc.node
         assert isinstance(call, ast.Call)
@@ -451,11 +454,9 @@ class DependencyResolver:
         if target_expr is not None:
             resolved = self._classify(module, target_expr, marker.ctx, alias=None, depth=0)
             text = _text(target_expr)
-        elif type_expr is not None and type_expr[1] is not None:
+        elif type_expr is not None:
             type_module, expr, ctx = type_expr
-            # pyrefly: ignore[bad-argument-type]
             resolved = self._classify(type_module, expr, ctx or expr, alias=None, depth=0)
-            # pyrefly: ignore[bad-argument-type]
             text = _text(expr)
         else:
             resolved = "FastAPI needs a callable, and there is no target or type annotation"
@@ -576,11 +577,11 @@ class DependencyResolver:
     def _alias_value(self, loc: Located) -> tuple[ast.expr | None, bool]:
         """``(aliased expression, is a PEP 695 alias)`` for an annotation alias binding."""
         node = loc.node
-        if _TYPE_ALIAS_TYPES and isinstance(node, _TYPE_ALIAS_TYPES):
-            return node.value, True  # type: ignore[attr-defined]
+        if isinstance(node, ast.TypeAlias):
+            return node.value, True
         index = self._module_index(loc.module)
         parent = index.parents.get(id(node)) if index is not None else None
-        if _TYPE_ALIAS_TYPES and isinstance(parent, _TYPE_ALIAS_TYPES):
+        if isinstance(parent, ast.TypeAlias):
             return node if isinstance(node, ast.expr) else None, True
         return (node if isinstance(node, ast.expr) else None), False
 
@@ -597,7 +598,7 @@ class DependencyResolver:
             return name
         return None
 
-    def _marker_of_value(self, module: str, expr: ast.expr | None, ctx: ast.AST, depth: int = 0) -> _Marker | None:
+    def _marker_of_value(self, module: str, expr: ast.AST | None, ctx: ast.AST, depth: int = 0) -> _Marker | None:
         """The FastAPI marker an expression evaluates to: a marker call, or a name bound to one."""
         if expr is None or depth > MAX_DEPTH:
             return None
@@ -615,7 +616,7 @@ class DependencyResolver:
     # ── Callables ────────────────────────────────────────────────────────
 
     def _classify(
-        self, module: str, expr: ast.expr, ctx: ast.AST, *, alias: str | None, depth: int
+        self, module: str, expr: ast.AST, ctx: ast.AST, *, alias: str | None, depth: int
     ) -> tuple[_Callable, str, str | None] | str:
         """``(callable, display, alias)`` for a dependency target, or the reason it is unresolved."""
         if depth > MAX_DEPTH:
@@ -852,10 +853,10 @@ class DependencyResolver:
                     f"{_text(value)} ({resolved})",
                 )
                 continue
-            is_wrapper = wrapped is not None and wrapped[1] is value
             # functools.wraps copies the wrapped function's name, so FastAPI identifies the wrapper by it.
-            ids.append(wrapped[0].target if is_wrapper else resolved[0].target)  # type: ignore[index]
-            params_of = wrapped[0].params if is_wrapper else resolved[0].params  # type: ignore[index]
+            identified = wrapped[0] if wrapped is not None and wrapped[1] is value else resolved[0]
+            ids.append(identified.target)
+            params_of = identified.params
             params_by_id.setdefault(ids[-1].id, set()).add(params_of)
             for params in params_of:
                 if params not in returned:
@@ -1064,7 +1065,7 @@ class DependencyResolver:
     def _synthetic_fields(self, params: tuple[_Params, ...]) -> dict[str, tuple[ast.AnnAssign, ast.expr | None, str]]:
         out: dict[str, tuple[ast.AnnAssign, ast.expr | None, str]] = {}
         for group in params:
-            args = group.fn.args  # type: ignore[attr-defined]
+            args = group.fn.args
             index = self._module_index(group.module)
             for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=False):
                 stmt = index.parents.get(id(arg)) if index is not None else None
@@ -1083,7 +1084,7 @@ class DependencyResolver:
                 if node.value is not None:
                     out.append(node.value)
                 continue
-            if isinstance(node, _SCOPE_NODES):
+            if isinstance(node, _ScopeNode):
                 continue
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, ast.stmt) or isinstance(child, (ast.excepthandler, ast.match_case)):
@@ -1094,12 +1095,12 @@ class DependencyResolver:
     def _lambda(self, module: str, node: ast.Lambda) -> _Callable:
         """A lambda is ``<lambda>@L<line>``, or, inside a function, that function
         (FastAPI identifies a closure by the function that made it)."""
+        qualname = f"<lambda>@L{node.lineno}"
         index = self._module_index(module)
-        functions = [s for s in self._scopes(index, node) if isinstance(s, _FUNCTION_NODES)] if index else []
-        if functions:
-            qualname = f"{self._qualname(index, functions[0])}.<locals>.<lambda>"  # type: ignore[arg-type]
-        else:
-            qualname = f"<lambda>@L{node.lineno}"
+        if index is not None:
+            functions = [s for s in self._scopes(index, node) if isinstance(s, _FUNCTION_NODES)]
+            if functions:
+                qualname = f"{self._qualname(index, functions[0])}.<locals>.<lambda>"
         dep = self._target(module, qualname, "lambda", node)
         if "<locals>" not in qualname:
             dep = DepTarget(dep.id, dep.module, dep.qualname, "<lambda>", "lambda", dep.file, dep.line)
@@ -1217,14 +1218,14 @@ class DependencyResolver:
                 continue
             if self._declares(scope, name, ast.Global):
                 return None
-            found = self._block_bindings(index, scope.body, name, scope)  # type: ignore[attr-defined]
+            found = self._block_bindings(index, scope.body, name, scope)
             if found:
                 return found
         return None
 
     @staticmethod
-    def _param_names(scope: ast.AST) -> set[str]:
-        args = scope.args  # type: ignore[attr-defined]
+    def _param_names(scope: FunctionNode) -> set[str]:
+        args = scope.args
         names = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
         if args.vararg is not None:
             names.add(args.vararg.arg)
@@ -1237,9 +1238,9 @@ class DependencyResolver:
         stack = list(getattr(scope, "body", []))
         while stack:
             node = stack.pop()
-            if isinstance(node, kind) and name in node.names:  # type: ignore[attr-defined]
+            if isinstance(node, kind) and name in node.names:
                 return True
-            if isinstance(node, _SCOPE_NODES):
+            if isinstance(node, _ScopeNode):
                 continue
             stack.extend(ast.iter_child_nodes(node))
         return False
@@ -1248,7 +1249,7 @@ class DependencyResolver:
         found: list[_Resolved] = []
         module = index.module.name
         for stmt in self._block_statements(body):
-            if isinstance(stmt, (*_FUNCTION_NODES, ast.ClassDef)) and stmt.name == name:
+            if isinstance(stmt, _FUNCTION_NODES | ast.ClassDef) and stmt.name == name:
                 found.append(Def(module, self._qualname(index, stmt), stmt))
             elif isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in stmt.targets):
                 found.append(Value(Located(module, stmt.value)))
@@ -1272,30 +1273,29 @@ class DependencyResolver:
         while stack:
             stmt = stack.pop()
             out.append(stmt)
-            if isinstance(stmt, _SCOPE_NODES):
+            if isinstance(stmt, _ScopeNode):
                 continue
             nested: list[ast.stmt] = []
             for field in _BLOCK_FIELDS:
                 for child in getattr(stmt, field, None) or ():
                     if isinstance(child, ast.stmt):
                         nested.append(child)
-                    elif isinstance(child, (ast.excepthandler, ast.match_case)):
-                        # pyrefly: ignore[missing-attribute]
+                    elif isinstance(child, (ast.ExceptHandler, ast.match_case)):
                         nested.extend(child.body)
             stack.extend(reversed(nested))
         return out
 
-    def _scopes(self, index: _ModuleIndex, ctx: ast.AST) -> list[ast.AST]:
+    def _scopes(self, index: _ModuleIndex, ctx: ast.AST) -> list[_ScopeNode]:
         """Enclosing scopes of ``ctx``, innermost first.
 
         A function's own defaults, annotations and decorators run in the scope
         around it, so a function is a scope only for nodes inside its body.
         """
-        scopes: list[ast.AST] = []
+        scopes: list[_ScopeNode] = []
         child = ctx
         parent = index.parents.get(id(child))
         while parent is not None:
-            if isinstance(parent, (*_FUNCTION_NODES, ast.ClassDef)):
+            if isinstance(parent, _FUNCTION_NODES | ast.ClassDef):
                 if any(child is stmt for stmt in parent.body):
                     scopes.append(parent)
             elif isinstance(parent, ast.Lambda) and child is parent.body:
@@ -1321,7 +1321,7 @@ class DependencyResolver:
             parent = index.parents.get(id(node))
             if parent is None:
                 return index.top_index.get(id(node))
-            if isinstance(parent, (*_FUNCTION_NODES, ast.Lambda)) and any(node is n for n in self._body_of(parent)):
+            if isinstance(parent, FunctionNode) and any(node is n for n in self._body_of(parent)):
                 return None
             node = parent
 
@@ -1389,7 +1389,7 @@ def _read_parameters(params: _Params) -> list[tuple[ast.arg, ast.expr | None]]:
     """``(parameter, default)`` for each parameter FastAPI reads: without a bound
     ``self``/``cls`` or the leading positional ones a partial fills. A parameter
     a partial binds by keyword becomes keyword-only, so positional binding skips it."""
-    args = params.fn.args  # type: ignore[attr-defined]
+    args = params.fn.args
     positional = [*args.posonlyargs, *args.args]
     defaults: list[ast.expr | None] = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
     pairs = list(zip(positional, defaults, strict=False))[1 if params.skip_first else 0 :]

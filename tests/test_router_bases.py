@@ -17,7 +17,17 @@ from pathlib import Path
 import pytest
 import scaling_check
 
-from code_intel.backend_model import IncludeCall, Located, MountCall, PyModule, RouteReg, RouterEscape
+from code_intel.backend_model import (
+    DepLayer,
+    IncludeCall,
+    Located,
+    MountCall,
+    PyModule,
+    RouteReg,
+    RouterEscape,
+    Unknown,
+)
+from code_intel.code_paths import FileStamp
 from code_intel.py_sources import PySources
 from code_intel.router_bases import RouterBases, analyze, module_may_touch_routers, prefilter_facts
 from code_intel.router_graph import build_backend_model
@@ -41,6 +51,11 @@ def scan(tmp_path: Path, source: str, extra: dict[str, str] | None = None):
     rows = sorted((r.method, r.path, r.handler) for r in model.unmounted_routes)
     limits = sorted((p.kind, p.line) for p in model.limitations if p.kind != "unmounted_router")
     return rows, limits, model
+
+
+def _located(layer: DepLayer) -> tuple[Located, ...]:
+    assert not isinstance(layer.dependencies, Unknown)
+    return layer.dependencies
 
 
 def guards(model) -> list[tuple[str, list[str]]]:
@@ -559,8 +574,7 @@ def test_api_route_registers_one_route_per_method(tmp_path: Path) -> None:
     assert limits == [("unresolved_route_methods", 15)]
     multi = [r for r in model.unmounted_routes if r.handler == "multi"]
     decorator = [
-        # pyrefly: ignore[not-iterable]
-        [ast.unparse(loc.node) for layer in r.layers if layer.via == "route decorator" for loc in layer.dependencies]
+        [ast.unparse(loc.node) for layer in r.layers if layer.via == "route decorator" for loc in _located(layer)]
         for r in multi
     ]
     assert decorator == [["Depends(guard)"], ["Depends(guard)"]]
@@ -619,7 +633,7 @@ def test_router_replay_branches_stay_linear() -> None:
 
     def replay(source: str) -> None:
         tree = ast.parse(source)
-        RouterBases(PyModule("pkg.r", Path("r.py"), "r.py", None, tree, source, False))  # type: ignore[arg-type]
+        RouterBases(PyModule("pkg.r", Path("r.py"), "r.py", FileStamp(0, 0, 0, 0), tree, source, False))
 
     for block in ("if x{i}:\n    pass\n", "try:\n    pass\nexcept E:\n    pass\n"):
         scaling_check.assert_scales_linearly(
@@ -680,8 +694,10 @@ def test_events_carry_their_execution_context(tmp_path: Path) -> None:
         (10, None, True, False),
         (11, None, True, False),
     ]
-    # pyrefly: ignore[bad-index]
-    assert all(e.parent[0] == "router" and e.child[:2] == ("import", "pkg.child") for e in includes)
+    assert all(
+        e.parent[0] == "router" and not isinstance(e.child, Unknown) and e.child[:2] == ("import", "pkg.child")
+        for e in includes
+    )
     # Function bodies are replayed after the module body, so their events come last.
     assert [e.seq for e in found] == sorted(e.seq for e in found)
     assert includes[-1].context.deferred_in == "install"
@@ -710,7 +726,7 @@ def test_events_name_routes_mounts_and_escapes(tmp_path: Path) -> None:
     # Stacked decorators apply bottom-up.
     assert regs == [(("POST",), True, 7), (("GET",), True, 6), (("PUT",), False, 10)]
     (mount,) = [e for e in found if isinstance(e, MountCall)]
-    # pyrefly: ignore[bad-index]
+    assert not isinstance(mount.app, Unknown)
     assert (mount.parent[0], mount.app[0]) == ("router", "router")
     escapes = [(ast.unparse(e.callee), type(e.call).__name__) for e in found if isinstance(e, RouterEscape)]
     assert ("register", "Call") in escapes
