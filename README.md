@@ -101,7 +101,8 @@ Every command takes `--repo-root PATH` (default: the git work tree containing th
 | `doc-check [--json]` | Check the [docs](#docs-check) and the agent instruction files against the code. | 0 no findings, 1 findings, 2 could not run or incomplete |
 | `verify [CHECK …]` | Check the analyzers against each other and against the source; see [Verification](#verification). | 0 passed, 1 a check failed, 2 a check could not run |
 | `summary` | Markdown counts and coverage of the analysis, one table per analyzer. | 0, 1 a section failed |
-| `runtime-check --python PYTHON [--set K=V …] [--env-file FILE]` | Compare the static route analysis with the running app. | 0, 1 unexplained difference, 2 could not run |
+| `runtime-check [--python PYTHON] [--set K=V …] [--env-file FILE]` | Compare the static route analysis with the running app. | 0, 1 unexplained difference, 2 could not run |
+| `capture [--check] [--python PYTHON]` | Record what installed code contributes to the app (routers library factories build, library dependency trees) in `.code-intel/library-capture.json`; `--check` compares without writing. Needs `[backend.capture]`. | 0, 1 `--check` found a difference, 2 could not run or the environment differs from the lock |
 | `dump di [--json]` | Dependency-injection map: every route with its dependencies in FastAPI order. | 0, 1 could not run, 2 incomplete |
 | `dump routes [--json] [--unmatched]` | Backend routes matched with frontend calls. | 0, 1 could not run, 2 incomplete |
 | `dump jsx (COMPONENT \| --all) [--root DIR] [--include-tests] [--no-self-close] [--json]` | JSX usage of a component, or every element. | 0, 2 frontend unavailable |
@@ -818,7 +819,7 @@ code-intel runtime-check --python backend/.venv/bin/python \
   --set FEATURE_FLAG=true --env-file .env.test
 ```
 
-`--python` is required (a relative path is taken from the current directory, then the repository root; it is not resolved through links, so a virtual environment's interpreter is found). `--set KEY=VALUE` (repeatable) and `--env-file FILE` (`KEY=VALUE` lines; an existing variable wins) set what the app needs to import and mount its routers; give the flags and synthetic secrets the routes depend on, never real secrets. The app is imported from an empty temporary working directory, so a local `.env` or stray file cannot change the routes.
+`--python` defaults to `python` in `[backend.capture]`; without either the check cannot run. A relative `--python` is taken from the current directory, then the repository root; it is not resolved through links, so a virtual environment's interpreter is found. `--set KEY=VALUE` (repeatable) and `--env-file FILE` (`KEY=VALUE` lines; an existing variable wins) add to the `env` of `[backend.capture]`; together they set what the app needs to import and mount its routers; give the flags and synthetic secrets the routes depend on, never real secrets. The app is imported from an empty temporary working directory with a clean environment: only `PATH`, `HOME`, `TMPDIR`, `LANG` and `LC_ALL` (when set) are inherited, so a local `.env`, a stray file or an ambient variable cannot change the routes. Version 0.1 inherited the whole environment.
 
 It compares routes, handlers and their `def` locations, dispatch order, route-level and parameter dependencies, dependency closures and `redirect_slashes`, and prints the differences by class: `route_missing`, `route_extra`, `order_mismatch`, `handler_mismatch`, `location_mismatch`, `route_deps_mismatch`, `via_mismatch`, `param_deps_mismatch`, `closure_mismatch` and `redirect_slashes_mismatch`. A note appears when the app ran on a different FastAPI version than the one the analysis follows (the locked one), because the include model may differ.
 
@@ -827,7 +828,7 @@ Some differences are known blind spots of a static analysis; they are listed as 
 - a route the runtime serves from installed code (a handler outside the repository, or under a virtual environment or `site-packages`), when the analysis reported a limitation that can hide routes (`unresolved_include`, `opaque_router_call`, …), is explained by those limitations, listed with their locations;
 - a dependency difference located at a dependency the analysis cannot see into (an `external` or `unresolved` dependency) is explained when the runtime dependency standing in its place, and everything beneath it, accounts for the whole difference. Every other dependency of the route, at every depth, must still agree.
 
-Everything else is **unexplained**: an extra route, a changed handler or location, a different order, a dependency that differs where the analysis can see. Exit code: 0 when nothing is unexplained, 1 otherwise, 2 when the check could not run (no usable `--python`, the app did not import — the error is shown —, or the analysis is incomplete).
+Everything else is **unexplained**: an extra route, a changed handler or location, a different order, a dependency that differs where the analysis can see. Exit code: 0 when nothing is unexplained, 1 otherwise, 2 when the check could not run (no usable interpreter, the app did not import — the error is shown —, or the analysis is incomplete).
 
 ### Tests and oracles
 

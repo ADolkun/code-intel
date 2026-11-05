@@ -1,15 +1,16 @@
 """``code-intel runtime-check``: the static route analysis against the running app.
 
 Imports the configured app with a Python that has the app's dependencies
-installed (``--python``, usually the repository's virtual environment), through
-the packaged FastAPI oracle, and compares what FastAPI built with the
+installed (``--python``, else ``[backend.capture] python``), through the
+packaged FastAPI oracle, and compares what FastAPI built with the
 dependency map: routes, handlers and their ``def`` locations, dispatch order,
 route-level and parameter dependencies, dependency closures and
 ``redirect_slashes``.
 
-The app is imported from an empty temporary working directory, so a local
-``.env`` or stray file cannot change the routes; give every setting the routes
-depend on with ``--set`` and ``--env-file``.
+The app is imported by ``runner.run_oracle``: from an empty temporary working
+directory and with a clean environment, so a local ``.env``, a stray file or an
+ambient variable cannot change the routes. Give every setting the routes depend
+on with ``[backend.capture] env``, ``--set`` and ``--env-file``.
 
 Some differences are known blind spots of a static analysis. They are listed
 as explained, each with its reason, and do not fail the check:
@@ -31,24 +32,20 @@ analysis is incomplete).
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
 import sys
-import tempfile
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from code_intel import problems
+from code_intel import problems, runner
+from code_intel.config import BackendConfig
 from code_intel.oracles import fastapi_oracle
 
 if TYPE_CHECKING:
     from code_intel.cli import Context
 
-ORACLE = Path(fastapi_oracle.__file__).resolve()
-TIMEOUT_S = 300
 SHOWN = 20
 SHOWN_EXPLAINED = 5
 CLIP = 200
@@ -63,10 +60,6 @@ Node = Mapping[str, Any]
 class Classified:
     difference: fastapi_oracle.Difference
     reason: str | None  # why it is explained; None when it is not
-
-
-class RuntimeCheckError(Exception):
-    """The check could not run; the message says why."""
 
 
 # ── Classifying differences ──────────────────────────────────────────────
@@ -286,57 +279,21 @@ def version_note(runtime: Mapping[str, Any], di: Mapping[str, Any]) -> str | Non
 # ── Running the oracle ───────────────────────────────────────────────────
 
 
-def resolve_python(value: Path, repo_root: Path) -> Path:
-    """``value`` as an absolute path, taken from the current directory, else the
-    repository root. The path is not resolved: a virtual environment's
-    interpreter is found through the link's own location."""
-    path = value.expanduser()
-    for candidate in [path] if path.is_absolute() else [Path.cwd() / path, repo_root / path]:
-        if candidate.is_file():
-            return candidate
-    raise RuntimeCheckError(
-        f"--python {value}: no such file" + ("" if path.is_absolute() else f", from {Path.cwd()} or {repo_root}")
-    )
-
-
-def run_oracle(
-    python: Path, repo_root: Path, backend_root: str, app: str, settings: Sequence[str], env_file: Path | None
-) -> dict:
-    with tempfile.TemporaryDirectory(prefix="code-intel-runtime-") as tmp:
-        out = Path(tmp) / "runtime.json"
-        command = [
-            str(python),
-            str(ORACLE),
-            "--import-root",
-            str(repo_root / backend_root),
-            "--repo-root",
-            str(repo_root),
-            "--app",
-            app,
-            "--out",
-            str(out),
-        ]
-        for item in settings:
-            command += ["--set", item]
-        if env_file is not None:
-            command += ["--env-file", str(env_file)]
-        try:
-            proc = subprocess.run(
-                command, capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT_S, cwd=tmp, check=False
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise RuntimeCheckError(f"could not run {python} ({type(exc).__name__}: {exc})") from exc
-        if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout).strip()[-3000:]
-            raise RuntimeCheckError(f"the app did not import under {python} (exit code {proc.returncode}):\n{tail}")
-        try:
-            return json.loads(out.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise RuntimeCheckError(f"the oracle wrote no readable result ({type(exc).__name__}: {exc})") from exc
+def oracle_arguments(
+    repo_root: Path, backend: BackendConfig, settings: Sequence[str], env_file: Path | None
+) -> list[str]:
+    arguments = ["--import-root", str(repo_root / backend.root), "--repo-root", str(repo_root), "--app", backend.app]
+    for item in settings:
+        arguments += ["--set", item]
+    if env_file is not None:
+        arguments += ["--env-file", str(env_file)]
+    return arguments
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--python", type=Path, required=True, help="a Python with the app's dependencies installed")
+    parser.add_argument(
+        "--python", type=Path, help="a Python with the app's dependencies (default: [backend.capture] python)"
+    )
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="set an environment variable")
     parser.add_argument("--env-file", type=Path, help="KEY=VALUE lines to load (an existing variable wins)")
 
@@ -350,11 +307,15 @@ def run(args: argparse.Namespace, context: Context) -> int:
         print(refusal, file=sys.stderr)
         return 2
     try:
-        python = resolve_python(args.python, repo_root)
+        python = runner.interpreter(args.python, backend.capture, repo_root)
         env_file = args.env_file.expanduser().resolve() if args.env_file is not None else None
         di = di_map.compute(repo_root, backend)
-        runtime = run_oracle(python, repo_root, backend.root, backend.app, args.set, env_file)
-    except (RuntimeCheckError, RepoFilesError) as exc:
+        runtime = runner.run_oracle(
+            python,
+            oracle_arguments(repo_root, backend, args.set, env_file),
+            dict(backend.capture.env) if backend.capture is not None else {},
+        )
+    except (runner.OracleRunError, RepoFilesError) as exc:
         print(f"runtime-check: {exc}", file=sys.stderr)
         return 2
     classified = classify(runtime, di)

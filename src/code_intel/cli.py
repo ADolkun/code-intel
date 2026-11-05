@@ -40,6 +40,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "verify": ("verify", "check the analyzers against each other on this repository"),
     "summary": ("summary", "counts and coverage of this repository's analysis"),
     "runtime-check": ("runtime_check", "compare the static route analysis with the running app"),
+    "capture": ("capture", "record what installed code contributes to the app, for the analysis to apply"),
 }
 
 

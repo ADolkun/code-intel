@@ -35,6 +35,19 @@ class ConfigError(ValueError):
         super().__init__(f"{path}: {reason}")
 
 
+CAPTURE_FILE = ".code-intel/library-capture.json"
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+@dataclass(frozen=True)
+class CaptureConfig:
+    """``[backend.capture]``: how ``capture``, ``verify`` and ``runtime-check`` start the app."""
+
+    python: str  # an interpreter with the app's dependencies
+    file: str = CAPTURE_FILE
+    env: tuple[tuple[str, str], ...] = ()  # synthetic values; the import sees nothing else of the environment
+
+
 @dataclass(frozen=True)
 class BackendConfig:
     root: str  # import root: the directory holding the package
@@ -42,6 +55,7 @@ class BackendConfig:
     app: str  # module:attribute, or module:factory()
     lock: str | None  # the locked FastAPI decides the include model
     python_version_file: str | None
+    capture: CaptureConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +215,18 @@ class _Table:
                 return choice
         raise self.fail(f"invalid value for {key!r} in {self.where}: {value!r} is not one of {', '.join(allowed)}")
 
+    def strings_by_name(self, key: str) -> tuple[tuple[str, str], ...]:
+        """A table of environment variables: a name matching ``[A-Za-z_][A-Za-z0-9_]*`` to a string."""
+        value = self._data.pop(key, {})
+        if not isinstance(value, dict):
+            raise self._bad(key, "a table of strings")
+        for name, item in value.items():
+            if not _ENV_NAME_RE.fullmatch(name):
+                raise self.fail(f"{name!r} in {key!r} of {self.where} is not an environment variable name")
+            if not isinstance(item, str):
+                raise self.fail(f"{name!r} in {key!r} of {self.where} must be a string")
+        return tuple(sorted(value.items()))
+
     def table(self, key: str) -> _Table | None:
         return _Table(self._data.pop(key), self._child(key), self.path) if key in self._data else None
 
@@ -224,6 +250,16 @@ class _Table:
             raise self.fail(f"unknown key {sorted(self._data)[0]!r} in {self.where}")
 
 
+def _parse_capture(table: _Table) -> CaptureConfig:
+    capture = CaptureConfig(
+        python=table.relpath("python"),
+        file=table.opt_relpath("file") or CAPTURE_FILE,
+        env=table.strings_by_name("env"),
+    )
+    table.done()
+    return capture
+
+
 def _parse_backend(table: _Table) -> BackendConfig:
     root = table.relpath("root")
     package = table.text("package")
@@ -236,6 +272,7 @@ def _parse_backend(table: _Table) -> BackendConfig:
         app=app,
         lock=table.opt_relpath("lock"),
         python_version_file=table.opt_relpath("python_version_file"),
+        capture=_parse_capture(capture) if (capture := table.table("capture")) is not None else None,
     )
     table.done()
     return config
