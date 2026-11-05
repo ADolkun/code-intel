@@ -1,0 +1,65 @@
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14"]
+build-backend = "uv_build"
+
+[project]
+name = "code-intel"
+version = "0.1.0.dev0"
+description = "Static analysis of a FastAPI backend and its TypeScript frontend, served to coding agents over MCP."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "mcp>=2.3,<3",
+    "markdown-it-py==4.2.0",
+    "PyYAML>=6",
+]
+
+[project.scripts]
+code-intel = "code_intel.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9",
+    "pytest-xdist>=3.8",
+    "ruff==0.17.3",
+    "pyrefly>=1.4.1",
+]
+# The oracle tests run the locked FastAPI of the repository under analysis; its
+# include_router model depends on the version (live from 0.137, copy before).
+# Exactly one of the two groups is installed.
+fastapi-live = [
+    "fastapi==0.162.0",
+    "starlette==1.10.0",
+]
+fastapi-copy = [
+    "fastapi<0.137",
+]
+
+[tool.uv]
+default-groups = ["dev", "fastapi-live"]
+conflicts = [
+    [{ group = "fastapi-live" }, { group = "fastapi-copy" }],
+]
+
+[tool.uv.build-backend]
+module-name = "code_intel"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "PLE"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["code_intel"]
+
+[tool.pyrefly]
+python-version = "3.14"
+project-includes = ["src", "tests"]
+search-path = ["src", "tests"]
