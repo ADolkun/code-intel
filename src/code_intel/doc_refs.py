@@ -345,7 +345,11 @@ class _Run:
         frontend_available: bool,
         extra_problems: Sequence[Problem],
     ) -> DocReport:
-        hint = "; see the limitation below if it is an Echo route" if route_limitations else ""
+        hint = (
+            "; see the limitation below if the route is mounted by code the analysis cannot see"
+            if route_limitations
+            else ""
+        )
         scope = self.scope
         routes = RouteResolver(self.ctx, hint, self._declared_roots(scope))
         drafts: dict[str, list[Draft]] = {}

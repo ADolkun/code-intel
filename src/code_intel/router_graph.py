@@ -79,7 +79,7 @@ _MOUNT_RANK: dict[MountState, int] = {"static": 0, "conditional": 1, "deferred":
 _UNRESOLVED_PATH_MAX = 60
 # External callees that receive the app without adding routes or dependencies.
 # FastAPIInstrumentor.instrument_app only adds tracing middleware.
-ROUTER_SAFE_EXTERNAL_CALLS = frozenset({"openheartbeat.instrumentation.fastapi.FastAPIInstrumentor.instrument_app"})
+ROUTER_SAFE_EXTERNAL_CALLS = frozenset({"opentelemetry.instrumentation.fastapi.FastAPIInstrumentor.instrument_app"})
 # External callees that only read a router's routes or dependencies list.
 LIST_SAFE_EXTERNAL_CALLS = frozenset({"fastapi.openapi.utils.get_openapi"})
 ESCAPE_MAX_DEPTH = 5

@@ -1690,7 +1690,7 @@ def test_only_tracked_route_gaps_reach_the_report_and_its_route_hint(docs: Path)
     assert [row["kind"] for row in hinted.route_limitations] == ["opaque_router_call"]
     assert [f.message for f in hinted.findings()] == [
         "route not found: DELETE /items/{item_id} (not in the analyzed backend routes; "
-        "see the limitation below if it is an Echo route)"
+        "see the limitation below if the route is mounted by code the analysis cannot see)"
     ]
 
 

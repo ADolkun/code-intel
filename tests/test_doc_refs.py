@@ -881,8 +881,8 @@ def test_route_messages(tmp_path: Path) -> None:
         "route method differs: PUT /appointments/{id}/drive-report (served: GET, POST)",
         "route not found: GET /articles/camo-types (only /articles/{article_id} fits, by a word in a parameter)",
         "route not mounted: GET /legacy/thing (legacy at backend/util.py:1 is not mounted on the app)",
-        "route not found: GET /gone (not in the analyzed backend routes; see the limitation below if it is an "
-        "Echo route)",
+        "route not found: GET /gone (not in the analyzed backend routes; see the limitation below if the route "
+        "is mounted by code the analysis cannot see)",
     ]
 
 

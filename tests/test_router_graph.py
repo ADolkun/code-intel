@@ -775,7 +775,7 @@ def test_the_instrumentation_allowlist_is_not_an_escape(tmp_path: Path, monkeypa
     files = {
         "pkg/main.py": """
             from fastapi import FastAPI
-            from openheartbeat.instrumentation.fastapi import FastAPIInstrumentor
+            from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
             app = FastAPI()
             FastAPIInstrumentor.instrument_app(app)
             """,
