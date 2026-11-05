@@ -721,8 +721,8 @@ def test_ts_declarations_equal_the_declaration_oracle(symbols: Repo, tmp_path: P
         for rel, decl in symbols.index.typescript_decls(problems)
     ]
     result = compare_facts.compare(
-        [compare_facts._decl_row(r) for r in oracle["decls"]],
-        [compare_facts._decl_row(r) for r in tool],
+        [compare_facts.decl_row(r) for r in oracle["decls"]],
+        [compare_facts.decl_row(r) for r in tool],
         ("file", "line", "column", "name"),
         compare_facts.DECL_FIELDS,
     )

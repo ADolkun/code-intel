@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "code-intel"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Static analysis of a FastAPI backend and its TypeScript frontend, served to coding agents over MCP."
 readme = "README.md"
 requires-python = ">=3.14"

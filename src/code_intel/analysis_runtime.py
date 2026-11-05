@@ -897,6 +897,16 @@ class AnalysisRuntime:
             self._symbols_config = config
         return self._symbols
 
+    def facts_cache(self) -> Any:
+        """The per-file TypeScript facts cache every frontend analysis here shares."""
+        with self._lock:
+            return self._facts_cache()
+
+    def symbol_index(self) -> Any:
+        """The symbol index for the current config, sharing `facts_cache`."""
+        with self._lock:
+            return self._symbol_index(self.config("symbol_resolve"))
+
     # ── Steps and bookkeeping ────────────────────────────────────────────
 
     @contextmanager
