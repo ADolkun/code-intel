@@ -52,6 +52,7 @@ from code_intel.backend_model import (
     IncludeCall,
     IncludeEdge,
     IncludeModel,
+    LayerVia,
     LiveRoute,
     Located,
     ModuleRef,
@@ -61,6 +62,7 @@ from code_intel.backend_model import (
     RouterCtor,
     RouteReg,
     RouterEscape,
+    RouterKind,
     RouterNode,
     Unknown,
     Value,
@@ -68,7 +70,7 @@ from code_intel.backend_model import (
 )
 from code_intel.problems import Problem, diagnostic, limitation, partition
 from code_intel.py_sources import PySources
-from code_intel.py_values import LocalLookup, ValueEvaluator, lambda_qualname, opaque_decorator
+from code_intel.py_values import LocalFound, LocalLookup, ValueEvaluator, lambda_qualname, opaque_decorator
 from code_intel.router_bases import ModuleAnalysis
 
 STAGE = "build router graph"
@@ -90,7 +92,7 @@ FRAME_BUDGET = 4096
 # How many name lookups may nest (an import, a call's result, a parameter): a
 # deeper chain is reported instead of exhausting Python's stack.
 NAME_MAX_DEPTH = 100
-_FASTAPI_CTORS = {
+_FASTAPI_CTORS: dict[str, RouterKind] = {
     "fastapi.APIRouter": "APIRouter",
     "fastapi.routing.APIRouter": "APIRouter",
     "fastapi.FastAPI": "FastAPI",
@@ -198,7 +200,7 @@ def _module_chain(dotted: str) -> list[str]:
     return [".".join(parts[: k + 1]) for k in range(len(parts))]
 
 
-def _flag_escaped(info: _FnInfo, name: str, found):
+def _flag_escaped(info: _FnInfo, name: str, found: LocalFound | Unknown) -> LocalFound | Unknown:
     """Mark a local container value the function may change in place."""
     if isinstance(found, tuple) and name in info.escaped_locals and py_escapes.mutable_value(found[0].node):
         return (found[0], found[1], True)
@@ -225,6 +227,11 @@ class _Frame:
     parent: _Frame | None
     state: MountState  # whether the call runs for sure, maybe, or later or never
     key: tuple  # (id(site call), *parent.key)
+
+    @property
+    def call(self) -> ast.Call:
+        assert isinstance(self.site.node, ast.Call)
+        return self.site.node
 
     @property
     def executed(self) -> bool:
@@ -705,11 +712,13 @@ class _Builder:
         return info
 
     def lookup(self, module: str, qualname: str | None, frame: _Frame | None) -> LocalLookup | None:
+        """The local-name lookup of function ``qualname``; None for module-level code."""
+        return None if qualname is None else self._function_lookup(module, qualname, frame)
+
+    def _function_lookup(self, module: str, qualname: str, frame: _Frame | None) -> LocalLookup:
         """Names local to function ``qualname`` of ``module``, as run by ``frame``
         (when it runs that function): a parameter is the call's argument (or its
-        default), any other local name is unknown; None for module-level code."""
-        if qualname is None:
-            return None
+        default), any other local name is unknown."""
         if frame is not None and (frame.module, frame.qualname) != (module, qualname):
             frame = None
         key = (module, qualname, frame.key if frame else None)
@@ -717,25 +726,23 @@ class _Builder:
         if found is not None:
             return found
 
-        def local(name: str) -> tuple[Located, LocalLookup | None] | Unknown | None:
+        def local(name: str) -> LocalFound | Unknown | None:
             info = self._fn_info(module, qualname)
             if info is None or name in info.declared_global:
                 return None
             label = f"{_short(qualname)}()"
             if name in info.params:
-                # pyrefly: ignore[bad-return]
                 return _flag_escaped(info, name, self._parameter_value(module, info, name, frame, label))
             if name in info.assigned_once:
                 # A statement at the top of the body runs once, before any use that runs.
                 found = Located(module, info.assigned_once[name], None), self.lookup(module, qualname, frame)
-                # pyrefly: ignore[bad-return]
                 return _flag_escaped(info, name, found)
             if name in info.local:
                 return Unknown(
                     f"local variable of {label}, assigned more than once or not at the top of its body", name
                 )
             if info.parent is not None:
-                return self.lookup(module, info.parent, None)(name)  # type: ignore[misc]
+                return self._function_lookup(module, info.parent, None)(name)
             return None
 
         self._lookups[key] = local
@@ -1043,10 +1050,11 @@ class _Builder:
             return False
         at = self.sources.scope(module).index_of(dec)
         targets = self.ev.resolve_expr(Located(module, base, at))
-        if len(targets) != 1 or not isinstance(targets[0], Value) or not isinstance(targets[0].loc.node, ast.Call):
+        if len(targets) != 1 or not isinstance(targets[0], Value):
             return False
         ctor = targets[0].loc
-        # pyrefly: ignore[missing-attribute]
+        if not isinstance(ctor.node, ast.Call):
+            return False
         kinds = self.ev.resolve_expr(Located(ctor.module, ctor.node.func, ctor.at))
         return len(kinds) == 1 and isinstance(kinds[0], External) and kinds[0].dotted in _FASTAPI_CTORS
 
@@ -1273,7 +1281,7 @@ class _Builder:
             analysis = self.analysis(target.module)
             returned = analysis.facts.function_returns.get(target.qualname) if analysis else None
             return self.resolve(returned, target.module, site) if returned is not None else [("other",)]
-        kind: str | None = None
+        kind: RouterKind | None = None
         if isinstance(target, Def) and isinstance(target.node, ast.ClassDef):
             kind = self._router_class_kind(target)
             if kind is None:
@@ -1287,7 +1295,7 @@ class _Builder:
         else:
             return [("unresolved", self.sources.text(loc.module, call, 60))]
         if id(call) not in self._ctors:
-            self._ctors[id(call)] = (loc.module, RouterCtor(loc.module, call, kind, None, 0))  # type: ignore[arg-type]
+            self._ctors[id(call)] = (loc.module, RouterCtor(loc.module, call, kind, None, 0))
         return [self._ctor_res(loc.module, call, frame)]
 
     def _site(self, target: Def, loc: Located, frame: _Frame | None, owner: str | None) -> _Frame | str:
@@ -1387,7 +1395,7 @@ class _Builder:
                 f"{what}; the routes, includes and mounts made from them are not in the route list",
             )
 
-    def _router_class_kind(self, cls: Def, seen: frozenset[int] = frozenset()) -> str | None:
+    def _router_class_kind(self, cls: Def, seen: frozenset[int] = frozenset()) -> RouterKind | None:
         assert isinstance(cls.node, ast.ClassDef)
         if id(cls.node) in seen:
             return None
@@ -1520,7 +1528,7 @@ class _Builder:
 
         def argument(name: str, it: str) -> tuple[Located, LocalLookup | None] | Unknown | None:
             if changed_init:
-                return Unknown(f"{override[0]}.__init__ may set {it}", name)  # type: ignore[index]
+                return Unknown(f"{override[0]}.__init__ may set {it}", name)
             return self._keyword(ctor.node, name, module, at, lookup, node.site)
 
         if ctor.kind == "FastAPI":
@@ -1542,7 +1550,7 @@ class _Builder:
             mod = self.sources.module(site.module)
             node.module = site.module
             node.file = mod.rel if mod else site.module
-            node.line = site.node.lineno  # type: ignore[attr-defined]
+            node.line = node.site.call.lineno
             return self._site_binding(node.site) or f"L{node.line}"
         mod = self.sources.module(module)
         node.module = module
@@ -2143,7 +2151,7 @@ class _Emitter:
         chain: tuple[str, ...],
         mount: MountState,
         upto: tuple | None,
-        own_via: str,
+        own_via: LayerVia,
         out: list[LiveRoute],
         stack: tuple[tuple, ...],
         *,
@@ -2153,7 +2161,7 @@ class _Emitter:
         """Routes of ``node`` in dispatch order. ``upto``: the key of the include
         (``include``) reaching them; under the ``copy`` model only events that
         ran before it count. ``included``: reached through an include."""
-        own = DepLayer(own_via, node.id, node.dependencies)  # type: ignore[arg-type]
+        own = DepLayer(own_via, node.id, node.dependencies)
         node_prefix = self._prefix_text(node.prefix)
         for key, event, frame, executed in node.events:
             module = self.b._event_modules[id(event)]
@@ -2394,13 +2402,11 @@ class _Emitter:
                 f"{b._reg_label(module, event)} {where}; {copied} the route is not served through that include "
                 "and is left out of it",
             )
-        else:
+        elif isinstance(event, IncludeCall):
             b._limit(
                 "deferred_router_mount",
                 file,
-                # pyrefly: ignore[missing-attribute]
                 event.call.lineno,
-                # pyrefly: ignore[bad-argument-type]
                 f"{include.child.id}.include_router({b._child_text(module, event)}) {where}; {copied} the routes "
                 "it adds are not served through that include and are left out of it",
             )
@@ -2788,13 +2794,14 @@ class _Escapes:
         """Whether a router's list, read as ``value``, is bound, stored or passed
         to code that is not known to only read it, as at module level: an index,
         a loop, an unpacking copy or a reading builtin is a read."""
+        child: ast.AST = value
         parent = parents.get(id(value))
         if isinstance(parent, (ast.keyword, ast.Starred)):
             unpacked = isinstance(parent, ast.Starred)
-            value, parent = parent, parents.get(id(parent))  # type: ignore[assignment]
+            child, parent = parent, parents.get(id(parent))
             if unpacked and not isinstance(parent, ast.Call):
                 return False  # `[*router.routes]` copies the list
-        if isinstance(parent, ast.Call) and parent.func is not value:
+        if isinstance(parent, ast.Call) and parent.func is not child:
             func = parent.func
             if isinstance(func, ast.Name) and func.id in router_bases.LIST_READING_CALLS:
                 return False
@@ -2827,7 +2834,7 @@ class _Escapes:
                     continue
                 effects.append(_Effect(f"is outside the analyzed package ({target.dotted})"))
             elif isinstance(target, Def) and isinstance(target.node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                effect = self._function_effect(target, call, arg, depth, seen, frame)
+                effect = self._function_effect(target, target.node, call, arg, depth, seen, frame)
                 if effect is not None:
                     effects.append(effect)
             elif isinstance(target, Def):
@@ -2843,6 +2850,7 @@ class _Escapes:
     def _function_effect(
         self,
         target: Def,
+        fn: ast.FunctionDef | ast.AsyncFunctionDef,
         call: ast.Call,
         arg: ast.expr,
         depth: int,
@@ -2851,7 +2859,7 @@ class _Escapes:
     ) -> _Effect | None:
         """Why a package function handed ``arg`` by ``call`` may change routes."""
         b = self.b
-        param = _parameter_for(target.node, call, arg)  # type: ignore[arg-type]
+        param = _parameter_for(fn, call, arg)
         # Past these the package code is not read, so it may change the router in place.
         if param is None:
             return _Effect(f"receives it through *args or **kwargs ({target.qualname})", changes=True)
@@ -2899,27 +2907,28 @@ class _Escapes:
         return _Effect("; ".join(e.text for e in effects)) if effects else None
 
     def _use_effect(
-        self, module: str, node: ast.AST, parents: dict[int, ast.AST], depth: int, seen, frame: _Frame | None
+        self, module: str, node: ast.Name, parents: dict[int, ast.AST], depth: int, seen, frame: _Frame | None
     ) -> _Effect | None:
+        current: ast.AST = node
+        value: ast.expr = node
         parent = parents.get(id(node))
         while isinstance(parent, ast.Attribute) and parent.attr == "router":
-            node, parent = parent, parents.get(id(parent))
+            current = value = parent
+            parent = parents.get(id(parent))
         if isinstance(parent, ast.Attribute):
             return self._attribute_effect(module, parent, parents, frame)
         if isinstance(parent, ast.Starred):
-            node, parent = parent, parents.get(id(parent))
+            current = value = parent
+            parent = parents.get(id(parent))
         if isinstance(parent, ast.keyword):
-            node, parent = parent, parents.get(id(parent))
-            value = node.value  # type: ignore[attr-defined]
-        else:
-            value = node
+            current, value = parent, parent.value
+            parent = parents.get(id(parent))
         if isinstance(parent, ast.Call):
-            if parent.func is node:
+            if parent.func is current:
                 return None  # calling the app as an ASGI application
             func = parent.func
             if frame is not None and isinstance(func, ast.Attribute) and func.attr in _MODELED_USES:
                 return None  # included, mounted or registered in a body the graph runs with the argument
-            # pyrefly: ignore[bad-argument-type]
             return self._call_effect(module, parent, value, depth, seen, frame)
         if parent is None or isinstance(parent, _HARMLESS_PARENTS):
             return None

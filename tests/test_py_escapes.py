@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from code_intel.backend_model import Located
+from code_intel.backend_model import DepLayer, Located, Unknown
 from code_intel.py_escapes import collect_escapes, mutable_value
 from code_intel.py_sources import PySources
 from code_intel.py_values import ESCAPED_REASON, ValueEvaluator
@@ -26,6 +26,11 @@ def write(root: Path, files: dict[str, str]) -> None:
 
 
 FASTAPI_HEAD = "from fastapi import APIRouter, FastAPI\napp = FastAPI()\nrouter = APIRouter()\n"
+
+
+def _located(layer: DepLayer) -> tuple[Located, ...]:
+    assert not isinstance(layer.dependencies, Unknown)
+    return layer.dependencies
 
 
 def escaped(source: str) -> list[str]:
@@ -246,7 +251,6 @@ def test_the_real_backends_patterns_stay_exact(tmp_path: Path) -> None:
     )
     model = build_backend_model(tmp_path, "pkg", "pkg.main:app", tmp_path)
     assert model.limitations == ()
-    # pyrefly: ignore[bad-argument-type]
-    layers = {r.path: [len(layer.dependencies) for layer in r.layers] for r in model.routes}
+    layers = {r.path: [len(_located(layer)) for layer in r.layers] for r in model.routes}
     # app, include, router, route decorator
     assert layers == {"/api/items/": [0, 1, 1, 0], "/api/items/{item_id}": [0, 1, 1, 2]}

@@ -37,6 +37,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
+from code_intel.ast_nodes import literal_strings
 from code_intel.backend_model import (
     CallSite,
     Event,
@@ -96,9 +97,7 @@ METHOD_REFERENCES = frozenset({*ROUTE_DECORATORS, *REGISTRATION_CALLS, INCLUDE_R
 _TOUCH_CALLS = frozenset({INCLUDE_ROUTER, MOUNT, *REGISTRATION_CALLS, "add_route", "add_websocket_route"})
 _TOUCH_DECORATORS = frozenset({*ROUTE_DECORATORS, "route", "websocket_route"})
 
-_TRY_TYPES: tuple[type, ...] = (ast.Try, ast.TryStar)
-_TYPE_ALIAS_TYPES: tuple[type, ...] = (ast.TypeAlias,)
-_TYPE_PARAM_TYPES: tuple[type, ...] = (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
+_Compound = ast.For | ast.AsyncFor | ast.While | ast.With | ast.AsyncWith | ast.Match | ast.Try | ast.TryStar
 _COMPOUND_FIELDS = frozenset({"body", "orelse", "finalbody", "handlers", "cases"})
 
 _Verdict = tuple
@@ -318,8 +317,8 @@ def scope_names(body: list[ast.stmt]) -> tuple[set[str], set[str], set[str], set
             declared_global.update(node.names)
         elif isinstance(node, ast.Nonlocal):
             declared_nonlocal.update(node.names)
-        elif _TYPE_ALIAS_TYPES and isinstance(node, _TYPE_ALIAS_TYPES):
-            name = node.name  # type: ignore[attr-defined]
+        elif isinstance(node, ast.TypeAlias):
+            name = node.name
             if isinstance(name, ast.Name):
                 bound.add(name.id)
             continue
@@ -447,8 +446,8 @@ def _lazy_roots(stmt: ast.stmt) -> list[ast.AST]:
             roots.append(stmt.returns)
     elif isinstance(stmt, ast.AnnAssign):
         roots.append(stmt.annotation)
-    elif _TYPE_ALIAS_TYPES and isinstance(stmt, _TYPE_ALIAS_TYPES):
-        roots.append(stmt.value)  # type: ignore[attr-defined]
+    elif isinstance(stmt, ast.TypeAlias):
+        roots.append(stmt.value)
     for param in getattr(stmt, "type_params", None) or ():
         roots += [v for v in (getattr(param, "bound", None), getattr(param, "default_value", None)) if v is not None]
     return roots
@@ -463,7 +462,7 @@ def _statement_roots(stmt: ast.stmt) -> list[ast.AST]:
         return [*stmt.decorator_list, *stmt.bases, *(k.value for k in stmt.keywords)]
     if isinstance(stmt, ast.AnnAssign):
         return [stmt.value] if stmt.value is not None else []
-    if _TYPE_ALIAS_TYPES and isinstance(stmt, _TYPE_ALIAS_TYPES):
+    if isinstance(stmt, ast.TypeAlias):
         return []
     if isinstance(stmt, ast.If):
         return []  # tests are scanned one by one as the chain runs
@@ -635,9 +634,9 @@ class RouterBases:
                     if not (is_class and k == len(chain) - 1):
                         self._nonlocal_written.add((chain[k][0], name))
                     break
-        if is_class:
+        if isinstance(node, ast.ClassDef):
             return chain
-        args = node.args  # type: ignore[union-attr]
+        args = node.args
         bound |= {
             a.arg
             for a in (
@@ -872,10 +871,10 @@ class RouterBases:
             if kw.arg != "methods":
                 continue
             value = kw.value
-            if isinstance(value, (ast.List, ast.Tuple, ast.Set)) and all(
-                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in value.elts
-            ):
-                return method_names(str(e.value) for e in value.elts)  # type: ignore[attr-defined]
+            if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+                names = literal_strings(value.elts)
+                if names is not None:
+                    return method_names(names)
             return self._located(value, scope)
         if any(kw.arg is None for kw in call.keywords):
             return self._located(call, scope)
@@ -1212,7 +1211,7 @@ class RouterBases:
         for name, value in merged.items():
             self._set(scope, name, value)
 
-    def _run_try(self, stmt: ast.stmt, scope: _Scope) -> None:
+    def _run_try(self, stmt: ast.Try | ast.TryStar, scope: _Scope) -> None:
         """The body then ``else``, or a handler. A handler may run after any
         statement of the body, so it starts from each name's value before the
         body joined with every value the body gave it."""
@@ -1220,17 +1219,17 @@ class RouterBases:
 
         def body() -> None:
             scope.traces.append(trace)
-            self._run_block(stmt.body, scope)  # type: ignore[attr-defined]
+            self._run_block(stmt.body, scope)
             scope.traces.pop()
             if scope.traces:  # Also values the enclosing `try` body takes.
                 outer = scope.traces[-1]
                 for name, value in trace.items():
                     outer[name] = _join(outer[name], value) if name in outer else value
-            self._run_conditional(stmt.orelse, scope)  # type: ignore[attr-defined]
+            self._run_conditional(stmt.orelse, scope)
 
         done = self._branch(scope, body)
         start: dict[str, _Verdict | None] = {}
-        handlers = stmt.handlers  # type: ignore[attr-defined]
+        handlers = stmt.handlers
         handled = self._run_handlers(handlers, scope, trace, start) if handlers else []
         bound, counts = _bound_by(handled)
         merged: dict[str, _Verdict | None] = {}
@@ -1243,7 +1242,7 @@ class RouterBases:
                     value = _join_known(value, scope.state.get(name))
             merged[name] = value
         self._restore(scope, start, merged)
-        self._run_block(stmt.finalbody, scope)  # type: ignore[attr-defined]
+        self._run_block(stmt.finalbody, scope)
 
     def _run_handlers(
         self,
@@ -1337,9 +1336,7 @@ class RouterBases:
             self._run_definition(stmt, scope)
         elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
             self._run_import(stmt, scope)
-        elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Match)) or (
-            _TRY_TYPES and isinstance(stmt, _TRY_TYPES)
-        ):
+        elif isinstance(stmt, _Compound):
             self._run_compound(stmt, scope)
         else:
             self._run_simple(stmt, scope)
@@ -1397,7 +1394,7 @@ class RouterBases:
             verdict = ("import", source, alias.name) if source is not None else _UNRESOLVED
             self._bind(alias.asname or alias.name, verdict, scope)
 
-    def _run_compound(self, stmt: ast.stmt, scope: _Scope) -> None:
+    def _run_compound(self, stmt: _Compound, scope: _Scope) -> None:
         """Loops, ``with``, ``try`` and ``match``."""
         if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
             if not isinstance(stmt, ast.While):
@@ -1420,8 +1417,8 @@ class RouterBases:
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
                     self._set(scope, target.id, None)
-        elif _TYPE_ALIAS_TYPES and isinstance(stmt, _TYPE_ALIAS_TYPES):
-            name = stmt.name  # type: ignore[attr-defined]
+        elif isinstance(stmt, ast.TypeAlias):
+            name = stmt.name
             if isinstance(name, ast.Name):
                 self._bind(name.id, _OTHER, scope)
         elif isinstance(stmt, ast.Return):

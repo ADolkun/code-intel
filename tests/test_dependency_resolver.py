@@ -29,7 +29,7 @@ from code_intel.backend_model import (
     Value,
 )
 from code_intel.code_paths import FileStamp
-from code_intel.dependency_resolver import BOTH_DECLARED_MESSAGE, DependencyResolver
+from code_intel.dependency_resolver import BOTH_DECLARED_MESSAGE, DependencyResolver, ModuleSource
 
 PACKAGE = "pkg"
 
@@ -193,14 +193,14 @@ class FakeResolver:
 @dataclass
 class Analysis:
     resolver: DependencyResolver
-    sources: object
+    sources: ModuleSource
 
     def module(self, name: str) -> PyModule:
-        mod = self.sources.module(name)  # type: ignore[attr-defined]
+        mod = self.sources.module(name)
         assert mod is not None, name
         return mod
 
-    def function(self, module: str, name: str) -> ast.AST:
+    def function(self, module: str, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
         for node in ast.walk(self.module(module).tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
                 return node
@@ -853,9 +853,9 @@ def _route(a: Analysis, module: str, handler: str, layers: tuple[DepLayer, ...])
         handler=handler,
         handler_id=f"{module}:{handler}",
         file=a.module(module).rel,
-        line=fn.lineno,  # type: ignore[attr-defined]
+        line=fn.lineno,
         registered_file=a.module(module).rel,
-        registered_line=fn.lineno,  # type: ignore[attr-defined]
+        registered_line=fn.lineno,
         chain=("pkg.main:app",),
         mount="static",
         layers=layers,

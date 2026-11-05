@@ -81,7 +81,7 @@ FILES = {
 }
 
 
-def _function(sources: FakeSources, module: str, name: str) -> ast.AST:
+def _function(sources: FakeSources, module: str, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     mod = sources.module(module)
     assert mod is not None
     return next(
@@ -120,9 +120,9 @@ def _route(
         handler=handler,
         handler_id=f"{module}:{handler}",
         file=mod.rel,
-        line=fn.lineno,  # type: ignore[attr-defined]
+        line=fn.lineno,
         registered_file=mod.rel,
-        registered_line=fn.lineno,  # type: ignore[attr-defined]
+        registered_line=fn.lineno,
         chain=chain,
         mount="static",
         layers=layers,

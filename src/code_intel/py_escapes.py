@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-_FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+from code_intel.ast_nodes import FunctionNode, body_nodes
 
 # FastAPI calls that copy (or only read) the containers given to them.
 FASTAPI_CALLS = frozenset(
@@ -126,7 +126,6 @@ def collect_escapes(tree: ast.Module) -> Escapes:
 
 # ── What a name may be bound to ──────────────────────────────────────────
 
-_TYPE_PARAMS = frozenset({"TypeVar", "ParamSpec", "TypeVarTuple"})
 _OTHER: tuple = ("other",)
 
 
@@ -166,8 +165,8 @@ def _bindings(node: ast.AST, parents: dict[int, ast.AST]) -> list[tuple[str, tup
     rule = _BINDING_RULES.get(type(node))
     if rule is not None:
         return rule(node, parents)
-    if type(node).__name__ in _TYPE_PARAMS:
-        return [(node.name, _OTHER)]  # type: ignore[attr-defined]
+    if isinstance(node, (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+        return [(node.name, _OTHER)]
     return []
 
 
@@ -199,9 +198,11 @@ def _from_binding(node: ast.ImportFrom, _parents: dict[int, ast.AST]) -> list[tu
     return [(a.asname or a.name, ("from", module, a.name)) for a in node.names if a.name != "*"]
 
 
-def _other_binding(node: ast.AST, _parents: dict[int, ast.AST]) -> list[tuple[str, tuple]]:
+def _other_binding(
+    node: ast.arg | ast.ExceptHandler | ast.MatchAs | ast.MatchStar | ast.MatchMapping, _parents: dict[int, ast.AST]
+) -> list[tuple[str, tuple]]:
     """Parameters, ``except ... as e``, and ``match`` capture names."""
-    name = node.arg if isinstance(node, ast.arg) else node.rest if isinstance(node, ast.MatchMapping) else node.name  # type: ignore[attr-defined]
+    name = node.arg if isinstance(node, ast.arg) else node.rest if isinstance(node, ast.MatchMapping) else node.name
     return [(name, _OTHER)] if isinstance(name, str) else []
 
 
@@ -278,7 +279,7 @@ def _module_name_uses(tree: ast.Module) -> Iterator[tuple[ast.Name, bool]]:
     todo: list[tuple[ast.AST, frozenset[str], bool]] = [(tree, frozenset(), False)]
     while todo:
         node, shadowed, deferred = todo.pop()
-        if isinstance(node, _FUNCTION_TYPES):
+        if isinstance(node, FunctionNode):
             todo.extend(_function_parts(node, shadowed, deferred))
             continue
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in shadowed:
@@ -287,16 +288,16 @@ def _module_name_uses(tree: ast.Module) -> Iterator[tuple[ast.Name, bool]]:
 
 
 def _function_parts(
-    node: ast.AST, shadowed: frozenset[str], deferred: bool
+    node: FunctionNode, shadowed: frozenset[str], deferred: bool
 ) -> list[tuple[ast.AST, frozenset[str], bool]]:
     """Decorators and defaults run where the ``def`` is; the body later, with
     the function's own names hiding the module's."""
-    args = node.args  # type: ignore[attr-defined]
+    args = node.args
     local = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
     local.update(a.arg for a in (args.vararg, args.kwarg) if a is not None)
-    body = node.body if isinstance(node.body, list) else [node.body]  # type: ignore[attr-defined]
+    body = body_nodes(node)
     declared: set[str] = set()
-    todo: list[ast.AST] = list(body)
+    todo = [*body]
     while todo:
         found = todo.pop()
         if isinstance(found, (ast.Global, ast.Nonlocal)):
@@ -457,7 +458,7 @@ _USE_RULES: dict[type, Callable[[Any, Any, _Context], bool | ast.AST]] = {
 }
 
 
-def mutable_value(value: ast.expr | None) -> bool:
+def mutable_value(value: ast.AST | None) -> bool:
     """Whether a binding's value may be a container changed in place: anything
     but a constant, an f-string, a tuple display, a ``tuple(...)`` or
     ``frozenset(...)`` copy, or another name (followed to its own binding)."""

@@ -192,13 +192,14 @@ class _Table:
     def choice(self, key: str, allowed: tuple[str, ...]) -> str:
         return self._choice(key, allowed, self._required(key))
 
-    def opt_choice(self, key: str, allowed: tuple[str, ...], default: str) -> str:
+    def opt_choice[C: str](self, key: str, allowed: tuple[C, ...], default: C) -> C:
         return self._choice(key, allowed, self._data.pop(key, default))
 
-    def _choice(self, key: str, allowed: tuple[str, ...], value: object) -> str:
-        if not isinstance(value, str) or value not in allowed:
-            raise self.fail(f"invalid value for {key!r} in {self.where}: {value!r} is not one of {', '.join(allowed)}")
-        return value
+    def _choice[C: str](self, key: str, allowed: tuple[C, ...], value: object) -> C:
+        for choice in allowed:
+            if value == choice:
+                return choice
+        raise self.fail(f"invalid value for {key!r} in {self.where}: {value!r} is not one of {', '.join(allowed)}")
 
     def table(self, key: str) -> _Table | None:
         return _Table(self._data.pop(key), self._child(key), self.path) if key in self._data else None
@@ -301,7 +302,7 @@ def _parse_client(table: _Table) -> ClientSpec:
 def _parse_pages(table: _Table | None) -> PagesConfig:
     if table is None:
         return PagesConfig()
-    kind = table.opt_choice("kind", PAGE_KINDS, "none")
+    kind: PageKind = table.opt_choice("kind", PAGE_KINDS, "none")
     modules = table.strings("modules", relative=True)
     public_dir = table.opt_relpath("public_dir")
     if kind == "react-router" and not modules:
@@ -309,7 +310,7 @@ def _parse_pages(table: _Table | None) -> PagesConfig:
     if kind != "react-router" and modules:
         raise table.fail(f"'modules' in {table.where} is only for kind 'react-router'")
     table.done()
-    return PagesConfig(kind=kind, modules=modules, public_dir=public_dir)  # type: ignore[arg-type]
+    return PagesConfig(kind=kind, modules=modules, public_dir=public_dir)
 
 
 def _parse_frontend(table: _Table) -> FrontendConfig:

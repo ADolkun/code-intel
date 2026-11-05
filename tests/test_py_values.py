@@ -27,7 +27,7 @@ def evaluator(tmp_path: Path, files: dict[str, str], **kwargs) -> ValueEvaluator
 def kwarg(ev: ValueEvaluator, module: str, line: int, name: str) -> Located:
     """The ``name=`` keyword value of the call on ``line``, located at its statement."""
     mod = ev.sources.module(module)
-    # pyrefly: ignore[missing-attribute]
+    assert mod is not None
     for node in ast.walk(mod.tree):
         if isinstance(node, ast.Call) and node.lineno == line:
             for keyword in node.keywords:
@@ -39,6 +39,11 @@ def kwarg(ev: ValueEvaluator, module: str, line: int, name: str) -> Located:
 def expr(ev: ValueEvaluator, module: str, source: str, at: int | None = None) -> Located:
     """Parse ``source`` as an expression used in ``module`` (at module end by default)."""
     return Located(module, ast.parse(source, mode="eval").body, at)
+
+
+def reason(result: object) -> str:
+    assert isinstance(result, Unknown), result
+    return result.reason
 
 
 def texts(locs) -> list[str]:
@@ -103,7 +108,7 @@ def test_from_package_import_submodule(tmp_path: Path) -> None:
     assert ev.resolve_name("pkg.routes", "one", None) == [ModuleRef("pkg.routes.one")]
     assert ev.resolve_name("pkg.main", "two", None) == [ModuleRef("pkg.routes.two")]
     [value] = ev.resolve_expr(expr(ev, "pkg.main", "one.router"))
-    # pyrefly: ignore[missing-attribute]
+    assert isinstance(value, Value)
     assert ast.unparse(value.loc.node) == "1"
 
 
@@ -168,8 +173,7 @@ def test_defs_classes_members_instances_and_lambdas(tmp_path: Path) -> None:
     [bound] = ev.resolve_expr(expr(ev, "pkg.svc", "svc.get_items"))
     assert isinstance(bound, Def) and bound.qualname == "Svc.get_items"
     [inherited] = ev.resolve_expr(expr(ev, "pkg.svc", "Svc.inherited"))
-    # pyrefly: ignore[missing-attribute]
-    assert inherited.qualname == "Base.inherited"
+    assert isinstance(inherited, Def) and inherited.qualname == "Base.inherited"
     [lam] = ev.resolve_expr(expr(ev, "pkg.svc", "checker"))
     assert isinstance(lam, Def) and lam.qualname == "<lambda>@L8"
 
@@ -212,8 +216,7 @@ def test_conditional_bindings_with_different_values_are_ambiguous(tmp_path: Path
         },
     )
     assert len(ev.resolve_name("pkg.m", "P", None)) == 2
-    # pyrefly: ignore[missing-attribute]
-    assert ev.string(expr(ev, "pkg.m", "P")).reason == "ambiguous"
+    assert reason(ev.string(expr(ev, "pkg.m", "P"))) == "ambiguous"
     assert ev.string(expr(ev, "pkg.m", "Q")) == "/same"
 
 
@@ -285,14 +288,10 @@ def test_strings_from_constants_fstrings_and_concatenation(tmp_path: Path) -> No
     assert ev.string(expr(ev, "pkg.m", "f'{API}/{VERSION}'")) == "/api/v9"
     assert ev.string(expr(ev, "pkg.m", "paths.API")) == "/api"
     assert ev.string(expr(ev, "pkg.m", "'/x' + '/y'")) == "/x/y"
-    # pyrefly: ignore[missing-attribute]
-    assert ev.string(expr(ev, "pkg.m", "f'{API!r}'")).reason == "formatted value"
-    # pyrefly: ignore[missing-attribute]
-    assert ev.string(expr(ev, "pkg.m", "COUNT")).reason == "not a string"
-    # pyrefly: ignore[missing-attribute]
-    assert ev.string(expr(ev, "pkg.m", "get_path()")).reason == "not a string"
-    # pyrefly: ignore[missing-attribute]
-    assert ev.string(expr(ev, "pkg.m", "UNDEFINED")).reason == "unbound"
+    assert reason(ev.string(expr(ev, "pkg.m", "f'{API!r}'"))) == "formatted value"
+    assert reason(ev.string(expr(ev, "pkg.m", "COUNT"))) == "not a string"
+    assert reason(ev.string(expr(ev, "pkg.m", "get_path()"))) == "not a string"
+    assert reason(ev.string(expr(ev, "pkg.m", "UNDEFINED"))) == "unbound"
 
 
 # ── sequence / mapping ───────────────────────────────────────────────────
@@ -319,12 +318,12 @@ def test_sequences_from_literals_names_concatenation_and_starred(tmp_path: Path)
         "Depends(verify_key)",
         "Depends(x)",
     ]
-    # pyrefly: ignore[not-iterable]
-    [element] = ev.sequence(expr(ev, "pkg.m", "COMMON"))
+    elements = ev.sequence(expr(ev, "pkg.m", "COMMON"))
+    assert not isinstance(elements, Unknown)
+    [element] = elements
     # Elements keep where they were written, so their names resolve there.
     assert element.module == "pkg.m" and element.at == 2
-    # pyrefly: ignore[missing-attribute]
-    assert ev.sequence(expr(ev, "pkg.m", "make()")).reason == "not a sequence"
+    assert reason(ev.sequence(expr(ev, "pkg.m", "make()"))) == "not a sequence"
 
 
 def test_mappings_for_kwargs(tmp_path: Path) -> None:
@@ -343,21 +342,17 @@ def test_mappings_for_kwargs(tmp_path: Path) -> None:
         },
     )
     mount = ev.mapping(expr(ev, "pkg.m", "MOUNT"))
-    # pyrefly: ignore[bad-argument-type]
+    assert not isinstance(mount, Unknown)
     assert sorted(mount) == ["dependencies", "prefix"]
-    # pyrefly: ignore[bad-index]
     assert ev.string(mount["prefix"]) == "/kw"
-    # pyrefly: ignore[bad-index]
     assert texts(ev.sequence(mount["dependencies"])) == ["Depends(verify_key)"]
-    # pyrefly: ignore[bad-argument-type]
-    assert sorted(ev.mapping(expr(ev, "pkg.m", "EXTRA"))) == ["prefix", "tags"]
+    extra = ev.mapping(expr(ev, "pkg.m", "EXTRA"))
+    assert not isinstance(extra, Unknown)
+    assert sorted(extra) == ["prefix", "tags"]
     # A copy shares the values, so a change through COPY may change SHARED's.
-    # pyrefly: ignore[missing-attribute]
-    assert ev.mapping(expr(ev, "pkg.m", "SHARED")).reason == ESCAPED_REASON
-    # pyrefly: ignore[missing-attribute]
-    assert ev.mapping(expr(ev, "pkg.m", "{KEY: 1}")).reason == "non-string key"
-    # pyrefly: ignore[missing-attribute]
-    assert ev.mapping(expr(ev, "pkg.m", "build()")).reason == "not a mapping"
+    assert reason(ev.mapping(expr(ev, "pkg.m", "SHARED"))) == ESCAPED_REASON
+    assert reason(ev.mapping(expr(ev, "pkg.m", "{KEY: 1}"))) == "non-string key"
+    assert reason(ev.mapping(expr(ev, "pkg.m", "build()"))) == "not a mapping"
 
 
 @pytest.mark.parametrize("source", ["[1, 2]", "'/x'"])
@@ -432,13 +427,10 @@ def test_an_instance_attribute_set_at_runtime_has_no_value(tmp_path: Path) -> No
                 """,
         },
     )
-    # pyrefly: ignore[missing-attribute]
-    assert ev.string(expr(ev, "pkg.m", "cfg.prefix")).reason == "instance attribute prefix set by Cfg.__init__()"
+    assert reason(ev.string(expr(ev, "pkg.m", "cfg.prefix"))) == "instance attribute prefix set by Cfg.__init__()"
     assert ev.string(expr(ev, "pkg.m", "cfg.other")) == "/other"
-    # pyrefly: ignore[missing-attribute]
-    assert ev.string(expr(ev, "pkg.m", "data.prefix")).reason == "instance attribute of decorated class Data"
-    # pyrefly: ignore[missing-attribute]
-    assert "outside the package" in ev.string(expr(ev, "pkg.m", "settings.prefix")).reason
+    assert reason(ev.string(expr(ev, "pkg.m", "data.prefix"))) == "instance attribute of decorated class Data"
+    assert "outside the package" in reason(ev.string(expr(ev, "pkg.m", "settings.prefix")))
     assert ev.string(expr(ev, "pkg.m", "plain.prefix")) == "/plain"
     assert ev.string(expr(ev, "pkg.m", "Cfg.prefix")) == "/default"
 
@@ -460,22 +452,20 @@ def test_local_names_come_from_the_lookup_never_the_module(tmp_path: Path) -> No
     assert ev.string(expr(ev, "pkg.m", "PATH + '/x'"), lookup) == "/local/x"
     assert ev.string(expr(ev, "pkg.m", "PATH")) == "/module"
     assert ev.string(expr(ev, "pkg.m", "f'{unknown}/x'"), lookup) == Unknown("local variable of make()", "unknown")
-    # pyrefly: ignore[missing-attribute]
-    assert ev.string(expr(ev, "pkg.m", "PATH.upper"), lookup).reason == "attribute of local name PATH"
-    # pyrefly: ignore[bad-index]
-    assert ev.mapping_items(expr(ev, "pkg.m", "{'prefix': PATH}"), lookup)["prefix"][1] is lookup
+    assert reason(ev.string(expr(ev, "pkg.m", "PATH.upper"), lookup)) == "attribute of local name PATH"
+    items = ev.mapping_items(expr(ev, "pkg.m", "{'prefix': PATH}"), lookup)
+    assert not isinstance(items, Unknown)
+    assert items["prefix"][1] is lookup
 
 
 def test_booleans_and_sequence_builtins(tmp_path: Path) -> None:
     ev = evaluator(tmp_path, {**BASE, "pkg/m.py": "FLAG = False\nGUARDS = ('a', 'b')\nflag_list = [FLAG]\n"})
     assert ev.boolean(expr(ev, "pkg.m", "FLAG")) is False
     assert ev.boolean(expr(ev, "pkg.m", "not FLAG")) is True
-    # pyrefly: ignore[missing-attribute]
-    assert ev.boolean(expr(ev, "pkg.m", "flag_list[0]")).reason == "not a constant bool"
+    assert reason(ev.boolean(expr(ev, "pkg.m", "flag_list[0]"))) == "not a constant bool"
     assert texts(ev.sequence(expr(ev, "pkg.m", "list(GUARDS)"))) == ["'a'", "'b'"]
     assert texts(ev.sequence(expr(ev, "pkg.m", "tuple(GUARDS) + ('c',)"))) == ["'a'", "'b'", "'c'"]
-    # pyrefly: ignore[missing-attribute]
-    assert ev.sequence(expr(ev, "pkg.m", "sorted(GUARDS)")).reason == "not a sequence"
+    assert reason(ev.sequence(expr(ev, "pkg.m", "sorted(GUARDS)"))) == "not a sequence"
 
 
 DECORATORS = """

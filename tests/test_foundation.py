@@ -10,6 +10,7 @@ import os
 import re
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -52,9 +53,9 @@ def test_generated_output_is_skipped_only_directly_under_its_parent(tmp_path: Pa
     _write(backend / "coverage" / "report.py")
     _write(backend / "build" / "steps.py")
 
-    def rels(root: Path, suffixes: tuple[str, ...], **kw: object) -> list[str]:
+    def rels(root: Path, suffixes: tuple[str, ...], generated_parent: Path | None = None) -> list[str]:
         found: list[problems.Problem] = []
-        files = code_paths.iter_source_files(root, suffixes, tmp_path, found, **kw)  # type: ignore[arg-type]
+        files = code_paths.iter_source_files(root, suffixes, tmp_path, found, generated_parent=generated_parent)
         assert found == []
         return [f.rel for f in files]
 
@@ -530,8 +531,9 @@ def test_backend_model_shapes_are_frozen_and_constructible() -> None:
         order=0,
         endpoint=endpoint,
     )
+    frozen: Any = route
     with pytest.raises(AttributeError):
-        route.path = "/y"  # type: ignore[misc]
+        frozen.path = "/y"
     target = backend_model.DepTarget("pkg.deps:get_db", "pkg.deps", "get_db", "get_db", "function", "pkg/deps.py", 3)
     use = backend_model.DepUse(target, "get_db", "direct", "db", None, "Depends", "pkg/mod.py", 2)
     assert use.target.id == "pkg.deps:get_db"

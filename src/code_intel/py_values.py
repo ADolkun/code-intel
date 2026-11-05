@@ -21,17 +21,17 @@ import ast
 import builtins
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any, Union
+from typing import Any
 
 from code_intel import py_escapes
+from code_intel.ast_nodes import start_position
 from code_intel.backend_model import Def, External, Located, ModuleRef, Target, Unknown, Value
 from code_intel.py_sources import PySources
 
 # What a local name holds: (value, lookup to evaluate it in), with a third
 # element True when the function may change that container in place.
-LocalLookup = Callable[
-    [str], Union["tuple[Located, LocalLookup | None]", "tuple[Located, LocalLookup | None, bool]", Unknown, None]
-]
+type LocalFound = tuple[Located, LocalLookup | None] | tuple[Located, LocalLookup | None, bool]
+type LocalLookup = Callable[[str], LocalFound | Unknown | None]
 
 _BUILTINS = frozenset(dir(builtins))
 # Binding kinds bound to a module, whose attributes are checked where they are defined.
@@ -124,7 +124,7 @@ class ValueEvaluator:
         ``Value`` of its right-hand side (``resolve_expr`` follows aliases).
         """
         try:
-            with self._enter(("name", module, name, at, _pos(node))):
+            with self._enter(("name", module, name, at, start_position(node))):
                 return self._resolve_name(module, name, at, node)
         except _Limit as limit:
             if self._depth:
@@ -368,17 +368,14 @@ class ValueEvaluator:
 
     # ── Values ───────────────────────────────────────────────────────────
 
-    def local_value(
-        self, node: ast.expr, local: LocalLookup | None
-    ) -> tuple[Located, LocalLookup | None] | Unknown | None:
+    def local_value(self, node: ast.AST, local: LocalLookup | None) -> LocalFound | Unknown | None:
         """What a name, or the root name of an attribute chain, local to the
         running function holds; None for module names."""
         if local is None:
             return None
         if isinstance(node, ast.Name):
-            # pyrefly: ignore[bad-return]
             return local(node.id)
-        root: ast.expr = node
+        root = node
         while isinstance(root, ast.Attribute):
             root = root.value
         if isinstance(root, ast.Name):
@@ -455,7 +452,7 @@ class ValueEvaluator:
     def _named(self, loc: Located, local: LocalLookup | None, what: str, evaluate: Callable[..., Any]) -> Any:
         """A name or attribute evaluated with ``evaluate``: what the running
         function's local holds, else the one value the module binds to it."""
-        found = self.local_value(loc.node, local)  # type: ignore[arg-type]
+        found = self.local_value(loc.node, local)
         if isinstance(found, Unknown):
             return found
         if found is not None:
@@ -825,12 +822,6 @@ def _own_returns(fn: ast.AST) -> list[ast.expr]:
             continue
         stack.extend(ast.iter_child_nodes(node))
     return out
-
-
-def _pos(node: ast.AST | None) -> tuple[int, int] | None:
-    if node is None or not hasattr(node, "lineno"):
-        return None
-    return (node.lineno, node.col_offset)  # type: ignore[attr-defined]
 
 
 def _key(target: Target) -> tuple:

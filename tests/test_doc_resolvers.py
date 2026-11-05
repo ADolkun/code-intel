@@ -99,16 +99,24 @@ def test_the_context_drops_untracked_and_config_file_rows_and_is_immutable(tmp_p
     assert ctx.backend_roots == frozenset({"items"})
     # FastAPI's own pages pass the gate whatever the app mounts.
     assert ctx.gate_roots == frozenset({"items", "articles", "docs", "redoc", "openapi.json"})
+    frozen: Any = ctx
     with pytest.raises(dataclasses.FrozenInstanceError):
-        ctx.routes = ()  # type: ignore[misc]
+        frozen.routes = ()
 
 
 def test_the_context_maps_are_read_only(tmp_path: Path) -> None:
     kept = {"name": "Kept", "kind": "class", "container": None, "file": "backend/app.py", "line": 1}
     ctx = _context(tmp_path, ["docs/README.md"], symbols=[kept])
-    for mapping in (ctx.children, ctx.by_basename, ctx.markdown_in_dir, ctx.markdown_in_dir["docs"], ctx.by_name):
+    mappings: tuple[Any, ...] = (
+        ctx.children,
+        ctx.by_basename,
+        ctx.markdown_in_dir,
+        ctx.markdown_in_dir["docs"],
+        ctx.by_name,
+    )
+    for mapping in mappings:
         with pytest.raises(TypeError):
-            mapping["x"] = ()  # type: ignore[index]
+            mapping["x"] = ()
 
 
 def test_a_directory_lands_on_its_readme_before_its_index(tmp_path: Path) -> None:

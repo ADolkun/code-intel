@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from code_intel import code_paths, py_sources
+from code_intel.backend_model import PyModule
 from code_intel.py_sources import ModuleScope, PySources, module_name_for, resolve_relative, static_names
 
 
@@ -24,6 +25,24 @@ def write_tree(root: Path, files: dict[str, str]) -> None:
 def load(tmp_path: Path, files: dict[str, str], package: str = "pkg", **kwargs) -> PySources:
     write_tree(tmp_path, files)
     return PySources(tmp_path, package, tmp_path, **kwargs).load()
+
+
+def module_of(sources: PySources, name: str) -> PyModule:
+    mod = sources.module(name)
+    assert mod is not None, name
+    return mod
+
+
+def assigned_value(sources: PySources, name: str) -> ast.expr:
+    """The value of the first statement of ``name``, which must be an assignment."""
+    stmt = module_of(sources, name).tree.body[0]
+    assert isinstance(stmt, ast.Assign)
+    return stmt.value
+
+
+def constant(node: ast.expr) -> object:
+    assert isinstance(node, ast.Constant)
+    return node.value
 
 
 def scope_of(tmp_path: Path, source: str) -> ModuleScope:
@@ -87,10 +106,8 @@ def test_load_names_every_module_and_counts_files(tmp_path: Path) -> None:
     assert sorted(sources.modules) == ["pkg", "pkg.api", "pkg.api.routes.a", "pkg.main"]
     assert sources.files_scanned == 4
     assert not any(p.is_diagnostic for p in sources.problems)
-    # pyrefly: ignore[missing-attribute]
-    assert sources.module("pkg").is_package and not sources.module("pkg.main").is_package
-    # pyrefly: ignore[missing-attribute]
-    assert sources.module("pkg.api.routes.a").rel == "pkg/api/routes/a.py"
+    assert module_of(sources, "pkg").is_package and not module_of(sources, "pkg.main").is_package
+    assert module_of(sources, "pkg.api.routes.a").rel == "pkg/api/routes/a.py"
     # `pkg.api.routes` has no __init__.py but is still a (namespace) package.
     assert sources.has_module("pkg.api.routes") and not sources.has_module("pkg.nope")
 
@@ -98,8 +115,7 @@ def test_load_names_every_module_and_counts_files(tmp_path: Path) -> None:
 # ── Per-step diagnostics ──────────────────────────────────────────────────
 
 
-def _kinds(sources: PySources) -> list[tuple[str, str, str]]:
-    # pyrefly: ignore[bad-return]
+def _kinds(sources: PySources) -> list[tuple[str, str | None, str | None]]:
     return [(p.kind, p.step, p.file) for p in sources.problems]
 
 
@@ -129,10 +145,7 @@ def test_source_encoding_follows_pep_263_and_the_bom(tmp_path: Path) -> None:
     (tmp_path / "pkg" / "bom.py").write_bytes(b"\xef\xbb\xbfNAME = 'b'\n")
     sources = PySources(tmp_path, "pkg", tmp_path).load()
     assert not any(p.is_diagnostic for p in sources.problems)
-    # pyrefly: ignore[missing-attribute]
-    latin = sources.module("pkg.latin").tree.body[0]
-    # pyrefly: ignore[missing-attribute]
-    assert isinstance(latin, ast.Assign) and latin.value.value == "\u00e9"
+    assert constant(assigned_value(sources, "pkg.latin")) == "\u00e9"
     assert "pkg.bom" in sources.modules
 
 
@@ -218,8 +231,7 @@ def test_racy_stamp_is_checked_by_content(tmp_path: Path) -> None:
     assert path.stat().st_size == st.st_size
     sources.load()
     assert sources.module("pkg.a") is not first
-    # pyrefly: ignore[missing-attribute]
-    assert sources.module("pkg.a").tree.body[0].value.value == 2
+    assert constant(assigned_value(sources, "pkg.a")) == 2
 
 
 def _edit_in_place(path: Path, text: str) -> None:
@@ -257,11 +269,9 @@ def test_an_edit_between_the_read_and_the_cache_is_seen(tmp_path: Path, monkeypa
     st = path.stat()
     _edit_after_first_read(monkeypatch, path, "x = 2\n")
     sources = PySources(tmp_path, "pkg", tmp_path, clock=lambda: st.st_mtime_ns).load()
-    # pyrefly: ignore[missing-attribute]
-    assert sources.module("pkg.a").tree.body[0].value.value == 1
+    assert constant(assigned_value(sources, "pkg.a")) == 1
     sources.load()
-    # pyrefly: ignore[missing-attribute]
-    assert sources.module("pkg.a").tree.body[0].value.value == 2
+    assert constant(assigned_value(sources, "pkg.a")) == 2
 
 
 def test_a_same_size_rewrite_with_its_mtime_restored_after_the_window_is_reparsed(
@@ -286,8 +296,11 @@ def test_a_same_size_rewrite_with_its_mtime_restored_after_the_window_is_reparse
     settle()
     sources.load()
     assert sources.changed == {"pkg.routes"}
-    # pyrefly: ignore[missing-attribute]
-    assert sources.module("pkg.routes").tree.body[0].decorator_list[0].args[0].value == "/new"
+    handler = module_of(sources, "pkg.routes").tree.body[0]
+    assert isinstance(handler, ast.FunctionDef)
+    decorator = handler.decorator_list[0]
+    assert isinstance(decorator, ast.Call)
+    assert constant(decorator.args[0]) == "/new"
 
 
 def test_scope_is_rebuilt_only_for_a_reparsed_module(tmp_path: Path) -> None:
@@ -401,8 +414,7 @@ def test_loop_targets_walrus_match_and_except_names(tmp_path: Path) -> None:
         """,
     )
     assert scope.bindings["item"][0].kind == "for" and scope.bindings["item"][0].conditional
-    # pyrefly: ignore[bad-argument-type]
-    assert scope.bindings["w"][0].kind == "walrus" and ast.unparse(scope.bindings["w"][0].value) == "'/w'"
+    assert scope.bindings["w"][0].kind == "walrus" and values(scope.bindings["w"][:1]) == ["'/w'"]
     assert scope.bindings["captured"][0].kind == "match"
     assert scope.bindings["err"][0].kind == "except"
     assert "z" not in scope.bindings
@@ -490,8 +502,11 @@ def test_exports_accept_an_annotated_literal_all(tmp_path: Path) -> None:
 
 def test_index_of_finds_the_top_level_statement(tmp_path: Path) -> None:
     scope = scope_of(tmp_path, "a = 1\n\nif a:\n    b = (\n        a\n    )\n")
-    # pyrefly: ignore[missing-attribute]
-    inner = scope.module.tree.body[1].body[0].value
+    branch = scope.module.tree.body[1]
+    assert isinstance(branch, ast.If)
+    assignment = branch.body[0]
+    assert isinstance(assignment, ast.Assign)
+    inner = assignment.value
     assert scope.index_of(inner) == 1
     assert scope.index_of(scope.module.tree.body[0]) == 0
 
@@ -710,14 +725,13 @@ def test_finding_the_block_of_a_use_stays_linear_in_one_wrapped_module() -> None
     index, and each use scanned all of them (2,000 uses took seconds)."""
     import scaling_check
 
-    from code_intel.backend_model import PyModule
-
     def make(n: int) -> tuple[ModuleScope, list[tuple[str, ast.AST]]]:
         source = "try:\n" + "".join(f"    x{i} = {i}\n    y{i} = x{i}\n" for i in range(n)) + "except E:\n    pass\n"
         tree = ast.parse(source)
-        uses = [(n.id, n) for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)]
-        mod = PyModule("pkg.m", Path("m.py"), "m.py", None, tree, source, False)  # type: ignore[arg-type]
-        # pyrefly: ignore[bad-return]
+        uses: list[tuple[str, ast.AST]] = [
+            (n.id, n) for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        ]
+        mod = PyModule("pkg.m", Path("m.py"), "m.py", code_paths.FileStamp(0, 0, 0, 0), tree, source, False)
         return ModuleScope(mod, lambda level, target: target), uses
 
     def run(made: tuple[ModuleScope, list[tuple[str, ast.AST]]]) -> None:

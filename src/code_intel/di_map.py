@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,13 +29,11 @@ from code_intel.config import BackendConfig
 from code_intel.dependency_resolver import STAGE, DependencyResolver
 from code_intel.result_types import (
     SCHEMA_VERSION,
-    DiagnosticDict,
     DiDependencyFunction,
     DiDepRow,
     DiResult,
     DiRoute,
     DiRouter,
-    LimitationDict,
 )
 
 if TYPE_CHECKING:
@@ -184,11 +182,13 @@ def _registry(
     return out, shared
 
 
-def _dedupe(found: Iterable[problems.Problem]) -> list[DiagnosticDict | LimitationDict]:
-    out: list[DiagnosticDict | LimitationDict] = []
+def _dedupe[Row: Mapping[str, object]](
+    found: Iterable[problems.Problem], as_row: Callable[[problems.Problem], Row]
+) -> list[Row]:
+    out: list[Row] = []
     seen: set[tuple] = set()
     for problem in found:
-        row = problem.as_dict()
+        row = as_row(problem)
         key = tuple(sorted((k, str(v)) for k, v in row.items()))
         if key not in seen:
             seen.add(key)
@@ -250,13 +250,13 @@ def build_di(model: BackendModel, resolver: DependencyResolver | NameResolver | 
         )
 
     registry, shared = _registry(dep, targets, all_uses)
-    diagnostics = _dedupe(model.diagnostics)
-    limitations = _dedupe([*model.limitations, *dep.problems, *shared])
+    diagnostics = _dedupe(model.diagnostics, problems.Problem.as_diagnostic)
+    limitations = _dedupe([*model.limitations, *dep.problems, *shared], problems.Problem.as_limitation)
     return {
         "schema_version": SCHEMA_VERSION,
         "complete": not diagnostics,
-        "diagnostics": diagnostics,  # type: ignore[typeddict-item]
-        "analysis_limitations": limitations,  # type: ignore[typeddict-item]
+        "diagnostics": diagnostics,
+        "analysis_limitations": limitations,
         "app": include_models.app_block(model),
         "dependency_functions": registry,
         "routes": route_rows,
@@ -310,7 +310,6 @@ def format_text(result: DiResult) -> str:
     lines.append(f"\nRoutes ({len(result['routes'])})")
     lines.append("─" * 72)
     for route in result["routes"]:
-        # pyrefly: ignore[bad-argument-type]
         lines.extend(_route_lines(route, funcs, names, label))
     if result["unmounted_routes"]:
         lines.append(f"\nUnmounted routes ({len(result['unmounted_routes'])}), not live")
@@ -321,7 +320,9 @@ def format_text(result: DiResult) -> str:
     return "\n".join(lines)
 
 
-def _route_lines(route: dict, funcs: dict, names: dict[str, int], label: Callable[[str], str]) -> list[str]:
+def _route_lines(
+    route: DiRoute, funcs: dict[str, DiDependencyFunction], names: dict[str, int], label: Callable[[str], str]
+) -> list[str]:
     """One route: its handler, then its dependencies by where they are declared."""
     lines = [
         f"\n  {route['method']:<6} {route['path']}",

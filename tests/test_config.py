@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.machinery
 import sys
 import types
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -323,16 +325,21 @@ def test_outside_a_git_work_tree_needs_a_repo_root(
 # ── command table ────────────────────────────────────────────────────────
 
 
+class _FakeCommand(types.ModuleType):
+    add_arguments: Callable[[argparse.ArgumentParser], object]
+    run: Callable[[argparse.Namespace, cli.Context], int]
+
+
 def fake_command(monkeypatch: pytest.MonkeyPatch, name: str, calls: list) -> None:
-    module = types.ModuleType(f"code_intel.{name}")
+    module = _FakeCommand(f"code_intel.{name}")
     module.__spec__ = importlib.machinery.ModuleSpec(f"code_intel.{name}", None)
-    module.add_arguments = lambda parser: parser.add_argument("--flag")  # type: ignore[attr-defined]
+    module.add_arguments = lambda parser: parser.add_argument("--flag")
 
     def run(args, context) -> int:
         calls.append((args.flag, context.repo_root, context.config.backend.package))
         return 7
 
-    module.run = run  # type: ignore[attr-defined]
+    module.run = run
     monkeypatch.setitem(sys.modules, f"code_intel.{name}", module)
 
 
