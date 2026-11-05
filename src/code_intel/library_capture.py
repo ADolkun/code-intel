@@ -12,11 +12,13 @@ app (``format: 1``); the analysis reads it without running anything.
   text of the expression it is bound to) and of installed callables named in the
   package (``external``, a dotted name).
 - ``callables``: where each installed dependency callable is defined.
-- ``unfilled`` (optional): the gaps the capture tried and could not fill, each with
-  its reason, so ``capture --if-stale`` does not start the app again for them. It
-  has ``includes`` (by the same file, router text and occurrence as an include)
-  and ``dependencies`` (by ``binding`` with ``bound_to``, or ``external``, as a
-  dependency). A gap whose identity changed is not in it.
+- ``unfilled`` (optional, never empty): the gaps the capture tried and could not
+  fill, or filled with something the analysis does not apply, so that
+  ``capture --if-stale`` does not start the app again for them. It has
+  ``includes`` (by the same file, router text and occurrence as an include) and
+  ``dependencies`` (by ``binding`` with ``bound_to``, or ``external``, as a
+  dependency), and only those keys: the reason the app gave can hold a path of
+  the machine that captured. A gap whose identity changed is not in it.
 
 A dependency node with ``sub`` is a callable of installed code and the capture
 owns its subtree; a node without it is a callable of the backend package, whose
@@ -87,11 +89,9 @@ class UnfilledInclude(TypedDict):
     file: str
     router: str
     occurrence: int
-    reason: str
 
 
 class UnfilledDependency(TypedDict):
-    reason: str
     binding: NotRequired[str]
     bound_to: NotRequired[str]
     external: NotRequired[str]
@@ -286,19 +286,18 @@ def _dependency(value: object, where: str) -> CapturedDependency:
 
 
 def _unfilled_include(value: object, where: str) -> UnfilledInclude:
-    data = _object(value, where, ("file", "router", "occurrence", "reason"))
+    data = _object(value, where, ("file", "router", "occurrence"))
     return {
         "file": _text(data["file"], f"{where}.file"),
         "router": _text(data["router"], f"{where}.router"),
         "occurrence": _number(data["occurrence"], f"{where}.occurrence"),
-        "reason": _text(data["reason"], f"{where}.reason"),
     }
 
 
 def _unfilled_dependency(value: object, where: str) -> UnfilledDependency:
-    data = _object(value, where, ("reason",), ("binding", "bound_to", "external"))
+    data = _object(value, where, (), ("binding", "bound_to", "external"))
     _check_dependency_identity(data, where)
-    dependency: UnfilledDependency = {"reason": _text(data["reason"], f"{where}.reason")}
+    dependency: UnfilledDependency = {}
     if "binding" in data:
         dependency["binding"] = _text(data["binding"], f"{where}.binding")
         dependency["bound_to"] = _text(data["bound_to"], f"{where}.bound_to")
@@ -309,7 +308,7 @@ def _unfilled_dependency(value: object, where: str) -> UnfilledDependency:
 
 def _unfilled(value: object) -> Unfilled:
     data = _object(value, "unfilled", ("includes", "dependencies"))
-    return {
+    unfilled: Unfilled = {
         "includes": [
             _unfilled_include(item, f"unfilled.includes[{k}]")
             for k, item in enumerate(_items(data["includes"], "unfilled.includes"))
@@ -319,6 +318,9 @@ def _unfilled(value: object) -> Unfilled:
             for k, item in enumerate(_items(data["dependencies"], "unfilled.dependencies"))
         ],
     }
+    if not unfilled["includes"] and not unfilled["dependencies"]:
+        raise _fail("unfilled", "is empty; leave the key out")
+    return unfilled
 
 
 def _library_ids(nodes: list[DepNode]) -> set[str]:
@@ -369,15 +371,22 @@ def from_json(data: object) -> LibraryCapture:
     return capture
 
 
-def _check_consistent(capture: LibraryCapture) -> None:
+def named_callables(includes: list[CapturedInclude], dependencies: list[CapturedDependency]) -> set[str]:
+    """The ids of the installed callables the entries name; each needs a location in ``callables``."""
     named: set[str] = set()
-    dists = {entry["dist"] for entry in capture["callables"].values()}
-    for include in capture["includes"]:
+    for include in includes:
         for route in include["routes"]:
             named |= _library_ids(route["route_deps"]) | _library_ids(route["param_deps"])
-            dists.add(route["location"]["dist"])
-    for dependency in capture["dependencies"]:
+    for dependency in dependencies:
         named |= {dependency["id"], *_library_ids(dependency["sub"])}
+    return named
+
+
+def _check_consistent(capture: LibraryCapture) -> None:
+    dists = {entry["dist"] for entry in capture["callables"].values()}
+    for include in capture["includes"]:
+        dists.update(route["location"]["dist"] for route in include["routes"])
+    named = named_callables(capture["includes"], capture["dependencies"])
     missing = sorted(named - set(capture["callables"]))
     if missing:
         raise _fail("callables", f"has no location for {missing[0]!r}")

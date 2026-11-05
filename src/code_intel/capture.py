@@ -16,15 +16,17 @@ applied, so the gaps are read again with the capture so far applied, until none
 is new.
 
 A gap the app could not fill (a router that is not wholly from installed code, an
-include that did not run once) is recorded in the file's ``unfilled`` key with its
-reason, so it counts as attempted.
+include that did not run once), and an entry the analysis would not apply once
+recorded, are written to the file's ``unfilled`` key by identity only (the reason
+the app gives can hold a path of this machine, so it is printed and not stored).
 
 ``--if-stale`` runs the analysis's own checks with the file applied, importing
 nothing, and starts the app only when one of them finds the file stale: the file
-is malformed, the analysis reports ``library_capture_stale``, a gap has neither
-an entry nor an ``unfilled`` record, or an ``unfilled`` record matches no gap.
-Otherwise it exits 0. It cannot see a value passed to a library factory that
-changes in another module; ``--check`` can.
+does not exist or is malformed, the analysis reports ``library_capture_stale``, a
+gap has neither an entry nor an ``unfilled`` record, or an ``unfilled`` record
+matches no gap. Otherwise it exits 0. It cannot see a change to anything the
+library call's result depends on other than the text of the include's router
+argument or the binding's expression; ``--check`` can.
 
 It refuses (exit 2, nothing written) when an installed version of ``fastapi``
 or of a captured distribution differs from the repository's lock, since the
@@ -43,14 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from code_intel import library_capture, library_view, problems, runner, toolchain_pins
 from code_intel.config import BackendConfig, CaptureConfig
-from code_intel.library_capture import (
-    CapturedDependency,
-    CapturedInclude,
-    CaptureFormatError,
-    LibraryCapture,
-    UnfilledDependency,
-    UnfilledInclude,
-)
+from code_intel.library_capture import CaptureFormatError, LibraryCapture
 from code_intel.library_view import LibraryView
 
 if TYPE_CHECKING:
@@ -128,7 +123,7 @@ def _gaps(model: BackendModel, di: DiResult) -> Gaps:
     bindings: set[BindingGap] = set()
     externals: set[str] = set()
     for entry in di["dependency_functions"].values():
-        if entry["kind"] == "external":
+        if entry["kind"] == "external" and "runtime_id" not in entry:
             bindings.add(BindingGap(entry["id"], entry.get("bound_to", "")))
         elif "external" in entry:
             externals.add(entry["external"])
@@ -137,8 +132,7 @@ def _gaps(model: BackendModel, di: DiResult) -> Gaps:
 
 def static_gaps(repo_root: Path, backend: BackendConfig, library: LibraryView | None = None) -> Gaps:
     """The fillable gaps of the backend, found without importing anything. ``library``
-    is a capture to apply first: what is still a gap with it applied (a binding it filled
-    is still listed)."""
+    is a capture to apply first: what is still a gap with it applied."""
     return _gaps(*_analyze(repo_root, backend, library))
 
 
@@ -154,14 +148,18 @@ def _gap_identities(gaps: Gaps) -> set[Identity]:
     }
 
 
-def _include_identity(entry: CapturedInclude | UnfilledInclude) -> Identity:
-    return ("include", *library_capture.include_key(entry))
+def _include_identity(entry: Mapping[str, Any]) -> Identity:
+    return ("include", entry["file"], entry["router"], entry["occurrence"])
 
 
-def _dependency_identity(entry: CapturedDependency | UnfilledDependency) -> Identity:
+def _dependency_identity(entry: Mapping[str, Any]) -> Identity:
     if "binding" in entry:
         return ("binding", entry["binding"], entry["bound_to"])
     return ("external", entry["external"])
+
+
+def _entry_identity(entry: Mapping[str, Any]) -> Identity:
+    return _include_identity(entry) if "router" in entry else _dependency_identity(entry)
 
 
 def _describe(identity: Identity) -> str:
@@ -183,6 +181,8 @@ def stale_reasons(repo_root: Path, backend: BackendConfig, capture_config: Captu
     view = library_view.read(repo_root, capture_config.file, app=backend.app, lock=backend.lock)
     if malformed := [problem.message for problem in view.problems if problem.is_diagnostic]:
         return malformed
+    if view.capture is None and not view.problems:
+        return [f"{capture_config.file} does not exist"]
     model, di = _analyze(repo_root, backend, view)
     reasons = [lim["message"] for lim in di["analysis_limitations"] if lim["kind"] == "library_capture_stale"]
     gaps = _gap_identities(_gaps(model, di))
@@ -215,7 +215,7 @@ def _request(backend: BackendConfig, gaps: Gaps) -> dict[str, Any]:
 
 @dataclass
 class _Recorded:
-    """What the oracle recorded over one or more runs, and for each gap it could not fill a note and an ``unfilled`` record."""
+    """What the oracle recorded over one or more runs, and for each gap that is not filled a note and an ``unfilled`` record."""
 
     includes: list[Any] = field(default_factory=list)
     dependencies: list[Any] = field(default_factory=list)
@@ -231,12 +231,7 @@ class _Recorded:
             if "reason" in record:
                 self.notes.append(f"{label}: {record['reason']}")
                 self.unfilled_includes.append(
-                    {
-                        "file": gap.file,
-                        "router": gap.site.router,
-                        "occurrence": gap.site.occurrence,
-                        "reason": record["reason"],
-                    }
+                    {"file": gap.file, "router": gap.site.router, "occurrence": gap.site.occurrence}
                 )
                 continue
             self.callables.update(record["callables"])
@@ -253,14 +248,34 @@ class _Recorded:
         for item, record in zip(requested, result["dependencies"], strict=True):
             if "reason" in record:
                 self.notes.append(f"dependency {item.get('binding') or item['external']}: {record['reason']}")
-                self.unfilled_dependencies.append({**item, "reason": record["reason"]})
+                self.unfilled_dependencies.append(dict(item))
                 continue
             self.callables.update(record["callables"])
             self.dependencies.append({**item, "id": record["id"], "sub": record["sub"]})
         self.versions.update(result["versions"])
 
+    def move_unapplied(self, left: Gaps) -> bool:
+        """Moves each recorded entry that is still among ``left``, the gaps remaining with the record applied,
+        to the unfilled ones: the analysis does not apply it. Whether any moved."""
+        keys = _gap_identities(left)
+        moved = [entry for entry in (*self.includes, *self.dependencies) if _entry_identity(entry) in keys]
+        for entry in moved:
+            identity = _entry_identity(entry)
+            self.notes.append(f"{_describe(identity)}: the analysis cannot apply what the app showed for it")
+            if entry in self.includes:
+                self.includes.remove(entry)
+                self.unfilled_includes.append({key: entry[key] for key in ("file", "router", "occurrence")})
+            else:
+                self.dependencies.remove(entry)
+                self.unfilled_dependencies.append(
+                    {key: entry[key] for key in ("binding", "bound_to", "external") if key in entry}
+                )
+        return bool(moved)
+
     def capture(self, backend: BackendConfig) -> LibraryCapture:
-        used = {"fastapi", *(location["dist"] for location in self.callables.values())}
+        named = library_capture.named_callables(self.includes, self.dependencies)
+        callables = {callable_id: location for callable_id, location in self.callables.items() if callable_id in named}
+        used = {"fastapi", *(location["dist"] for location in callables.values())}
         for include in self.includes:
             used.update(route["location"]["dist"] for route in include["routes"])
         data: dict[str, Any] = {
@@ -269,7 +284,7 @@ class _Recorded:
             "distributions": {name: self.versions[name] for name in sorted(used)},
             "includes": self.includes,
             "dependencies": self.dependencies,
-            "callables": self.callables,
+            "callables": callables,
         }
         if self.unfilled_includes or self.unfilled_dependencies:
             data["unfilled"] = {
@@ -302,9 +317,13 @@ def check_versions(capture: LibraryCapture, repo_root: Path, backend: BackendCon
         )
 
 
-# A dependency behind a router the capture fills shows only once that router is applied,
-# so the gaps are read again until none is new; this bounds a chain of such routers.
-MAX_PASSES = 4
+def _settle(repo_root: Path, backend: BackendConfig, capture_config: CaptureConfig, recorded: _Recorded) -> Gaps:
+    """The gaps left with ``recorded`` applied, after moving to the unfilled ones every entry the analysis
+    does not apply. Moving one can hide a dependency behind it, so the gaps are read again until none moves."""
+    while True:
+        left = static_gaps(repo_root, backend, LibraryView(capture_config.file, recorded.capture(backend), ()))
+        if not recorded.move_unapplied(left):
+            return left
 
 
 def make_capture(
@@ -323,12 +342,13 @@ def make_capture(
     gaps = static_gaps(repo_root, backend)
     asked: set[tuple[str, str]] = set()
     try:
-        for _ in range(MAX_PASSES):
+        # A dependency behind a router the capture fills shows only once that router is applied, so the gaps
+        # are read again until none is new. Each pass asks only gaps not asked before, and the gaps are finite.
+        while True:
             result = runner.run_oracle(python, arguments, dict(capture_config.env), request=_request(backend, gaps))
             recorded.add(gaps, result)
             asked |= {("binding", gap.id) for gap in gaps.bindings} | {("external", name) for name in gaps.externals}
-            view = LibraryView(capture_config.file, recorded.capture(backend), ())
-            later = static_gaps(repo_root, backend, view)
+            later = _settle(repo_root, backend, capture_config, recorded)
             gaps = Gaps(
                 (),
                 tuple(gap for gap in later.bindings if ("binding", gap.id) not in asked),
@@ -369,7 +389,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "write the file only when a static check, which does not start the app, finds it stale "
-            "(a value passed to a library factory that changes in another module is for --check)"
+            "(it cannot see what a library call depends on beyond its own text, such as an argument from another module; --check can)"
         ),
     )
     parser.add_argument("--python", type=Path, help="a Python with the app's dependencies (default: the config's)")

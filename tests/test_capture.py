@@ -22,7 +22,7 @@ from fixture_repo import hermetic_git
 from library_fixture import checkout, lock_text
 from mcp_fixtures import write
 
-from code_intel import cli, library_capture, runner, ts_bridge, verify
+from code_intel import capture, cli, library_capture, runner, ts_bridge, verify
 from code_intel import server as mcp_server
 from code_intel.analysis_runtime import AnalysisRuntime
 from code_intel.config import ConfigFile
@@ -285,27 +285,20 @@ def test_a_fresh_capture_is_not_refreshed_and_the_app_is_not_started(
     assert (repo / CAPTURE_FILE).read_bytes() == before
 
 
-def test_the_gaps_a_capture_could_not_fill_are_recorded_with_their_reasons(repo: Path) -> None:
+def test_the_gaps_a_capture_could_not_fill_are_recorded_by_identity_and_their_reasons_are_printed(repo: Path) -> None:
     bind_unfilled_dependency(repo, "get_manager")
-    assert run_capture(repo)[0] == 0
+    code, _, err = run_capture(repo)
+    assert code == 0
+    assert "pkg.main:own_handler is defined in the backend package" in err
+    assert "it is pkg.deps:get_manager, a callable of the package" in err
     assert captured(repo)["unfilled"] == {
         "includes": [
-            {
-                "file": "backend/pkg/main.py",
-                "router": "extlib.make_mixed_router(own_handler)",
-                "occurrence": 1,
-                "reason": "pkg.main:own_handler is defined in the backend package, not in installed code",
-            }
+            {"file": "backend/pkg/main.py", "router": "extlib.make_mixed_router(own_handler)", "occurrence": 1}
         ],
-        "dependencies": [
-            {
-                "binding": "pkg.main:mine",
-                "bound_to": "extlib.passthrough(get_manager)",
-                "reason": "it is pkg.deps:get_manager, a callable of the package, which the analysis reads from source",
-            }
-        ],
+        "dependencies": [{"binding": "pkg.main:mine", "bound_to": "extlib.passthrough(get_manager)"}],
     }
     first = (repo / CAPTURE_FILE).read_bytes()
+    assert b"defined in the backend package" not in first and b"reason" not in first
     assert run_capture(repo)[0] == 0
     assert (repo / CAPTURE_FILE).read_bytes() == first
     assert run_capture(repo, "--check")[0] == 0
@@ -322,6 +315,13 @@ def test_a_gap_that_was_attempted_and_not_filled_does_not_start_the_app_again(
     assert oracle_calls == []
 
 
+def test_the_capture_file_does_not_depend_on_the_machine_that_made_it(repo: Path, tmp_path: Path) -> None:
+    """The reason the app gives for a gap can hold a path, so only the gap's identity is kept."""
+    bind_unfilled_dependency(repo, "get_manager")
+    assert run_capture(repo)[0] == 0
+    assert str(tmp_path) not in (repo / CAPTURE_FILE).read_text(encoding="utf-8")
+
+
 def test_a_capture_file_without_the_unfilled_key_is_refreshed_once(
     repo: Path, oracle_calls: list[Sequence[str]]
 ) -> None:
@@ -336,6 +336,92 @@ def test_a_capture_file_without_the_unfilled_key_is_refreshed_once(
     assert "include_router extlib.make_mixed_router(own_handler) #1 at backend/pkg/main.py has no entry" in err
     assert len(oracle_calls) == 1
     assert (repo / CAPTURE_FILE).read_bytes() == current
+    oracle_calls.clear()
+    assert run_capture(repo, "--if-stale")[1] == f"capture: {CAPTURE_FILE} is up to date (static check)\n"
+    assert oracle_calls == []
+
+
+def test_a_missing_capture_file_is_written_even_when_there_is_nothing_to_capture(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    write(repo / "backend" / "pkg" / "main.py", "from fastapi import FastAPI\n\napp = FastAPI()\n")
+    test_verify.git(repo, "add", "-A")
+    code, out, err = run_capture(repo, "--if-stale")
+    assert code == 0, err
+    assert out == f"capture: wrote {CAPTURE_FILE}: 0 includes (0 routes), 0 dependencies\n"
+    assert f"{CAPTURE_FILE} does not exist" in err
+    assert len(oracle_calls) == 1
+    oracle_calls.clear()
+    assert run_capture(repo, "--if-stale")[1] == f"capture: {CAPTURE_FILE} is up to date (static check)\n"
+    assert oracle_calls == []
+    assert run_capture(repo, "--check")[0] == 0
+
+
+def test_an_entry_the_analysis_does_not_apply_is_recorded_as_unfilled_and_not_captured_again(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    """A package function that returns a closure it defines is not read from source, so what the
+    app shows beneath it cannot be applied."""
+    deps = repo / "backend" / "pkg" / "deps.py"
+    deps.write_text(
+        deps.read_text(encoding="utf-8")
+        + "\n\ndef make_manager():\n    def manager():\n        return 1\n\n    return manager\n",
+        encoding="utf-8",
+    )
+    edit_main(repo, "from pkg.deps import get_manager", "from pkg.deps import get_manager, make_manager")
+    edit_main(
+        repo,
+        "app.include_router(users.get_router",
+        "closed = extlib.Users(make_manager()).current()\n\n\n"
+        '@app.get("/closed")\ndef closed_route(value=Depends(closed)):\n    return value\n\n\n'
+        "app.include_router(users.get_router",
+    )
+    code, _, err = run_capture(repo)
+    assert code == 0, err
+    assert "dependency pkg.main:closed (= extlib.Users(make_manager()).current()): the analysis cannot apply" in err
+    capture = captured(repo)
+    assert {"binding": "pkg.main:closed", "bound_to": "extlib.Users(make_manager()).current()"} in capture["unfilled"][
+        "dependencies"
+    ]
+    assert all(d.get("binding") != "pkg.main:closed" for d in capture["dependencies"])
+    oracle_calls.clear()
+    code, out, _ = run_capture(repo, "--if-stale", python=None)
+    assert (code, out) == (0, f"capture: {CAPTURE_FILE} is up to date (static check)\n")
+    assert oracle_calls == []
+    assert run_capture(repo, "--check")[0] == 0
+
+
+def test_a_recorded_include_that_is_still_a_gap_with_the_record_applied_moves_to_the_unfilled_ones() -> None:
+    """The analysis applies a captured router only to an include whose router it cannot resolve at all;
+    an include it reports as ambiguous (some routers resolved) stays a gap whatever the app showed."""
+    site = library_capture.IncludeSite(line=7, end_line=7, router="chosen", occurrence=1)
+    recorded = capture._Recorded()
+    recorded.includes.append({"file": "backend/pkg/main.py", "router": "chosen", "occurrence": 1, "routes": []})
+    recorded.includes.append({"file": "backend/pkg/main.py", "router": "other", "occurrence": 1, "routes": []})
+    left = capture.Gaps((capture.IncludeGap("backend/pkg/main.py", site),), (), ())
+    assert recorded.move_unapplied(left)
+    assert [i["router"] for i in recorded.includes] == ["other"]
+    assert recorded.unfilled_includes == [{"file": "backend/pkg/main.py", "router": "chosen", "occurrence": 1}]
+    assert not recorded.move_unapplied(left)
+
+
+def test_a_chain_of_bindings_each_visible_only_through_the_one_before_is_captured_whatever_its_depth(
+    repo: Path, oracle_calls: list[Sequence[str]]
+) -> None:
+    depth = 6
+    lines = ["def g6():\n    return 6\n", "b6 = extlib.Users(g6).current()\n"]
+    for k in range(depth - 1, 0, -1):
+        lines.append(f"def g{k}(value=Depends(b{k + 1})):\n    return value\n")
+        lines.append(f"b{k} = extlib.Users(g{k}).current()\n")
+    lines.append('@app.get("/chain")\ndef chain(value=Depends(b1)):\n    return value\n')
+    edit_main(
+        repo, "app.include_router(users.get_router", "\n\n".join(lines) + "\n\napp.include_router(users.get_router"
+    )
+    code, _, err = run_capture(repo)
+    assert code == 0, err
+    bindings = {d["binding"] for d in captured(repo)["dependencies"] if "binding" in d}
+    assert {f"pkg.main:b{k}" for k in range(1, depth + 1)} <= bindings
+    assert len(oracle_calls) >= depth
     oracle_calls.clear()
     assert run_capture(repo, "--if-stale")[1] == f"capture: {CAPTURE_FILE} is up to date (static check)\n"
     assert oracle_calls == []

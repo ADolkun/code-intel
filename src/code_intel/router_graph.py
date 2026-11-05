@@ -2067,9 +2067,12 @@ class _Builder:
         if self.library is None:
             return ""
         located = self._library_site(module, event)
-        if located is not None and self.library.include(located[0], located[1].router, located[1].occurrence):
+        if located is None:
+            return self.library.absent(False)
+        key = (located[0], located[1].router, located[1].occurrence)
+        if self.library.include(*key):
             return ""
-        return self.library.hint
+        return self.library.absent(self.library.attempted_include(*key))
 
     def _library_child(self, module: str, event: IncludeCall, frame: _Frame | None) -> _LibraryNode | None:
         """The library router the capture has for an include whose child does not resolve, or None."""

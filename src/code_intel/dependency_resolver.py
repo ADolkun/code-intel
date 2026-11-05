@@ -540,7 +540,9 @@ class DependencyResolver:
             filled = self._filled_binding(binding)
             if filled is not None:
                 return filled, None
-            return binding, view.hint if view is not None and view.binding(binding.id) is None else ""
+            if view is None or view.binding(binding.id) is not None:
+                return binding, ""
+            return binding, view.absent(view.attempted_binding(binding.id, binding.bound_to))
         dotted = self._external_name(expr_module, expr, ctx)
         filled = self._filled_external(dotted) if dotted else None
         if filled is not None:
@@ -555,7 +557,9 @@ class DependencyResolver:
             line=line,
             external=dotted or "",
         )
-        absent = view.hint if view is not None and dotted and view.external(dotted) is None else ""
+        absent = ""
+        if view is not None and dotted and view.external(dotted) is None:
+            absent = view.absent(view.attempted_external(dotted))
         return target, absent
 
     def _external_name(self, module: str, expr: ast.expr | None, ctx: ast.AST) -> str | None:
