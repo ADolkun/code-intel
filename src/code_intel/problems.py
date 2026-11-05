@@ -230,6 +230,14 @@ def failure_message(file: str | None, step: str, exc: BaseException) -> str:
     return f"{subject}could not {step} ({type(exc).__name__}: {exc})"
 
 
+def strip_fix(message: str, fix: str | None) -> str:
+    """``message`` without a trailing ``". Fix: <fix>"``, for callers that add the fix themselves."""
+    suffix = f". Fix: {fix}"
+    if fix and message.endswith(suffix):
+        return message[: -len(suffix)]
+    return message
+
+
 def diagnostic(
     kind: str,
     *,

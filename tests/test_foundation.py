@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from code_intel import backend_model, code_paths, problems, result_types, route_paths, toolchain_pins
+from code_intel import backend_model, code_paths, problems, queries, result_types, route_paths, toolchain_pins
 
 # ── code_paths ───────────────────────────────────────────────────────────
 
@@ -328,7 +328,6 @@ def test_problem_registries_hold_exactly_the_documented_kinds() -> None:
 
 
 def test_backend_route_gap_kinds_are_the_keys_of_the_route_gap_effects() -> None:
-    queries = pytest.importorskip("code_intel.queries")
 
     assert problems.BACKEND_ROUTE_GAP_KINDS == frozenset(queries.BACKEND_ROUTE_GAPS)
     assert queries.BACKEND_ROUTE_GAP_KINDS is problems.BACKEND_ROUTE_GAP_KINDS

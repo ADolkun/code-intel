@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from code_intel import include_model as include_models
-from code_intel import route_matching, ts_bridge
+from code_intel import queries, route_matching, ts_bridge
 from code_intel.backend_model import BackendModel, LiveRoute
 from code_intel.cli import Context
 from code_intel.code_paths import TS_SUFFIXES, SourceFile, is_test_path, iter_source_files, rel_posix
@@ -447,11 +447,17 @@ def build_routes(model: BackendModel, scan: FrontendScan | FrontendUnavailable) 
 
 
 def build_backend_model(repo_root: Path, backend: BackendConfig) -> BackendModel:
-    """The live backend model for the configured app."""
+    """The live backend model for the configured app, from the git-visible
+    files. Raises ``RepoFilesError`` when git cannot list them."""
     from code_intel import router_graph  # deferred: the CLI is the only caller that builds its own model
 
     return router_graph.build_backend_model(
-        repo_root / backend.root, backend.package, backend.app, repo_root, lock=backend.lock
+        repo_root / backend.root,
+        backend.package,
+        backend.app,
+        repo_root,
+        lock=backend.lock,
+        visible=list_repo_files(repo_root).files,
     )
 
 
@@ -517,6 +523,10 @@ def print_report(result: RoutesResult, *, unmatched_only: bool = False, out: Any
     )
     coverage = "n/a (incomplete)" if s["coverage_pct"] is None else f"{s['coverage_pct']}% of backend routes"
     w(f"  Coverage:        {coverage}")
+    bounds = queries.orphan_gaps(result).summary_bounds(s)
+    loose = [f"{key} {queries.BOUND_WORDS[bound]}" for key, bound in bounds.items() if bound in queries.BOUND_WORDS]
+    if loose:
+        w(f"  Bounds:          {', '.join(loose)} (the findings above can move them)")
 
 
 # ── Entry point ──────────────────────────────────────────────────────────

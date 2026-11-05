@@ -17,7 +17,7 @@ from doc_config import FAKE_ROOT, LAYOUT, config_text, doc_config
 from fake_repo_files import FakeRepoFiles
 from fixture_repo import hermetic_git
 
-from code_intel import code_paths, doc_refs
+from code_intel import code_paths, doc_presenters, doc_queries, doc_refs
 from code_intel.code_paths import FileStamp
 from code_intel.config import CONFIG_REL, ConfigError, load_config, parse_config
 from code_intel.doc_refs import DocIndex, Reference
@@ -208,8 +208,7 @@ def refs(report: doc_refs.DocReport, doc: str = "docs/a.md", kind: str | None = 
 
 
 def lookup(report: doc_refs.DocReport, **query: Any) -> Any:
-    """``doc_queries.doc_refs_lookup`` over ``report``; the tests that use it run once that module exists."""
-    doc_queries = pytest.importorskip("code_intel.doc_queries")
+    """``doc_queries.doc_refs_lookup`` over ``report``, every row."""
     return doc_queries.doc_refs_lookup(report, limit=None, **query)
 
 
@@ -627,7 +626,6 @@ def test_a_route_tail_several_routes_end_with_fails_and_is_still_found(tmp_path:
     assert [f.message for f in ref_findings(report)] == [message]
     # It still mentions every route it ends, so a lookup of one finds it.
     for query in ("POST /appointments/{id}/approve", "/scheduled-grants/{id}/approve"):
-        doc_presenters = pytest.importorskip("code_intel.doc_presenters")
         body = doc_presenters.doc_refs(lookup(report, route=query))
         assert body.text.splitlines()[-1] == (f"  docs/a.md:1  route  POST .../approve  ambiguous ({route.detail})"), (
             query
