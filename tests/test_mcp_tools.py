@@ -52,6 +52,7 @@ from mcp_fixtures import (
 from code_intel import analysis_runtime, loaded_code, presenters, problems, ts_bridge
 from code_intel import server as mcp_server
 from code_intel.config import ConfigFile
+from code_intel.doc_rules import FrontendPage, PageSet
 from code_intel.protocol_match import ProtocolMatch
 from code_intel.result_types import DiResult
 
@@ -2043,6 +2044,20 @@ def test_doc_refs_answers_each_query_kind(docs: SimpleNamespace) -> None:
     assert (symbol["definition_count"], symbol["mention_count"], symbol["complete"]) == (2, 2, True)
     doc = j(mcp_server.doc_refs(doc="./docs/a.md", output_format="json"))
     assert (doc["query"]["value"], doc["inbound_count"], doc["reachable"]) == ("docs/a.md", 3, True)
+
+
+class _StaticPages:
+    def pages(self, tracked: frozenset[str]) -> PageSet:
+        return PageSet((FrontendPage(("items", "new"), "/items/new", "frontend/src/App.tsx", 12),))
+
+
+def test_doc_refs_resolves_a_route_mention_to_a_frontend_page(docs: SimpleNamespace) -> None:
+    write(docs.repo / "docs" / "c.md", "# C\n\nOpen `/items/new` to add one.\n")
+    write(docs.repo / "docs" / "README.md", "# Docs\n\n[A](a.md)\n[B](b.md)\n[C](c.md)\n")
+    docs.fakes.page_provider = _StaticPages()
+    payload = j(mcp_server.doc_refs(route="/items/new", output_format="json"))
+    assert [(m["file"], m["status"]) for m in payload["mentions"]] == [("docs/c.md", "frontend")]
+    assert payload["complete"] is True
 
 
 def test_doc_refs_replies_share_one_key_set(docs: SimpleNamespace) -> None:

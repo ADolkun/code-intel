@@ -673,7 +673,9 @@ def doc_refs(
         if refusal := _refusal():
             return _respond(refusal, output_format)
         found = _runtime().get_doc_report()
-        needs_frontend = doc_queries.doc_lookup_needs_frontend(file=paths["file"], symbol=symbol)
+        needs_frontend = doc_queries.doc_lookup_needs_frontend(
+            file=paths["file"], symbol=symbol, frontend_root=_runtime().config("doc_refs").frontend.root
+        )
         result = doc_queries.doc_refs_lookup(
             found.report,
             file=paths["file"],

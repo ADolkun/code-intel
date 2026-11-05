@@ -39,7 +39,7 @@ from code_intel import include_model as include_models
 from code_intel.code_paths import GIT_CREATIONFLAGS as _GIT_CREATIONFLAGS
 from code_intel.code_paths import GIT_ERRORS as _GIT_ERRORS
 from code_intel.code_paths import FileStamp, SourceFile
-from code_intel.config import BackendConfig, Config, ConfigError, ConfigFile, FrontendConfig
+from code_intel.config import BackendConfig, Config, ConfigError, ConfigFile, FrontendConfig, PagesConfig
 from code_intel.repo_files import RepoFiles, RepoFilesError
 from code_intel.ts_bridge import Toolchain, ToolchainProblem, ToolchainUnavailable
 
@@ -65,6 +65,7 @@ STEP_RESOLVE_SYMBOL = "resolve symbol"
 STEP_READ_DOC_CONFIG = "read docs config"
 STEP_INDEX_DOC_SYMBOLS = "index symbols"
 STEP_RESOLVE_DOC_REFS = "resolve doc references"
+STEP_CHECK_AGENT_FILES = "check agent files"
 
 # Resolving a caller-supplied root: OSError (a symlink loop, a permission
 # error) or ValueError (an embedded NUL byte).
@@ -250,35 +251,12 @@ def _real_doc_index(repo_root: Path, clock: Callable[[], int]) -> Any:
     return doc_refs.DocIndex(repo_root, clock=clock)
 
 
-@dataclass(frozen=True)
-class _ReactRouterPagesNotRead:
-    """``kind = "react-router"``: the route modules are not read yet, so only
-    the public files are known and a bare path only a page could satisfy is
-    ``not_checked`` rather than missing."""
+def _real_page_provider(
+    repo_root: Path, config: Config, toolchain: Callable[[], Toolchain], clock: Callable[[], int]
+) -> doc_rules.PageProvider:
+    from code_intel import pages
 
-    public_dir: str | None
-
-    def pages(self, tracked: frozenset[str]) -> doc_rules.PageSet:
-        limitation = problems.limitation(
-            "frontend_pages_unavailable",
-            stage=doc_rules.STAGE,
-            file=None,
-            line=None,
-            message="react-router pages are not read yet; bare paths only a page could serve are not checked",
-        )
-        return doc_rules.PageSet(
-            tuple(doc_rules.public_pages(tracked, self.public_dir)), available=False, problems=(limitation,)
-        )
-
-
-def _real_page_provider(config: Config) -> doc_rules.PageProvider:
-    pages = config.frontend.pages
-    if pages.kind == "next-app":
-        app_dir = pages.modules[0] if pages.modules else posixpath.join(config.frontend.root, "app")
-        return doc_rules.NextAppPages(app_dir, pages.public_dir)
-    if pages.kind == "react-router":
-        return _ReactRouterPagesNotRead(pages.public_dir)
-    return doc_rules.NoPages(pages.public_dir)
+    return pages.page_provider(repo_root, config, toolchain, clock)
 
 
 @dataclass(frozen=True)
@@ -296,7 +274,7 @@ class Analyzers:
     - ``make_symbol_index(repo_root, facts, config, clock) -> SymbolIndex``
     - ``list_repo_files(repo_root) -> RepoFiles``; raises ``RepoFilesError``
     - ``make_doc_index(repo_root, clock) -> DocIndex``
-    - ``make_pages(config) -> PageProvider``: the frontend's pages for the docs
+    - ``make_pages(repo_root, config, toolchain_fn, clock) -> PageProvider``: the frontend's pages for the docs
     """
 
     build_backend_model: Callable[[Path, BackendConfig, Any, AbstractSet[str]], Any] = field(
@@ -310,7 +288,9 @@ class Analyzers:
     make_symbol_index: Callable[[Path, Any, Config, Callable[[], int]], Any] = _real_symbol_index
     list_repo_files: Callable[[Path], RepoFiles] = _real_list_repo_files
     make_doc_index: Callable[[Path, Callable[[], int]], Any] = _real_doc_index
-    make_pages: Callable[[Config], doc_rules.PageProvider] = _real_page_provider
+    make_pages: Callable[[Path, Config, Callable[[], Toolchain], Callable[[], int]], doc_rules.PageProvider] = (
+        _real_page_provider
+    )
 
     @classmethod
     def real(cls) -> Analyzers:
@@ -784,6 +764,9 @@ class AnalysisRuntime:
         self._helper_failures: dict[str, FrontendProblem] = {}
         # The docs check's per-file Markdown facts and code words; created on first use.
         self._doc_index: Any = None
+        # The frontend page provider, made for the frontend root and pages table it was built from.
+        self._pages: Any = None
+        self._pages_key: tuple[str, PagesConfig] | None = None
 
         self.last_errors: dict[str, str] = {}
         self.failed_steps: dict[str, str | None] = {}
@@ -1329,13 +1312,35 @@ class AnalysisRuntime:
                         frontend_available,
                         doc_config,
                         list(dict.fromkeys(extra)),
-                        pages=self.analyzers.make_pages(config),
+                        pages=self._page_provider(config),
                     )
                 except RepoFilesError as exc:
                     raise AnalysisFailed.build(
                         "doc_refs", STEP_RESOLVE_DOC_REFS, str(exc), self.repo_root, None
                     ) from exc
             return DocReportResult(report, frontend_problems)
+
+    def _page_provider(self, config: Config) -> doc_rules.PageProvider:
+        """The page provider for ``config``'s frontend, kept while its root and
+        ``[frontend.pages]`` are unchanged so its facts stay cached."""
+        key = (config.frontend.root, config.frontend.pages)
+        if self._pages is None or self._pages_key != key:
+            self._pages = self.analyzers.make_pages(self.repo_root, config, self.toolchain, self._clock)
+            self._pages_key = key
+        return self._pages
+
+    def get_agent_findings(self) -> list[Any]:
+        """The agent-file findings (`doc_report.Finding` rows) for the current
+        checkout; none without an ``[agents]`` table."""
+        with self._lock:
+            from code_intel import agent_files
+
+            agents = self.config("agent_files").agents
+            if agents is None:
+                return []
+            files = self._repo_files("agent_files")
+            with self._step("agent_files", STEP_CHECK_AGENT_FILES):
+                return agent_files.check(self.repo_root, agents, files.files)
 
     def _doc_index_cache(self) -> Any:
         if self._doc_index is None:
@@ -1400,6 +1405,7 @@ class AnalysisRuntime:
             if self._doc_index is not None:
                 self._doc_index.clear()
             self._doc_index = None
+            self._pages = self._pages_key = None
             with self._toolchain_lock:
                 self._toolchain = None
             self.last_state.clear()

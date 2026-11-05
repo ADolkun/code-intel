@@ -917,12 +917,14 @@ def test_doc_lookup_analysis_keeps_route_gaps_and_adds_frontend_problems(tmp_pat
 
 
 def test_doc_lookup_needs_the_frontend_for_symbols_and_frontend_files() -> None:
-    assert doc_queries.doc_lookup_needs_frontend(file=None, symbol="X")
-    assert doc_queries.doc_lookup_needs_frontend(file="frontend/lib/api.ts", symbol=None)
-    assert doc_queries.doc_lookup_needs_frontend(file="frontend", symbol=None)
-    assert not doc_queries.doc_lookup_needs_frontend(file="frontend-docs/x.md", symbol=None)
-    assert not doc_queries.doc_lookup_needs_frontend(file=DOC_LOOKUP_ROUTE_FILE, symbol=None)
-    assert not doc_queries.doc_lookup_needs_frontend(file=None, symbol=None)
+    assert doc_queries.doc_lookup_needs_frontend(file=None, symbol="X", frontend_root="frontend")
+    assert doc_queries.doc_lookup_needs_frontend(file="frontend/lib/api.ts", symbol=None, frontend_root="frontend")
+    assert doc_queries.doc_lookup_needs_frontend(file="frontend", symbol=None, frontend_root="frontend")
+    assert not doc_queries.doc_lookup_needs_frontend(file="frontend-docs/x.md", symbol=None, frontend_root="frontend")
+    assert not doc_queries.doc_lookup_needs_frontend(file=DOC_LOOKUP_ROUTE_FILE, symbol=None, frontend_root="frontend")
+    assert not doc_queries.doc_lookup_needs_frontend(file=None, symbol=None, frontend_root="frontend")
+    assert doc_queries.doc_lookup_needs_frontend(file="web/chat/app.ts", symbol=None, frontend_root="web/chat")
+    assert not doc_queries.doc_lookup_needs_frontend(file="frontend/app.ts", symbol=None, frontend_root="web/chat")
 
 
 @pytest.mark.parametrize(

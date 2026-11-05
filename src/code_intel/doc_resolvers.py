@@ -581,9 +581,9 @@ def _page_hit(
     status: str = "frontend",
     detail: str = "a frontend page, route handler or public file",
 ) -> Draft:
-    page = min(pages, key=lambda p: p.file)
+    page = min(pages, key=lambda p: (p.file, p.line))
     draft.target = page.display
-    draft.defined_in = (f"{page.file}:1",)
+    draft.defined_in = (f"{page.file}:{page.line}",)
     return draft.set(status, detail)
 
 
