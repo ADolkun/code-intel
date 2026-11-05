@@ -594,7 +594,6 @@ def test_status_counts_text_and_errors() -> None:
 # ── README ───────────────────────────────────────────────────────────────
 
 
-@pytest.mark.skip(reason="the README reference is written in T8")
 def test_readme_documents_every_registered_problem_kind() -> None:
     """Every diagnostic and limitation kind an analyzer may emit is explained in the README."""
     text = README.read_text(encoding="utf-8")
@@ -602,7 +601,6 @@ def test_readme_documents_every_registered_problem_kind() -> None:
     assert missing == []
 
 
-@pytest.mark.skip(reason="the README reference is written in T8")
 def test_readme_documents_every_error_code() -> None:
     from code_intel.result_types import ERROR_FIELDS
 
