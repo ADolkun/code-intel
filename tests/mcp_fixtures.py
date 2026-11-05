@@ -445,7 +445,7 @@ class FakeAnalyzers:
 
     ``list_repo_files`` lists the files on disk (no git) unless ``repo_files``
     is set; the doc index is the real `doc_refs.DocIndex`, which reads only the
-    files it is given, and the pages are the public files only. The symbol
+    files it is given, and the pages are the public files only unless ``page_provider`` is set. The symbol
     index answers ``python_symbols`` from ``py_symbols`` and
     ``typescript_decls`` from ``ts_decls``, raising ``ts_error`` instead when
     it is set (a `ToolchainProblem` raises `ToolchainUnavailable`).
@@ -474,6 +474,7 @@ class FakeAnalyzers:
         self.ts_decls: list = []
         self.ts_problems: list = []
         self.ts_error: BaseException | ToolchainProblem | None = None
+        self.page_provider: doc_rules.PageProvider | None = None
 
     def _count(self, name: str) -> None:
         self.calls[name] = self.calls.get(name, 0) + 1
@@ -565,9 +566,11 @@ class FakeAnalyzers:
 
         return doc_refs.DocIndex(repo_root, clock=clock)
 
-    def make_pages(self, config: Config) -> doc_rules.PageProvider:
+    def make_pages(
+        self, repo_root: Path, config: Config, toolchain: Callable[[], Toolchain], clock: Callable[[], int]
+    ) -> doc_rules.PageProvider:
         self._count("make_pages")
-        return doc_rules.NoPages(config.frontend.pages.public_dir)
+        return self.page_provider or doc_rules.NoPages(config.frontend.pages.public_dir)
 
     def analyzers(self) -> analysis_runtime.Analyzers:
         return analysis_runtime.Analyzers(

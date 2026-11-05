@@ -1410,6 +1410,20 @@ def test_get_doc_report_runs_on_the_injected_analyzers(docs: Path) -> None:
     }
 
 
+def test_the_page_provider_is_kept_until_the_pages_table_changes(docs: Path) -> None:
+    fakes = doc_fakes()
+    rt = make_runtime(docs, fakes)
+    rt.get_doc_report()
+    rt.get_doc_report()
+    assert fakes.calls["make_pages"] == 1
+    write_config(docs, config_toml() + '[frontend.pages]\nkind = "none"\npublic_dir = "frontend/public"\n', 2000)
+    rt.get_doc_report()
+    assert fakes.calls["make_pages"] == 2
+    rt.reset()
+    rt.get_doc_report()
+    assert fakes.calls["make_pages"] == 3
+
+
 def test_the_di_cache_is_shared_with_the_di_tools(docs: Path) -> None:
     fakes = doc_fakes()
     rt = make_runtime(docs, fakes)
@@ -1815,21 +1829,22 @@ def test_a_new_untracked_file_is_visible_on_the_next_call(repo: Path, fakes: Fak
 @pytest.mark.parametrize(
     ("pages", "expected"),
     [
-        ('kind = "none"\npublic_dir = "frontend/public"', ("NoPages", True, ["/robots.txt"])),
-        ('kind = "next-app"\npublic_dir = "frontend/public"', ("NextAppPages", True, ["/x", "/robots.txt"])),
+        ('kind = "none"\npublic_dir = "frontend/public"', ("NoPages", ["/robots.txt"], [])),
+        ('kind = "next-app"\npublic_dir = "frontend/public"', ("NextAppPages", ["/x", "/robots.txt"], [])),
         (
             'kind = "react-router"\nmodules = ["frontend/App.tsx"]\npublic_dir = "frontend/public"',
-            (None, False, ["/robots.txt"]),
+            ("ReactRouterPages", ["/robots.txt"], ["read_failed"]),
         ),
     ],
 )
 def test_the_page_provider_follows_the_pages_kind(tmp_path: Path, pages: str, expected: tuple) -> None:
     write_config(tmp_path, config_toml() + f"[frontend.pages]\n{pages}\n")
-    provider = analysis_runtime.Analyzers.real().make_pages(load_config(tmp_path))
+    config = load_config(tmp_path)
+    toolchain = ts_bridge.find_toolchain(tmp_path)
+    provider = analysis_runtime.Analyzers.real().make_pages(tmp_path, config, lambda: toolchain, time.time_ns)
     found = provider.pages(frozenset({"frontend/app/x/page.tsx", "frontend/public/robots.txt"}))
-    name, available, displays = expected
-    if name is not None:
-        assert type(provider).__name__ == name
-    assert found.available is available
+    name, displays, kinds = expected
+    assert type(provider).__name__ == name
+    assert found.available
     assert [page.display for page in found.pages] == displays
-    assert [p.kind for p in found.problems] == ([] if available else ["frontend_pages_unavailable"])
+    assert [p.kind for p in found.problems] == kinds

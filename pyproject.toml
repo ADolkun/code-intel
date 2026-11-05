@@ -25,6 +25,7 @@ dev = [
     "pytest-xdist>=3.8",
     "ruff==0.17.3",
     "pyrefly>=1.4.1",
+    "types-PyYAML>=6",
 ]
 # The oracle tests run the locked FastAPI of the repository under analysis; its
 # include_router model depends on the version (live from 0.137, copy before).

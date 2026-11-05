@@ -419,6 +419,7 @@ class FrontendPage:
     segments: tuple[str, ...]
     display: str
     file: str
+    line: int = 1
 
 
 @dataclass(frozen=True)

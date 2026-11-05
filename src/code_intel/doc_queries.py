@@ -67,12 +67,14 @@ def _report_problems(report: Any, extra: Iterable[Any] = ()) -> tuple[list[dict]
     return diagnostics, limitations
 
 
-def doc_check(report: Any) -> DocCheck:
-    """``report`` is a `doc_refs.DocReport`."""
+def doc_check(report: Any, extra_findings: Iterable[Any] = ()) -> DocCheck:
+    """``report`` is a `doc_refs.DocReport`; ``extra_findings`` (the agent
+    files') are merged into its findings in the same order."""
     diagnostics, limitations = _report_problems(report)
     references = list(report.references())
+    findings = sorted([*report.findings(), *extra_findings], key=lambda f: (f.file, f.line, f.kind, f.text))
     return DocCheck(
-        findings=list(report.findings()),
+        findings=findings,
         doc_count=len(report.docs),
         reference_counts=report.reference_counts(),
         reference_count=len(references),
@@ -92,7 +94,6 @@ _DOC_SYMBOL_RE = re.compile(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*")
 # Prefix, suffix and weak-parameter fits name no single route, so they would
 # tie a doc to every handler under a path.
 _ROUTE_DEFINED_STATUSES = frozenset({"ok", "method_differs", "unmounted", "frontend"})
-_FRONTEND_ROOT = "frontend"
 
 
 def parse_doc_route(text: str) -> tuple[str | None, str] | None:
@@ -105,11 +106,11 @@ def is_doc_symbol(text: str) -> bool:
     return _DOC_SYMBOL_RE.fullmatch(text) is not None
 
 
-def doc_lookup_needs_frontend(*, file: str | None, symbol: str | None) -> bool:
+def doc_lookup_needs_frontend(*, file: str | None, symbol: str | None, frontend_root: str) -> bool:
     """Whether the answer depends on frontend definition locations: a symbol
-    query, or a file query on a frontend file (its symbols resolve to it only
-    through those locations)."""
-    return symbol is not None or (file is not None and is_under(file, _FRONTEND_ROOT))
+    query, or a file query under ``frontend_root`` (its symbols resolve to it
+    only through those locations)."""
+    return symbol is not None or (file is not None and is_under(file, frontend_root))
 
 
 @dataclass(frozen=True)
