@@ -24,6 +24,7 @@ import functools
 import re
 import time
 from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1087,10 +1088,15 @@ class PySources:
     def files_scanned(self) -> int:
         return len(self.files)
 
-    def load(self) -> PySources:
+    def load(self, visible: AbstractSet[str] | None = None) -> PySources:
+        """``visible``: the git-visible files (``RepoFiles.files``); only they
+        are read, so ignored build output never is. None walks every file, for
+        a package that is not in a git work tree."""
         problems: list[Problem] = []
         root = self.import_root.joinpath(*self.package.split("."))
-        files = code_paths.iter_source_files(root, code_paths.PY_SUFFIXES, self.repo_root, problems, stage=STAGE)
+        files = code_paths.iter_source_files(
+            root, code_paths.PY_SUFFIXES, self.repo_root, problems, stage=STAGE, visible=visible
+        )
         modules: dict[str, PyModule] = {}
         cache: dict[str, _CacheEntry] = {}
         changed: set[str] = set()

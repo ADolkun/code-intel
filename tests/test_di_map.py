@@ -14,7 +14,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from fixture_repo import MINIMAL_CONFIG, make_repo, write
+from fixture_repo import MINIMAL_CONFIG, git_init, make_repo, write
 from test_dependency_resolver import DEPS, FakeResolver, FakeSources
 
 from code_intel import cli, di_map, problems
@@ -474,6 +474,7 @@ def test_cli_names_a_missing_backend_package(tmp_path, capsys) -> None:
     assert "backend package directory not found" in err
 
 
+@pytest.mark.usefixtures("module_git")
 def test_cli_runs_end_to_end_on_a_small_backend(tmp_path) -> None:
     files = {
         "service_backend/__init__.py": "",
@@ -488,9 +489,15 @@ def test_cli_runs_end_to_end_on_a_small_backend(tmp_path) -> None:
         def items(db=Depends(get_db)): ...
         """,
     }
-    make_repo(tmp_path)
+    make_repo(git_init(tmp_path))
     for rel, source in files.items():
         write(tmp_path / "backend" / rel, textwrap.dedent(source).lstrip("\n"))
+    # Ignored build output is never read (three files are scanned, not four).
+    write(tmp_path / ".gitignore", "/backend/service_backend/build/\n")
+    write(
+        tmp_path / "backend" / "service_backend" / "build" / "copy.py",
+        "from service_backend.main import app\n@app.get('/copy')\ndef c(): ...\n",
+    )
     proc = subprocess.run(
         [sys.executable, "-m", "code_intel.cli", "dump", "di", "--json", "--repo-root", str(tmp_path)],
         capture_output=True,
@@ -505,6 +512,7 @@ def test_cli_runs_end_to_end_on_a_small_backend(tmp_path) -> None:
     assert route["decorator_deps"] == ["verify_key"] and route["direct_deps"] == ["get_db"]
     assert route["all_deps"] == ["service_backend.deps:verify_key", "service_backend.deps:get_db"]
     assert data["dependency_functions"]["service_backend.deps:get_db"]["file"] == "backend/service_backend/deps.py"
+    assert data["summary"]["files_scanned"] == 3
 
 
 def test_text_report_leads_with_banners_and_json_carries_limitations(monkeypatch, tmp_path, capsys) -> None:

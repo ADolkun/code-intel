@@ -33,6 +33,7 @@ import ast
 import re
 import time
 from collections.abc import Callable, Iterable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple
@@ -3063,8 +3064,9 @@ class BackendBuilder:
         self._cache[mod.name] = (mod, analysis)
         return analysis
 
-    def build(self) -> BackendModel:
-        sources = self.sources.load()
+    def build(self, visible: AbstractSet[str] | None = None) -> BackendModel:
+        """``visible``: the git-visible files the build may read (``PySources.load``)."""
+        sources = self.sources.load(visible)
         self._cache = {name: entry for name, entry in self._cache.items() if sources.modules.get(name) is entry[0]}
         model = self.include_model or include_models.read(self.repo_root, self.lock)
         return _build(
@@ -3082,10 +3084,12 @@ def build_backend_model(
     prefilter: bool = True,
     include_model: IncludeModel | None = None,
     lock: str | None = None,
+    visible: AbstractSet[str] | None = None,
 ) -> BackendModel:
     """The router graph and live routes of ``app`` (``"pkg.main:app"``) in
     ``<import_root>/<package>``; file paths are relative to ``repo_root``.
-    ``include_model`` defaults to the one ``<repo_root>/<lock>`` gives."""
+    ``include_model`` defaults to the one ``<repo_root>/<lock>`` gives;
+    ``visible`` limits the files read (``PySources.load``)."""
     return BackendBuilder(
         import_root,
         package,
@@ -3095,7 +3099,7 @@ def build_backend_model(
         prefilter=prefilter,
         include_model=include_model,
         lock=lock,
-    ).build()
+    ).build(visible)
 
 
 def _build(

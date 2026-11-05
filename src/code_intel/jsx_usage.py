@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Set as AbstractSet
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -30,8 +31,15 @@ from typing import Literal
 from code_intel.cli import Context
 from code_intel.code_paths import JSX_SUFFIXES, SourceFile, is_test_path, iter_source_files
 from code_intel.problems import Problem, diagnostic, partition
+from code_intel.repo_files import RepoFilesError, list_repo_files
 from code_intel.result_types import SCHEMA_VERSION
-from code_intel.ts_bridge import HelperError, ToolchainProblem, find_toolchain, frontend_not_found_problem
+from code_intel.ts_bridge import (
+    HelperError,
+    ToolchainProblem,
+    find_toolchain,
+    frontend_not_found_problem,
+    incomplete_toolchain_problem,
+)
 from code_intel.ts_facts import FactsCache, FileFacts, ToolchainUnavailable, facts_problems
 
 __all__ = [
@@ -102,6 +110,7 @@ def _scan(
     frontend_root: str,
     include_tests: bool,
     problems: list[Problem],
+    visible: AbstractSet[str] | None,
 ) -> list[tuple[SourceFile, FileFacts, bool]]:
     scan_root = resolve_root(root, repo_root)
     files = iter_source_files(
@@ -111,6 +120,7 @@ def _scan(
         problems,
         stage=STAGE,
         generated_parent=repo_root.resolve() / frontend_root,
+        visible=visible,
     )
     tagged = [(source, is_test_path(source.rel)) for source in files]
     # Test files are not read at all unless asked for, so excluding them also
@@ -141,13 +151,15 @@ def find_jsx_usage(
     include_self_close: bool = True,
     include_tests: bool = False,
     problems: list[Problem],
+    visible: AbstractSet[str] | None = None,
 ) -> list[JsxUsage]:
     """Every JSX element whose tag equals ``component_name`` exactly, under ``root``.
 
     ``component_name`` is matched by exact equality with the element's tag as
     written, whitespace removed (``DataTable``, ``Ctx.Provider``, ``svg:rect``).
     ``frontend_root`` is the configured frontend root, repo-relative: the generated
-    directories directly under it are not walked. Test files are skipped unless ``include_tests``; each usage carries
+    directories directly under it are not walked. ``visible`` (``RepoFiles.files``)
+    limits the walk to git-visible files; None walks every file. Test files are skipped unless ``include_tests``; each usage carries
     ``is_test``. Unreadable files, files the helper could not analyze and files
     with TypeScript syntax errors are appended to ``problems`` as diagnostics.
 
@@ -166,6 +178,7 @@ def find_jsx_usage(
         frontend_root=frontend_root,
         include_tests=include_tests,
         problems=problems,
+        visible=visible,
     )
     usages: list[JsxUsage] = []
     for source, file_facts, is_test in scanned:
@@ -197,8 +210,9 @@ def all_jsx_elements(
     frontend_root: str,
     include_tests: bool = False,
     problems: list[Problem],
+    visible: AbstractSet[str] | None = None,
 ) -> list[JsxElementRow]:
-    """Every JSX element under ``root``, sorted by file, line and column."""
+    """Every JSX element under ``root``, sorted by file, line and column; ``visible`` as in ``find_jsx_usage``."""
     rows = [
         JsxElementRow(
             file=source.rel,
@@ -217,6 +231,7 @@ def all_jsx_elements(
             frontend_root=frontend_root,
             include_tests=include_tests,
             problems=problems,
+            visible=visible,
         )
         for element in file_facts.elements
     ]
@@ -273,9 +288,16 @@ def run(args: argparse.Namespace, context: Context) -> int:
     if missing is not None:
         return _unavailable(missing, as_json=args.json)
     toolchain = find_toolchain(repo_root)
+    if not toolchain.available:
+        return _unavailable(incomplete_toolchain_problem(toolchain), as_json=args.json)
     facts = FactsCache(repo_root, lambda: toolchain)
     problems: list[Problem] = []
     root = Path(args.root or frontend_root)
+    try:
+        visible = list_repo_files(repo_root).files
+    except RepoFilesError as exc:
+        print(f"code-intel: {exc}", file=sys.stderr)
+        return 2
     try:
         if args.all:
             rows: list[JsxElementRow] | list[JsxUsage] = all_jsx_elements(
@@ -285,6 +307,7 @@ def run(args: argparse.Namespace, context: Context) -> int:
                 frontend_root=frontend_root,
                 include_tests=args.include_tests,
                 problems=problems,
+                visible=visible,
             )
         else:
             rows = find_jsx_usage(
@@ -296,6 +319,7 @@ def run(args: argparse.Namespace, context: Context) -> int:
                 include_self_close=not args.no_self_close,
                 include_tests=args.include_tests,
                 problems=problems,
+                visible=visible,
             )
     except JsxRootError as exc:
         print(f"code-intel: {exc}", file=sys.stderr)
