@@ -661,7 +661,7 @@ def test_jsx_fixtures_equal_the_typescript_oracle(jsx_tree: JsxTree, tmp_path: P
         for r in rows
     ]
     result = compare_facts.compare(
-        [compare_facts._jsx_row(r) for r in oracle["elements"]],
+        [compare_facts.jsx_row(r) for r in oracle["elements"]],
         tool,
         ("file", "line", "column", "tag"),
         compare_facts.JSX_FIELDS,

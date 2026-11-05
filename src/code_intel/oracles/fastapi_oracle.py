@@ -60,13 +60,14 @@ import typing
 from collections import defaultdict
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, NamedTuple
 
 ORACLES_DIR = Path(__file__).resolve().parent
 CASE_MODULES = (("fastapi_cases", "CASES"), ("fastapi_dependency_cases", "DEPENDENCY_CASES"))
 _DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s")
 _SOURCE_ERRORS = (OSError, TypeError)
 _SIGNATURE_ERRORS = (NameError, TypeError, ValueError, SyntaxError)
-_CLASSES = (
+CLASSES = (
     "route_missing",
     "route_extra",
     "order_mismatch",
@@ -418,11 +419,11 @@ def load_app(spec: str):
     module_name, _, attribute = spec.partition(":")
     if not module_name or not attribute:
         raise ValueError(f"--app {spec!r}: expected module:attribute")
-    module = importlib.import_module(module_name)
-    app = module
-    for part in attribute.split("."):
+    factory = attribute.endswith("()")
+    app: Any = importlib.import_module(module_name)
+    for part in attribute.removesuffix("()").split("."):
         app = getattr(app, part)
-    return app
+    return app() if factory else app
 
 
 # ── Environment ──────────────────────────────────────────────────────────
@@ -477,7 +478,7 @@ def run_cases(root: Path, repo_root: Path | None) -> dict:
 # ── Compare ──────────────────────────────────────────────────────────────
 
 
-def _keyed(rows: list[dict]) -> dict[tuple[str, str, int], dict]:
+def keyed(rows: list[dict]) -> dict[tuple[str, str, int], dict]:
     """Rows keyed by (method, path, occurrence), so a route registered twice compares pairwise."""
     seen: dict[tuple[str, str], int] = defaultdict(int)
     out = {}
@@ -492,67 +493,98 @@ def _label(key: tuple[str, str, int]) -> str:
     return f"{key[0]} {key[1]}" + (f" #{key[2] + 1}" if key[2] else "")
 
 
-def compare(runtime: dict, di: Mapping) -> dict[str, list[str]]:
-    diffs: dict[str, list[str]] = {name: [] for name in _CLASSES}
-    expected = _keyed(runtime["routes"])
-    actual = _keyed(sorted(di["routes"], key=lambda r: r.get("order", 0)))
+class Difference(NamedTuple):
+    """One difference between the runtime and the analyzer.
+
+    ``key`` is the ``keyed`` key of the route it concerns, ``None`` for a
+    difference in the app as a whole (dispatch order, ``redirect_slashes``).
+    ``text`` is the line ``compare`` prints.
+    """
+
+    cls: str
+    key: tuple[str, str, int] | None
+    text: str
+
+
+def differences(runtime: dict, di: Mapping) -> list[Difference]:
+    out: list[Difference] = []
+    expected = keyed(runtime["routes"])
+    actual = keyed(sorted(di["routes"], key=lambda r: r.get("order", 0)))
     common = [key for key in expected if key in actual]
     analyzer_order = [key for key in actual if key in expected]
     if common != analyzer_order:
         first = next(k for k, (a, b) in enumerate(zip(common, analyzer_order, strict=False)) if a != b)
-        diffs["order_mismatch"].append(
-            f"route {first + 1} of the routes both have: runtime {_label(common[first])}, "
-            f"analyzer {_label(analyzer_order[first])}"
+        out.append(
+            Difference(
+                "order_mismatch",
+                None,
+                f"route {first + 1} of the routes both have: runtime {_label(common[first])}, "
+                f"analyzer {_label(analyzer_order[first])}",
+            )
         )
     if "redirect_slashes" in runtime:
         have = (di.get("app") or {}).get("redirect_slashes")
         if have != runtime["redirect_slashes"]:
-            diffs["redirect_slashes_mismatch"].append(f"runtime {runtime['redirect_slashes']}, analyzer {have}")
+            out.append(
+                Difference("redirect_slashes_mismatch", None, f"runtime {runtime['redirect_slashes']}, analyzer {have}")
+            )
     for key, row in expected.items():
         got = actual.get(key)
         if got is None:
-            diffs["route_missing"].append(_label(key))
+            out.append(Difference("route_missing", key, _label(key)))
         else:
-            _compare_route(_label(key), row, got, diffs)
-    for key in actual:
-        if key not in expected:
-            diffs["route_extra"].append(_label(key))
+            out.extend(_compare_route(key, row, got))
+    out.extend(Difference("route_extra", key, _label(key)) for key in actual if key not in expected)
+    return out
+
+
+def compare(runtime: dict, di: Mapping) -> dict[str, list[str]]:
+    diffs: dict[str, list[str]] = {name: [] for name in CLASSES}
+    for difference in differences(runtime, di):
+        diffs[difference.cls].append(difference.text)
     return diffs
 
 
-def _compare_route(label: str, row: dict, got: dict, diffs: dict[str, list[str]]) -> None:
+def _compare_route(key: tuple[str, str, int], row: dict, got: dict) -> list[Difference]:
     """One route both sides have: its handler, location and dependencies."""
+    label = _label(key)
+    out: list[Difference] = []
+
+    def differ(cls: str, text: str) -> None:
+        out.append(Difference(cls, key, f"{label}: {text}"))
+
     if got.get("handler_id") != row["handler_id"]:
-        diffs["handler_mismatch"].append(f"{label}: runtime {row['handler_id']}, analyzer {got.get('handler_id')}")
+        differ("handler_mismatch", f"runtime {row['handler_id']}, analyzer {got.get('handler_id')}")
     want_where = (row.get("kind"), row.get("file"), row.get("line"))
     have_where = (got.get("kind"), got.get("file"), got.get("line"))
     if want_where != have_where:
-        diffs["location_mismatch"].append(f"{label}: runtime {want_where}, analyzer {have_where}")
+        differ("location_mismatch", f"runtime {want_where}, analyzer {have_where}")
     deps = got.get("deps") or []
     want_route = [d["id"] for d in row["route_deps"]]
     have_route = [d["id"] for d in deps if d.get("via") != "direct"]
     if want_route != have_route:
-        diffs["route_deps_mismatch"].append(f"{label}: runtime {want_route}, analyzer {have_route}")
+        differ("route_deps_mismatch", f"runtime {want_route}, analyzer {have_route}")
     else:
         # The runtime cannot tell a stacked decorator's dependencies apart ("unknown").
         want_via = [d["via"] for d in row["route_deps"]]
         have_via = [d.get("via") for d in deps if d.get("via") != "direct"]
         if any(w != h for w, h in zip(want_via, have_via, strict=False) if w != "unknown"):
-            diffs["via_mismatch"].append(f"{label}: runtime {want_via}, analyzer {have_via}")
+            differ("via_mismatch", f"runtime {want_via}, analyzer {have_via}")
     want_params = sorted((d["param"], d["id"]) for d in row["param_deps"])
     have_params = sorted((d.get("param"), d["id"]) for d in deps if d.get("via") == "direct")
     if want_params != have_params:
-        diffs["param_deps_mismatch"].append(f"{label}: runtime {want_params}, analyzer {have_params}")
+        differ("param_deps_mismatch", f"runtime {want_params}, analyzer {have_params}")
     have_closure = set(got.get("all_deps") or ())
     if set(row["closure"]) != have_closure:
         missing = sorted(set(row["closure"]) - have_closure)
         extra = sorted(have_closure - set(row["closure"]))
-        diffs["closure_mismatch"].append(f"{label}: missing {missing}, extra {extra}")
+        differ("closure_mismatch", f"missing {missing}, extra {extra}")
+    return out
 
 
 def _print_compare(diffs: dict[str, list[str]], show: int = 20) -> int:
     total = 0
-    for name in _CLASSES:
+    for name in CLASSES:
         rows = diffs[name]
         total += len(rows)
         print(f"{name}: {len(rows)}")

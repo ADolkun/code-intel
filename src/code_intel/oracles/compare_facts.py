@@ -37,7 +37,7 @@ Key = tuple
 Row = Mapping[str, object]
 
 
-def _jsx_row(row: Row) -> dict:
+def jsx_row(row: Row) -> dict:
     """Oracle rows use ``name``/``col``; tool rows use ``tag``/``column``."""
     return {
         "file": row["file"],
@@ -50,7 +50,7 @@ def _jsx_row(row: Row) -> dict:
     }
 
 
-def _decl_row(row: Row) -> dict:
+def decl_row(row: Row) -> dict:
     return {key: row[key] for key in ("file", "name", "line", "column", *DECL_FIELDS)}
 
 
@@ -139,14 +139,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     oracle_doc = _load(args.oracle)
     tool_doc = _load(args.tool)
     if args.what == "jsx":
-        oracle_rows = [_jsx_row(r) for r in _rows(oracle_doc, "elements", args.oracle)]
-        tool_rows = [_jsx_row(r) for r in _rows(tool_doc, "elements", args.tool)]
+        oracle_rows = [jsx_row(r) for r in _rows(oracle_doc, "elements", args.oracle)]
+        tool_rows = [jsx_row(r) for r in _rows(tool_doc, "elements", args.tool)]
         print(f"oracle {_jsx_summary(oracle_rows)}")
         print(f"tool   {_jsx_summary(tool_rows)}")
         result = compare(oracle_rows, tool_rows, ("file", "line", "column", "tag"), JSX_FIELDS)
     else:
-        oracle_rows = [_decl_row(r) for r in _rows(oracle_doc, "decls", args.oracle)]
-        tool_rows = [_decl_row(r) for r in _rows(tool_doc, "decls", args.tool)]
+        oracle_rows = [decl_row(r) for r in _rows(oracle_doc, "decls", args.oracle)]
+        tool_rows = [decl_row(r) for r in _rows(tool_doc, "decls", args.tool)]
         kinds = Counter(str(r["kind"]) for r in oracle_rows)
         print("oracle kinds: " + ", ".join(f"{k} {n}" for k, n in sorted(kinds.items())))
         result = compare(oracle_rows, tool_rows, ("file", "line", "column", "name"), DECL_FIELDS)
