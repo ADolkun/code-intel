@@ -49,11 +49,17 @@ class IncludeGap:
 
 
 @dataclass(frozen=True)
+class BindingGap:
+    id: str  # module:name
+    bound_to: str
+
+
+@dataclass(frozen=True)
 class Gaps:
     """What the static analysis could not see and the running app can show."""
 
     includes: tuple[IncludeGap, ...]
-    bindings: tuple[str, ...]  # module:name of an external dependency binding
+    bindings: tuple[BindingGap, ...]  # external dependency bindings
     externals: tuple[str, ...]  # dotted names of installed callables the package uses as dependencies
 
 
@@ -97,21 +103,22 @@ def static_gaps(repo_root: Path, backend: BackendConfig, library: LibraryView | 
             if (rel, site.line) in gap_lines
         )
 
-    bindings: set[str] = set()
+    bindings: set[BindingGap] = set()
     externals: set[str] = set()
     for entry in di["dependency_functions"].values():
         if entry["kind"] == "external":
-            bindings.add(entry["id"])
+            bindings.add(BindingGap(entry["id"], entry.get("bound_to", "")))
         elif "external" in entry:
             externals.add(entry["external"])
-    return Gaps(tuple(includes), tuple(sorted(bindings)), tuple(sorted(externals)))
+    return Gaps(tuple(includes), tuple(sorted(bindings, key=lambda gap: gap.id)), tuple(sorted(externals)))
 
 
 def _request(backend: BackendConfig, gaps: Gaps) -> dict[str, Any]:
     return {
         "package": backend.package,
         "includes": [{"file": gap.file, "start": gap.site.line, "end": gap.site.end_line} for gap in gaps.includes],
-        "dependencies": [{"binding": name} for name in gaps.bindings] + [{"external": name} for name in gaps.externals],
+        "dependencies": [{"binding": gap.id} for gap in gaps.bindings]
+        + [{"external": name} for name in gaps.externals],
     }
 
 
@@ -140,13 +147,14 @@ class _Recorded:
                     "routes": record["routes"],
                 }
             )
-        requested = [("binding", name) for name in gaps.bindings] + [("external", name) for name in gaps.externals]
-        for (key, name), record in zip(requested, result["dependencies"], strict=True):
+        requested: list[dict[str, str]] = [{"binding": gap.id, "bound_to": gap.bound_to} for gap in gaps.bindings]
+        requested += [{"external": name} for name in gaps.externals]
+        for item, record in zip(requested, result["dependencies"], strict=True):
             if "reason" in record:
-                self.notes.append(f"dependency {name}: {record['reason']}")
+                self.notes.append(f"dependency {item.get('binding') or item['external']}: {record['reason']}")
                 continue
             self.callables.update(record["callables"])
-            self.dependencies.append({key: name, "id": record["id"], "sub": record["sub"]})
+            self.dependencies.append({**item, "id": record["id"], "sub": record["sub"]})
         self.versions.update(result["versions"])
 
     def capture(self, backend: BackendConfig) -> LibraryCapture:
@@ -212,12 +220,12 @@ def make_capture(
         for _ in range(MAX_PASSES):
             result = runner.run_oracle(python, arguments, dict(capture_config.env), request=_request(backend, gaps))
             recorded.add(gaps, result)
-            asked |= {("binding", name) for name in gaps.bindings} | {("external", name) for name in gaps.externals}
+            asked |= {("binding", gap.id) for gap in gaps.bindings} | {("external", name) for name in gaps.externals}
             view = LibraryView(capture_config.file, recorded.capture(backend), ())
             later = static_gaps(repo_root, backend, view)
             gaps = Gaps(
                 (),
-                tuple(name for name in later.bindings if ("binding", name) not in asked),
+                tuple(gap for gap in later.bindings if ("binding", gap.id) not in asked),
                 tuple(name for name in later.externals if ("external", name) not in asked),
             )
             if not gaps.bindings and not gaps.externals:

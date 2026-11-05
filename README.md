@@ -543,7 +543,7 @@ Rows use `file` and `line` (frontend rows add `def_line`); route matches nest `b
 | `mount_shadows_route` | a route registered after a mount that the mount's path overlaps is not reached for those requests (Starlette dispatches to the mount first); matching still pairs calls with it |
 | `unresolved_route_methods` | a `methods=` value the analysis cannot evaluate; the route is reported as `ANY`. `methods=None` is FastAPI's default `GET` and is not reported |
 | `unresolved_redirect_slashes` | an app's `redirect_slashes=` could not be evaluated; it is reported as `True` |
-| `library_capture_stale` | the library capture does not match the code: a captured distribution's version differs from the lock (the capture is still applied), or an entry matches nothing the analysis finds, names a callable the package lacks, or is for another app (not applied); the message names it and says to run `code-intel capture` |
+| `library_capture_stale` | the library capture does not match the code: a captured distribution's version differs from the lock (the capture is still applied), or an entry matches nothing the analysis finds, names a callable the package lacks, is a binding captured for another expression, or is for another app (not applied); the message names it and says to run `code-intel capture` |
 | `opaque_decorator` | a package decorator returns a wrapper that does not copy the function's metadata (`functools.wraps` or `functools.update_wrapper`), so FastAPI reads the wrapper's signature, not the function's |
 | `shared_dependency_id` | callables FastAPI reads with different parameters share one dependency id (a `functools.partial` and its function, a factory and the closure it returns, two definitions of one name). The id's `dependency_functions` entry lists one form's sub-dependencies; the message names the id and both lists |
 | `unresolved_http_method` | a frontend call's HTTP method could not be evaluated; it is reported as `UNKNOWN` |
@@ -609,12 +609,12 @@ Static analysis reads the repository, never installed code. Two things in instal
 
 `capture` refuses (exit 2, nothing written) when an installed version of `fastapi` or of any captured distribution differs from the lock, naming both versions and `uv sync --locked`, because the file would describe code the lock does not install.
 
-**When code runs.** Repository code runs in exactly three commands: `capture`, the `library-capture` check of `verify`, and `runtime-check`. Each starts the configured interpreter on the packaged oracle in a subprocess, from an empty temporary directory, with a 300 s timeout and a clean environment: `PATH`, `HOME`, `TMPDIR`, `LANG` and `LC_ALL` when set, plus `[backend.capture] env`. `status`, `summary`, `dump`, `doc-check`, `config-check` and every MCP tool never start it.
+**When code runs.** Repository code runs in exactly three commands: `capture`, the `library-capture` check of `verify`, and `runtime-check`. Each starts the configured interpreter on the packaged oracle in a subprocess, from an empty temporary directory, with a 300 s timeout (on expiry the subprocess's whole process group is killed) and a clean environment: `PATH`, `HOME`, `TMPDIR`, `LANG` and `LC_ALL` when set, plus `[backend.capture] env`. `status`, `summary`, `dump`, `doc-check`, `config-check` and every MCP tool never start it.
 
 **What the file holds** (`format: 1`):
 
 - `includes`: for each `include_router` call whose child comes wholly from installed code, the child's routes (method, path relative to the child, handler id and definition, route-level dependencies and their `via`, parameter dependencies), keyed by the call's file, the text of its router argument (`ast.unparse`, so reformatting does not matter) and its occurrence among the calls of that file with the same text;
-- `dependencies`: the dependency tree of each external binding (`binding`: `module:name`) and of each installed callable named in the package (`external`: a dotted name). A node with `sub` is a callable of installed code and the capture owns its subtree; a node without it is a callable of the backend package, which the analysis reads from source on every call;
+- `dependencies`: the dependency tree of each external binding (`binding`: `module:name`, with `bound_to`, the text of the expression the name is bound to) and of each installed callable named in the package (`external`: a dotted name). A node with `sub` is a callable of installed code and the capture owns its subtree; a node without it is a callable of the backend package, which the analysis reads from source on every call;
 - `callables`: where each installed callable is defined (distribution, file inside it, line), and `distributions` the versions installed.
 
 Everything the repository owns is still read from source on every call: an include's prefix and dependencies, the app's dependencies, dispatch order and the sub-dependencies of the repository's own callables. A repository edit therefore rarely stales the capture.
@@ -625,7 +625,7 @@ Everything the repository owns is still read from source on every call: an inclu
 
 - each captured distribution's version against the lock: on a difference the capture is still applied and a `library_capture_stale` limitation names the distribution, both versions and `code-intel capture`;
 - an `includes` entry that matches no unresolved `include_router` call, an entry for another `app`, and an entry that names a callable of the package the analysis cannot find: not applied, and reported as `library_capture_stale`;
-- a `dependencies` entry that no dependency of the package matches: reported the same way;
+- a `dependencies` entry that no dependency of the package matches, or a `binding` entry whose `bound_to` differs from the expression the package binds the name to now (a rebound name): reported the same way;
 - a gap with no entry while `[backend.capture]` is configured keeps its own limitation, which adds `not in .code-intel/library-capture.json; run code-intel capture`.
 
 A malformed file is a `parse_failed` diagnostic on it. What static checks cannot see is a value passed to a library factory changing in another module; the `library-capture` check catches it.

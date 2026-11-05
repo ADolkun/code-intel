@@ -350,6 +350,29 @@ def test_a_dependency_entry_naming_a_callable_the_package_lacks_is_not_applied(c
     assert "runtime_id" not in di["dependency_functions"]["pkg.main:current"]
 
 
+def test_a_binding_rebound_to_another_expression_is_not_applied_and_is_reported_stale(captured: Path) -> None:
+    edit_main(captured, "current = users.current(active=True)", "current = users.current(active=False)")
+    di = di_of(captured)
+    [message] = [m for m in limitations(di, "library_capture_stale") if "dependency pkg.main:current" in m]
+    assert "is not applied" in message
+    assert "users.current(active=True)" in message and "users.current(active=False)" in message
+    entry = di["dependency_functions"]["pkg.main:current"]
+    assert entry["kind"] == "external" and "runtime_id" not in entry and entry["sub_deps"] == []
+    assert any("Depends(current)" in m and "not in" not in m for m in limitations(di, "unresolved_dependency"))
+
+
+def test_the_stale_findings_of_the_graph_and_of_the_dependencies_are_reported_once_each(captured: Path) -> None:
+    deps = captured / "backend" / "pkg" / "deps.py"
+    deps.write_text(deps.read_text(encoding="utf-8").replace("get_manager", "get_users_manager"), encoding="utf-8")
+    edit_main(captured, "get_manager", "get_users_manager")
+    model = model_of(captured)
+    assert [p.message for p in model.limitations if p.kind == "library_capture_stale"] == [
+        m for m in limitations(di_of(captured), "library_capture_stale") if "include users.get_router(dict)" in m
+    ]
+    messages = limitations(di_of(captured), "library_capture_stale")
+    assert len(messages) == len(set(messages)) == 2
+
+
 def test_a_dependency_entry_nothing_uses_is_reported(captured: Path) -> None:
     edit_main(
         captured,
@@ -374,6 +397,17 @@ def test_a_malformed_file_is_a_parse_failed_diagnostic_on_the_file(captured: Pat
     )
     assert "is 2; this code-intel reads format 1" in found["message"] and "run code-intel capture" in found["message"]
     assert di["complete"] is False
+
+
+def test_a_route_located_in_a_distribution_the_capture_does_not_list_is_a_parse_failed_diagnostic(
+    captured: Path,
+) -> None:
+    def change(data: dict[str, Any]) -> None:
+        data["includes"][0]["routes"][0]["location"]["dist"] = "extlib-userz"
+
+    edit_capture(captured, change)
+    [found] = di_of(captured)["diagnostics"]
+    assert found["kind"] == "parse_failed" and "no version for 'extlib-userz'" in found["message"]
 
 
 def test_a_file_that_is_not_json_is_a_parse_failed_diagnostic(captured: Path) -> None:

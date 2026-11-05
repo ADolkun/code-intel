@@ -205,6 +205,7 @@ def _model(*, diagnostics: tuple = (), limitations: tuple = ()) -> tuple[Backend
             "static",
         ),
     )
+    resolver = FakeResolver(sources)
     model = BackendModel(
         app_id="pkg.main:app",
         redirect_slashes=False,
@@ -216,7 +217,8 @@ def _model(*, diagnostics: tuple = (), limitations: tuple = ()) -> tuple[Backend
         limitations=limitations,
         files_scanned=len(FILES),
         sources=sources,
-        resolver=FakeResolver(sources),
+        resolver=resolver,
+        dependencies=DependencyResolver(resolver, sources),
     )
     return model, sources
 
@@ -404,6 +406,13 @@ def test_build_di_merges_model_and_resolver_problems() -> None:
             "message": "backend/pkg/dead.py:4: example",
         },
     ]
+
+
+def test_build_di_reads_through_the_resolver_the_model_carries() -> None:
+    model, _ = _model()
+    model.dependencies._limit("unresolved_dependency", "pkg.dead", 4, "example")
+    messages = [lim["message"] for lim in di_map.build_di(model)["analysis_limitations"]]
+    assert messages == ["backend/pkg/dead.py:4: example"]
 
 
 def test_text_report_shows_aliases_and_ids_for_colliding_names() -> None:

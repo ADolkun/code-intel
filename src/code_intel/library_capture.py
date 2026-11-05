@@ -8,8 +8,9 @@ app (``format: 1``); the analysis reads it without running anything.
   router argument and its ``occurrence`` among the calls of that file with the
   same text.
 - ``dependencies``: the dependency trees of module-level names bound to a call
-  result of installed code (``binding``, ``module:name``) and of installed
-  callables named in the package (``external``, a dotted name).
+  result of installed code (``binding``, ``module:name``, with ``bound_to``, the
+  text of the expression it is bound to) and of installed callables named in the
+  package (``external``, a dotted name).
 - ``callables``: where each installed dependency callable is defined.
 
 A dependency node with ``sub`` is a callable of installed code and the capture
@@ -73,6 +74,7 @@ class CapturedDependency(TypedDict):
     id: str  # the runtime id of the callable FastAPI reads
     sub: list[DepNode]
     binding: NotRequired[str]
+    bound_to: NotRequired[str]  # the expression the binding is bound to, as the analysis reads it
     external: NotRequired[str]
 
 
@@ -177,8 +179,8 @@ def _location(value: object, where: str) -> Location:
     }
 
 
-def _node(value: object, where: str) -> DepNode:
-    data = _object(value, where, ("id",), ("param", "via", "sub"))
+def _node(value: object, where: str, required: tuple[str, ...] = ()) -> DepNode:
+    data = _object(value, where, ("id", *required), ("param", "via", "sub"))
     node: DepNode = {"id": _text(data["id"], f"{where}.id")}
     if "param" in data:
         node["param"] = _text(data["param"], f"{where}.param")
@@ -195,8 +197,8 @@ def _node(value: object, where: str) -> DepNode:
     return node
 
 
-def _nodes(value: object, where: str) -> list[DepNode]:
-    return [_node(item, f"{where}[{k}]") for k, item in enumerate(_items(value, where))]
+def _nodes(value: object, where: str, required: tuple[str, ...] = ()) -> list[DepNode]:
+    return [_node(item, f"{where}[{k}]", required) for k, item in enumerate(_items(value, where))]
 
 
 def _route(value: object, where: str) -> CapturedRoute:
@@ -219,8 +221,8 @@ def _route(value: object, where: str) -> CapturedRoute:
         "kind": route_kind,
         "handler_id": _text(data["handler_id"], f"{where}.handler_id"),
         "location": _location(data["location"], f"{where}.location"),
-        "route_deps": _nodes(data["route_deps"], f"{where}.route_deps"),
-        "param_deps": _nodes(data["param_deps"], f"{where}.param_deps"),
+        "route_deps": _nodes(data["route_deps"], f"{where}.route_deps", ("via",)),
+        "param_deps": _nodes(data["param_deps"], f"{where}.param_deps", ("param",)),
     }
 
 
@@ -237,15 +239,18 @@ def _include(value: object, where: str) -> CapturedInclude:
 
 
 def _dependency(value: object, where: str) -> CapturedDependency:
-    data = _object(value, where, ("id", "sub"), ("binding", "external"))
+    data = _object(value, where, ("id", "sub"), ("binding", "bound_to", "external"))
     if ("binding" in data) == ("external" in data):
         raise _fail(where, "needs exactly one of 'binding' and 'external'")
+    if ("bound_to" in data) != ("binding" in data):
+        raise _fail(where, "missing 'bound_to'" if "binding" in data else "unknown key 'bound_to'")
     dependency: CapturedDependency = {
         "id": _text(data["id"], f"{where}.id"),
         "sub": _nodes(data["sub"], f"{where}.sub"),
     }
     if "binding" in data:
         dependency["binding"] = _text(data["binding"], f"{where}.binding")
+        dependency["bound_to"] = _text(data["bound_to"], f"{where}.bound_to")
     if "external" in data:
         dependency["external"] = _text(data["external"], f"{where}.external")
     return dependency
@@ -265,7 +270,7 @@ def from_json(data: object) -> LibraryCapture:
     top = data if isinstance(data, dict) else {}
     if not isinstance(data, dict) or "format" not in top:
         raise _fail("the capture", "must be an object with 'format'")
-    if top["format"] != FORMAT:
+    if type(top["format"]) is not int or top["format"] != FORMAT:
         raise _fail("format", f"is {top['format']!r}; this code-intel reads format {FORMAT}")
     for key in ("app", "distributions", "includes", "dependencies", "callables"):
         if key not in top:
@@ -299,15 +304,17 @@ def from_json(data: object) -> LibraryCapture:
 
 def _check_consistent(capture: LibraryCapture) -> None:
     named: set[str] = set()
+    dists = {entry["dist"] for entry in capture["callables"].values()}
     for include in capture["includes"]:
         for route in include["routes"]:
             named |= _library_ids(route["route_deps"]) | _library_ids(route["param_deps"])
+            dists.add(route["location"]["dist"])
     for dependency in capture["dependencies"]:
         named |= {dependency["id"], *_library_ids(dependency["sub"])}
     missing = sorted(named - set(capture["callables"]))
     if missing:
         raise _fail("callables", f"has no location for {missing[0]!r}")
-    unknown = sorted({entry["dist"] for entry in capture["callables"].values()} - set(capture["distributions"]))
+    unknown = sorted(dists - set(capture["distributions"]))
     if unknown:
         raise _fail("distributions", f"has no version for {unknown[0]!r}")
 
