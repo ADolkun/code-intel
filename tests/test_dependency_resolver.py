@@ -1259,3 +1259,81 @@ def test_a_decorated_dependency_without_wraps_is_reported(analyze) -> None:
     (problem,) = a.problems()
     assert problem[:3] == ("opaque_decorator", "backend/pkg/a.py", 7)
     assert "needs_verify() returns wrapper without functools.wraps" in problem[3]
+
+
+# ── Callables of the package named by their runtime id (the library capture's leaves) ──
+
+THINGS = """
+from fastapi import Depends
+
+from pkg.deps import get_db
+
+
+class Plain:
+    def __init__(self, db=Depends(get_db)):
+        self.db = db
+
+
+class Guard:
+    def __call__(self, db=Depends(get_db)):
+        return db
+
+    def check(self, db=Depends(get_db)):
+        return db
+
+
+def make_dep(role):
+    def dependency(db=Depends(get_db)):
+        return role
+
+    return dependency
+
+
+def make_lambda():
+    return lambda db=Depends(get_db): db
+"""
+
+
+def test_a_callable_of_the_package_is_found_by_the_id_the_runtime_reports(analyze) -> None:
+    a = analyze({"pkg/things.py": THINGS})
+    found = {
+        leaf_id: a.resolver.leaf(leaf_id)
+        for leaf_id in (
+            "pkg.deps:get_user",
+            "pkg.things:Plain",
+            "pkg.things:Guard()",
+            "pkg.things:Guard().check",
+            "pkg.things:Guard.check",
+        )
+    }
+    assert {i: (t.kind if t else None) for i, t in found.items()} == {
+        "pkg.deps:get_user": "function",
+        "pkg.things:Plain": "class",
+        "pkg.things:Guard()": "instance",
+        "pkg.things:Guard().check": "method",
+        "pkg.things:Guard.check": "method",
+    }
+    assert ids(a.resolver.sub_deps(found["pkg.deps:get_user"])) == ["pkg.deps:get_db"]
+    assert ids(a.resolver.sub_deps(found["pkg.things:Guard()"])) == ["pkg.deps:get_db"]
+
+
+@pytest.mark.parametrize(
+    "leaf_id",
+    [
+        "pkg.deps:nope",
+        "pkg.nowhere:thing",
+        "pkg.deps",
+        ":x",
+        "pkg.things:Plain()",
+        "pkg.things:Plain.nope",
+        "pkg.things:make_dep",
+        "pkg.things:make_lambda",
+        "pkg.things:<lambda>@L1",
+    ],
+)
+def test_an_id_the_package_cannot_be_matched_to_is_not_found(analyze, leaf_id: str) -> None:
+    """A name the package lacks, an instance of a class without ``__call__``, and a
+    factory whose closure FastAPI identifies by the factory (so the closure's parameters
+    are unknown) all stay unresolved."""
+    a = analyze({"pkg/things.py": THINGS})
+    assert a.resolver.leaf(leaf_id) is None

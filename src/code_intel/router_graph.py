@@ -39,11 +39,12 @@ from pathlib import Path
 from typing import NamedTuple
 
 from code_intel import include_model as include_models
-from code_intel import py_escapes, router_bases
+from code_intel import library_capture, library_view, py_escapes, router_bases
 from code_intel.backend_model import (
     NO_INCLUDE_MODEL,
     BackendModel,
     CallSite,
+    CapturedEndpoint,
     Def,
     DepLayer,
     Event,
@@ -68,6 +69,8 @@ from code_intel.backend_model import (
     Value,
     unresolved_path_part,
 )
+from code_intel.dependency_resolver import DependencyResolver
+from code_intel.library_view import LibraryRoute, LibraryView
 from code_intel.problems import Problem, diagnostic, limitation, partition
 from code_intel.py_sources import PySources
 from code_intel.py_values import LocalFound, LocalLookup, ValueEvaluator, lambda_qualname, opaque_decorator
@@ -301,9 +304,25 @@ class _Node:
 
 
 @dataclass
+class _LibraryNode:
+    """A router that installed code builds, standing in for the child of an
+    ``include_router`` call the analysis cannot resolve: its routes are the
+    capture's. Mounted like any router by the include's own prefix, dependencies
+    and place in the execution order."""
+
+    key: tuple  # ("library", id(include call), frame key or None)
+    id: str
+    module: str
+    file: str
+    line: int
+    routes: tuple[LibraryRoute, ...]
+    included: bool = False
+
+
+@dataclass
 class _Edge:
     parent: _Node
-    child: _Node
+    child: _Node | _LibraryNode
     event: IncludeCall
     frame: _Frame | None
     prefix: str | Unknown
@@ -500,6 +519,7 @@ class _Builder:
         prefilter: bool,
         prefilter_facts: Callable[[PyModule], router_bases.PrefilterFacts] = router_bases.prefilter_facts,
         include_model: IncludeModel = NO_INCLUDE_MODEL,
+        library: LibraryView | None = None,
     ) -> None:
         self._prefilter = prefilter_facts
         self.sources = sources
@@ -528,6 +548,11 @@ class _Builder:
         self._escapes: dict[tuple[str, str], str | None] = {}
         self._name_uses: _NameUses | None = None
         self.include_model: IncludeModel = include_model
+        self.library = library
+        self._library_nodes: dict[tuple, _LibraryNode] = {}
+        # Keys of the capture's include entries that matched a call, applied or not.
+        self._library_matched: set[tuple[str, str, int]] = set()
+        self._package_callables = DependencyResolver(self.ev, sources)
         # Calls past the depth limit or the budget: group -> [count, first call, first callee].
         self._skipped_calls: dict[tuple, list] = {}
         self._frame_keys: dict[tuple, tuple] = {}
@@ -1971,18 +1996,23 @@ class _Builder:
         mod = self.sources.module(module)
         file = mod.rel if mod else module
         line = event.call.lineno
-        children, rest = self.nodes_of(self._child_refs(module, event, frame))
+        found, rest = self.nodes_of(self._child_refs(module, event, frame))
+        children: list[_Node | _LibraryNode] = [*found]
         child_text = self._child_text(module, event)
-        if not children or len(children) + len(rest) > 1:
+        library = self._library_child(module, event, frame) if not children else None
+        if library is not None:
+            children = [library]
+        elif not children or len(children) + len(rest) > 1:
             at = self._at(module, event.call, event.context)
             reasons = self.why(module, router_bases.call_argument(event.call, 0, "router"), at, rest)
             ambiguous = " (it may be one of several routers)" if children else ""
+            absent = self._not_captured(module, event) if not children else ""
             self._limit(
                 "unresolved_include",
                 file,
                 line,
                 f"{parent.id}.include_router({child_text}): the included router could not be resolved "
-                f"({reasons}){ambiguous}, so its routes are missing here",
+                f"({reasons}){ambiguous}, so its routes are missing here{absent}",
             )
             if not children or rest:
                 return []
@@ -2026,6 +2056,84 @@ class _Builder:
             )
             for child in children
         ]
+
+    def _library_site(self, module: str, event: IncludeCall) -> tuple[str, library_capture.IncludeSite] | None:
+        mod = self.sources.module(module)
+        site = library_capture.include_site_of(mod.tree, event.call) if mod is not None else None
+        return (mod.rel, site) if mod is not None and site is not None else None
+
+    def _not_captured(self, module: str, event: IncludeCall) -> str:
+        """What an unresolved include's message adds when the capture is configured but has no entry for it."""
+        if self.library is None:
+            return ""
+        located = self._library_site(module, event)
+        if located is not None and self.library.include(located[0], located[1].router, located[1].occurrence):
+            return ""
+        return self.library.hint
+
+    def _library_child(self, module: str, event: IncludeCall, frame: _Frame | None) -> _LibraryNode | None:
+        """The library router the capture has for an include whose child does not resolve, or None."""
+        view = self.library
+        located = self._library_site(module, event)
+        if view is None or located is None:
+            return None
+        file, site = located
+        entry = view.include(file, site.router, site.occurrence)
+        if entry is None:
+            return None
+        key = ("library", id(event.call), frame.key if frame else None)
+        found = self._library_nodes.get(key)
+        if found is not None:
+            return found
+        self._library_matched.add(library_capture.include_key(entry))
+        missing = sorted(i for i in library_view.include_package_ids(entry) if self._package_callables.leaf(i) is None)
+        if missing:
+            self._report_stale(
+                view.not_applied(
+                    f"include {site.router} at {file}:{site.line}",
+                    f"it names {missing[0]}, which the analysis cannot find in the package",
+                )
+            )
+            return None
+        node = _LibraryNode(
+            key=key,
+            id=self._library_id(module, site.line),
+            module=module,
+            file=file,
+            line=site.line,
+            routes=tuple(view.route(route) for route in entry["routes"]),
+        )
+        self._library_nodes[key] = node
+        return node
+
+    def _library_id(self, module: str, line: int) -> str:
+        base = ident = f"library:{module}:L{line}"
+        n = 2
+        while ident in self._ids:
+            ident = f"{base}#{n}"
+            n += 1
+        self._ids.add(ident)
+        return ident
+
+    def _report_stale(self, problem: Problem) -> None:
+        key = ("library_capture_stale", problem.message)
+        if key not in self._reported:
+            self._reported.add(key)
+            self.problems.append(problem)
+
+    def report_unmatched_captures(self) -> None:
+        """A capture entry no unresolved ``include_router`` call matches."""
+        view = self.library
+        if view is None or view.capture is None:
+            return
+        for include in view.capture["includes"]:
+            if library_capture.include_key(include) not in self._library_matched:
+                self._report_stale(
+                    view.not_applied(
+                        f"include {include['router']} #{include['occurrence']} at {include['file']}",
+                        "no unresolved include_router call matches it",
+                    )
+                )
 
     def _child_text(self, module: str, event: IncludeCall) -> str:
         child = router_bases.call_argument(event.call, 0, "router")
@@ -2190,6 +2298,17 @@ class _Emitter:
                         continue
                     child.included = True
                     edge_label = f"{node.id} -> {child.id}"
+                    if isinstance(child, _LibraryNode):
+                        self._library_routes(
+                            child,
+                            edge,
+                            path_prefix + node_prefix + self._prefix_text(edge.prefix),
+                            layers + (own, DepLayer("router", edge_label, edge.dependencies)),
+                            chain + (child.id,),
+                            _worst(event_mount, edge.mount),
+                            out,
+                        )
+                        continue
                     self.emit(
                         child,
                         path_prefix + node_prefix + self._prefix_text(edge.prefix),
@@ -2211,6 +2330,42 @@ class _Emitter:
                 self._included_mount(
                     include, node, event, frame, executed, module, path_prefix, chain, event_mount, out, stack
                 )
+
+    def _library_routes(
+        self,
+        node: _LibraryNode,
+        edge: _Edge,
+        prefix: str,
+        layers: tuple[DepLayer, ...],
+        chain: tuple[str, ...],
+        mount: MountState,
+        out: list[LiveRoute],
+    ) -> None:
+        """The captured routes of a library router, mounted at ``edge``'s include. A route's
+        file and line are that include call: installed code has no place in the repository."""
+        for route in node.routes:
+            out.append(
+                LiveRoute(
+                    method=route.method,
+                    path=prefix + route.path,
+                    kind=route.kind,
+                    handler=route.handler,
+                    handler_id=route.handler_id,
+                    file=edge.file,
+                    line=edge.line,
+                    registered_file=edge.file,
+                    registered_line=edge.line,
+                    chain=chain,
+                    mount=mount,
+                    layers=(
+                        *layers,
+                        DepLayer("router", node.id, (), route.router_deps),
+                        DepLayer("route decorator", f"{node.id}:{route.handler}", (), route.decorator_deps),
+                    ),
+                    order=0,
+                    endpoint=CapturedEndpoint(route.handler_id, route.library, route.params),
+                )
+            )
 
     def _event_mount(
         self,
@@ -3044,16 +3199,21 @@ class BackendBuilder:
         clock: Callable[[], int] = time.time_ns,
         include_model: IncludeModel | None = None,
         lock: str | None = None,
+        library: str | LibraryView | None = None,
     ) -> None:
         """``include_model``: how ``include_router`` treats routes added later;
         by default the one for the FastAPI version ``<repo_root>/<lock>``
-        locks, read on every build."""
+        locks, read on every build. ``library``: the repo-relative library
+        capture file (``library_view``), read on every build, or a view to
+        apply instead; its entries fill the routers and dependencies installed
+        code builds."""
         self.sources = sources or PySources(import_root, package, repo_root, clock=clock)
         self.app = app
         self.prefilter = prefilter
         self.repo_root = Path(repo_root)
         self.include_model = include_model
         self.lock = lock
+        self.library = library
         self._cache: dict[str, tuple[PyModule, ModuleAnalysis]] = {}
         self._prefilter_cache: dict[str, tuple[PyModule, router_bases.PrefilterFacts]] = {}
 
@@ -3078,8 +3238,19 @@ class BackendBuilder:
         sources = self.sources.load(visible)
         self._cache = {name: entry for name, entry in self._cache.items() if sources.modules.get(name) is entry[0]}
         model = self.include_model or include_models.read(self.repo_root, self.lock)
+        view = (
+            library_view.read(self.repo_root, self.library, app=self.app, lock=self.lock)
+            if isinstance(self.library, str)
+            else self.library
+        )
         return _build(
-            sources, self.app, self._analyze, self._prefilter_facts, prefilter=self.prefilter, include_model=model
+            sources,
+            self.app,
+            self._analyze,
+            self._prefilter_facts,
+            prefilter=self.prefilter,
+            include_model=model,
+            library=view,
         )
 
 
@@ -3093,12 +3264,14 @@ def build_backend_model(
     prefilter: bool = True,
     include_model: IncludeModel | None = None,
     lock: str | None = None,
+    library: str | LibraryView | None = None,
     visible: AbstractSet[str] | None = None,
 ) -> BackendModel:
     """The router graph and live routes of ``app`` (``"pkg.main:app"``) in
     ``<import_root>/<package>``; file paths are relative to ``repo_root``.
     ``include_model`` defaults to the one ``<repo_root>/<lock>`` gives;
-    ``visible`` limits the files read (``PySources.load``)."""
+    ``library`` is the library capture file to apply, or a ``LibraryView``; ``visible``
+    limits the files read (``PySources.load``)."""
     return BackendBuilder(
         import_root,
         package,
@@ -3108,6 +3281,7 @@ def build_backend_model(
         prefilter=prefilter,
         include_model=include_model,
         lock=lock,
+        library=library,
     ).build(visible)
 
 
@@ -3119,15 +3293,24 @@ def _build(
     *,
     prefilter: bool,
     include_model: IncludeModel,
+    library: LibraryView | None = None,
 ) -> BackendModel:
     builder = _Builder(
-        sources, app, {}, analyze, prefilter=prefilter, prefilter_facts=prefilter_facts, include_model=include_model
+        sources,
+        app,
+        {},
+        analyze,
+        prefilter=prefilter,
+        prefilter_facts=prefilter_facts,
+        include_model=include_model,
+        library=library,
     )
     builder.load_facts()
     app_module, _, app_name = app.partition(":")
     builder.import_order(app_module)
     root_results = builder.discover(app_module, app_name.split(".")[0])
     edges, escapes = builder.attach()
+    builder.report_unmatched_captures()
     roots, rest = builder.nodes_of(root_results)
     root = roots[0] if len(roots) == 1 and not rest else None
     emitter = _Emitter(builder, edges)
@@ -3137,9 +3320,18 @@ def _build(
     _check_escapes(builder, escapes)
     ordered = [_with_order(route, k) for k, route in enumerate(_without_repeated_deferred(routes))]
     unmounted_ordered = [_with_order(route, k) for k, route in enumerate(_without_repeated_deferred(unmounted))]
-    router_nodes = tuple(_router_node(n) for n in sorted(builder.nodes.values(), key=lambda n: (n.file, n.line, n.id)))
+    router_nodes = tuple(
+        sorted(
+            (
+                *(_router_node(n) for n in builder.nodes.values()),
+                *(_library_router_node(n) for n in builder._library_nodes.values()),
+            ),
+            key=lambda n: (n.file, n.line, n.id),
+        )
+    )
     edge_rows = tuple(_edge_row(e) for e in edges)
     problems = list(sources.problems)
+    problems.extend(library.problems if library is not None else ())
     for analysis in builder._analyses.values():
         problems.extend(analysis.facts.problems)
     problems.extend(builder.problems)
@@ -3158,6 +3350,7 @@ def _build(
         sources=sources,
         resolver=builder.ev,
         include_model=include_model,
+        library=library,
     )
 
 
@@ -3233,7 +3426,10 @@ def _without_repeated_deferred(routes: list[LiveRoute]) -> list[LiveRoute]:
                 route.registered_file,
                 route.registered_line,
                 route.chain,
-                tuple((layer.via, layer.owner, _deps_key(layer.dependencies)) for layer in route.layers),
+                tuple(
+                    (layer.via, layer.owner, _deps_key(layer.dependencies), tuple(n.id for n in layer.captured))
+                    for layer in route.layers
+                ),
             )
             if key in seen:
                 continue
@@ -3263,6 +3459,20 @@ def _router_node(node: _Node) -> RouterNode:
         dependencies=node.dependencies,
         redirect_slashes=node.redirect_slashes,
         events=tuple(event for _, event, _, _ in node.events),
+    )
+
+
+def _library_router_node(node: _LibraryNode) -> RouterNode:
+    return RouterNode(
+        id=node.id,
+        module=node.module,
+        file=node.file,
+        line=node.line,
+        kind="APIRouter",
+        prefix="",
+        dependencies=(),
+        redirect_slashes=True,
+        events=(),
     )
 
 

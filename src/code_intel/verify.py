@@ -9,7 +9,11 @@ Checks:
 
 - the backend model, the routes scan and the docs report lose no content;
 - every live route's ``file:line`` holds its handler's ``def`` and its id
-  resolves there;
+  resolves there; for a route installed code defines it holds the
+  ``include_router`` call that mounts it;
+- the library capture file equals what ``code-intel capture`` records now (it
+  starts the app, like ``capture`` and ``runtime-check``; skipped without
+  ``[backend.capture]``);
 - the dependency map and the routes scan list the same routes;
 - the JSX elements and TypeScript declarations equal the AST oracles
   (``oracles/jsx_oracle.cjs``, ``oracles/decl_oracle.cjs``);
@@ -148,10 +152,15 @@ def handler_location_problems(
 ) -> list[str]:
     """A named handler's line holds its ``def`` and its id resolves there; a
     lambda endpoint has no ``def``, so its line is the one its id names and
-    holds the ``lambda``."""
+    holds the ``lambda``; a route installed code defines has no ``def`` in the
+    repository, so its line holds the ``include_router`` call that mounts it."""
     wrong: list[str] = []
     for route in routes:
         where = f"{route['method']} {route['path']}"
+        if route.get("library"):
+            if not _holds_include(route["file"], route["line"], read_line):
+                wrong.append(f"{where}: {route['file']}:{route['line']} is not an include_router call")
+            continue
         line = read_line(route["file"], route["line"])
         module, _, qualname = route["handler_id"].partition(":")
         lambda_id = _LAMBDA_QUALNAME.search(qualname)
@@ -170,6 +179,19 @@ def handler_location_problems(
     return wrong
 
 
+def _holds_include(file: str, line: int, read_line: Callable[[str, int], str]) -> bool:
+    """An ``include_router`` call starts on ``line``: it names the call, or it is the
+    receiver of a method chain whose next line does."""
+    text = read_line(file, line)
+    if re.search(r"\binclude_router\b", text):
+        return True
+    try:
+        following = read_line(file, line + 1)
+    except IndexError:
+        return False
+    return bool(re.fullmatch(r"\s*[\w.]+\s*", text) and re.match(r"\s*\.\s*include_router\b", following))
+
+
 def route_set_differences(
     di_routes: Iterable[Mapping[str, Any]], scan_routes: Iterable[Mapping[str, Any]]
 ) -> list[str]:
@@ -186,7 +208,7 @@ def stray_matched_backends(routes: Mapping[str, Any]) -> list[str]:
     def key(row: Mapping[str, Any]) -> tuple[Any, ...]:
         return (row["method"], row["path"], row["handler"], row["file"], row["line"])
 
-    live = {key(r) for r in routes["backend_routes"]}
+    live = {key(r) for r in (*routes["backend_routes"], *routes.get("library_routes", ()))}
     return [
         f"{m['backend']['method']} {m['backend']['path']} -> {m['backend']['file']}:{m['backend']['line']}"
         for m in routes["matches"]
@@ -446,6 +468,7 @@ def check_handler_locations(s: Subject) -> Verdict:
             "handler_id": r.handler_id,
             "file": r.file,
             "line": r.line,
+            "library": r.library,
         }
         for r in s.model.routes
     ]
@@ -458,9 +481,8 @@ def check_handler_locations(s: Subject) -> Verdict:
 
 
 def check_di_matches_routes(s: Subject) -> Verdict:
-    return Verdict(
-        f"{len(s.di['routes'])} routes in both", route_set_differences(s.di["routes"], s.routes["backend_routes"])
-    )
+    scan = [*s.routes["backend_routes"], *s.routes["library_routes"]]
+    return Verdict(f"{len(s.di['routes'])} routes in both", route_set_differences(s.di["routes"], scan))
 
 
 def check_routes_content(s: Subject) -> Verdict:
@@ -477,6 +499,30 @@ def check_call_sites(s: Subject) -> Verdict:
 
 def check_matched_backends_are_live(s: Subject) -> Verdict:
     return Verdict(f"{len(s.routes['matches'])} matches", stray_matched_backends(s.routes))
+
+
+def check_library_capture(s: Subject) -> Verdict:
+    from code_intel import capture, runner
+
+    backend = s.config.backend
+    configured = backend.capture
+    if configured is None:
+        raise CannotRun("the config has no [backend.capture] table")
+    try:
+        python = runner.interpreter(None, configured, s.repo_root)
+    except runner.OracleRunError as exc:
+        raise CannotRun(
+            f"{exc}. Fix: install the backend's dependencies so the interpreter exists, for example "
+            f"`uv sync --locked` in {backend.root}"
+        ) from exc
+    try:
+        made, _ = capture.make_capture(s.repo_root, backend, configured, python)
+        different = capture.compare(s.repo_root / configured.file, made)
+    except (capture.CaptureError, runner.OracleRunError) as exc:
+        raise CannotRun(str(exc)) from exc
+    routes = sum(len(include["routes"]) for include in made["includes"])
+    detail = f"{configured.file}: {len(made['includes'])} includes ({routes} routes), {len(made['dependencies'])} dependencies"
+    return Verdict(detail, different)
 
 
 def run_oracle(args: Sequence[str]) -> None:
@@ -675,6 +721,7 @@ class Check:
     name: str
     run: Callable[[Subject], Verdict]
     needs_docs: bool = False
+    needs_capture: bool = False
 
 
 CHECKS: tuple[Check, ...] = (
@@ -685,6 +732,7 @@ CHECKS: tuple[Check, ...] = (
     Check("di-matches-routes", check_di_matches_routes),
     Check("call-sites", check_call_sites),
     Check("matched-backends-are-live", check_matched_backends_are_live),
+    Check("library-capture", check_library_capture, needs_capture=True),
     Check("jsx-oracle", check_jsx_oracle),
     Check("declaration-oracle", check_declaration_oracle),
     Check("docs-content", check_docs_content, needs_docs=True),
@@ -700,6 +748,8 @@ def run_check(check: Check, subject: Subject) -> Outcome:
     try:
         if check.needs_docs and subject.config.docs is None:
             return Outcome(check.name, "skipped", "the config has no [docs] table")
+        if check.needs_capture and subject.config.backend.capture is None:
+            return Outcome(check.name, "skipped", "the config has no [backend.capture] table")
         verdict = check.run(subject)
     except CannotRun as exc:
         return Outcome(check.name, "error", str(exc))

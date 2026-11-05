@@ -23,6 +23,11 @@ Parameter semantics follow ``fastapi.dependencies.utils.analyze_param`` (0.135.2
 - ``functools.partial(f, ...)`` is identified as ``f``, with the parameters it
   binds removed or given the bound default.
 
+A dependency the analysis cannot read (a module-level name bound to a call of
+installed code, an installed callable named in the package) is filled from the
+library capture when it has an entry: the target gets the captured sub-dependencies,
+where a callable of the backend package is resolved by its id from source.
+
 Deliberately not modelled: security scopes, ``use_cache``, ``scope`` and
 ``app.dependency_overrides`` (a runtime test hook). A class whose constructor
 comes from a base outside the analyzed package contributes no sub-dependencies.
@@ -41,6 +46,8 @@ from typing import Protocol
 from code_intel import problems
 from code_intel.ast_nodes import FunctionNode
 from code_intel.backend_model import (
+    CapturedEndpoint,
+    CapturedNode,
     Def,
     DepKind,
     DepMarker,
@@ -57,6 +64,8 @@ from code_intel.backend_model import (
     Unknown,
     Value,
 )
+from code_intel.library_capture import DepNode
+from code_intel.library_view import LibraryView, package_ids
 from code_intel.problems import Problem
 from code_intel.py_values import opaque_decorator
 
@@ -253,10 +262,22 @@ class DependencyResolver:
     collected in ``problems`` (limitations only, de-duplicated).
     """
 
-    def __init__(self, resolver: NameResolver, sources: ModuleSource, *, stage: str = STAGE) -> None:
+    def __init__(
+        self,
+        resolver: NameResolver,
+        sources: ModuleSource,
+        *,
+        stage: str = STAGE,
+        library: LibraryView | None = None,
+    ) -> None:
         self._resolver = resolver
         self._sources = sources
         self._stage = stage
+        self._library = library
+        self._captured: dict[tuple, tuple[CapturedNode, ...]] = {}
+        self._filled: dict[str, DepTarget | None] = {}
+        self._matched: set[tuple[str, str]] = set()
+        self._leaves: dict[str, DepTarget | None] = {}
         self._index: dict[str, _ModuleIndex | None] = {}
         self._sub_deps: dict[tuple, list[DepUse]] = {}
         self._callables: dict[tuple, _Callable] = {}
@@ -281,7 +302,11 @@ class DependencyResolver:
                 use = self.marker_use(loc, layer.via)
                 if use is not None:
                     uses.append(use)
-        uses.extend(self.endpoint_deps(route.endpoint))
+            uses.extend(self._captured_use(n, layer.via, None, route.file, route.line) for n in layer.captured)
+        if isinstance(route.endpoint, CapturedEndpoint):
+            uses.extend(self._captured_use(n, "direct", n.param, route.file, route.line) for n in route.endpoint.params)
+        else:
+            uses.extend(self.endpoint_deps(route.endpoint))
         return uses
 
     def layer_uses(self, dependencies: Sequence[Located], via: DepVia) -> list[DepUse]:
@@ -324,6 +349,8 @@ class DependencyResolver:
         if callable_ is not None:
             for params in callable_.params:
                 uses.extend(self._param_uses(params))
+        for node in self._captured.get(key, ()):
+            uses.append(self._captured_use(node, "direct", node.param, "", 0))
         self._sub_deps[key] = uses
         return uses
 
@@ -451,6 +478,7 @@ class DependencyResolver:
         marker_kind: DepMarker = "Security" if marker.kind == "Security" else "Depends"
         line = getattr(call, "lineno", 0)
         file = self._file(module)
+        read: tuple[str, ast.expr | None, ast.AST] = (module, target_expr, marker.ctx)
         if target_expr is not None:
             resolved = self._classify(module, target_expr, marker.ctx, alias=None, depth=0)
             text = _text(target_expr)
@@ -458,25 +486,19 @@ class DependencyResolver:
             type_module, expr, ctx = type_expr
             resolved = self._classify(type_module, expr, ctx or expr, alias=None, depth=0)
             text = _text(expr)
+            read = (type_module, expr, ctx or expr)
         else:
             resolved = "FastAPI needs a callable, and there is no target or type annotation"
             text = _text(call)
         if isinstance(resolved, str):
-            self._limit(
-                "unresolved_dependency",
-                module,
-                line,
-                f"{marker_kind}({text}): could not resolve the dependency to a callable ({resolved})",
-            )
-            target = self._external_binding(module, target_expr, marker.ctx) or DepTarget(
-                id=f"unresolved:{module}:{text}",
-                module=module,
-                qualname=text,
-                name=text,
-                kind="unresolved",
-                file=file,
-                line=line,
-            )
+            target, absent = self._opaque_target(module, read, text, file, line)
+            if absent is not None:
+                self._limit(
+                    "unresolved_dependency",
+                    module,
+                    line,
+                    f"{marker_kind}({text}): could not resolve the dependency to a callable ({resolved}){absent}",
+                )
             return DepUse(
                 target=target,
                 display=text,
@@ -498,6 +520,52 @@ class DependencyResolver:
             file=file or "",
             line=line,
         )
+
+    def _opaque_target(
+        self,
+        module: str,
+        read: tuple[str, ast.expr | None, ast.AST],
+        text: str,
+        file: str | None,
+        line: int,
+    ) -> tuple[DepTarget, str | None]:
+        """The target of a dependency the analysis cannot read, and the end of the
+        limitation that reports it (None when the library capture fills it). ``read``
+        is the expression that names the callable, with the module and scope it is
+        written in."""
+        view = self._library
+        expr_module, expr, ctx = read
+        binding = self._external_binding(expr_module, expr, ctx)
+        if binding is not None:
+            filled = self._filled_binding(binding)
+            if filled is not None:
+                return filled, None
+            return binding, view.hint if view is not None and view.binding(binding.id) is None else ""
+        dotted = self._external_name(expr_module, expr, ctx)
+        filled = self._filled_external(dotted) if dotted else None
+        if filled is not None:
+            return filled, None
+        target = DepTarget(
+            id=f"unresolved:{module}:{text}",
+            module=module,
+            qualname=text,
+            name=text,
+            kind="unresolved",
+            file=file,
+            line=line,
+            external=dotted or "",
+        )
+        absent = view.hint if view is not None and dotted and view.external(dotted) is None else ""
+        return target, absent
+
+    def _external_name(self, module: str, expr: ast.expr | None, ctx: ast.AST) -> str | None:
+        """The dotted name ``expr`` has when it is one name outside the package."""
+        if not isinstance(expr, (ast.Name, ast.Attribute)):
+            return None
+        targets = _distinct(self._targets(module, expr, ctx, depth=0))
+        if len(targets) == 1 and isinstance(targets[0], External):
+            return targets[0].dotted
+        return None
 
     def _external_binding(self, module: str, expr: ast.expr | None, ctx: ast.AST, depth: int = 0) -> DepTarget | None:
         """The target for a name that resolves, through imports and aliases, to a
@@ -533,6 +601,167 @@ class DependencyResolver:
             file=self._file(value.module),
             line=getattr(stmt, "lineno", None),
             bound_to=_text(node),
+        )
+
+    # ── The library capture ──────────────────────────────────────────────
+
+    def _filled_binding(self, binding: DepTarget) -> DepTarget | None:
+        """``binding`` with the sub-dependencies the capture records for it, or None
+        when there is no usable entry."""
+        if binding.id in self._filled:
+            return self._filled[binding.id]
+        view = self._library
+        entry = view.binding(binding.id) if view is not None else None
+        filled: DepTarget | None = None
+        if view is not None and entry is not None:
+            self._matched.add(("binding", binding.id))
+            subs = self._usable(f"dependency {binding.id}", entry["sub"])
+            if subs is not None:
+                filled = replace(binding, runtime_id=entry["id"], library=view.library(entry["id"]))
+                self._captured[_key(filled)] = subs
+        self._filled[binding.id] = filled
+        return filled
+
+    def _filled_external(self, dotted: str) -> DepTarget | None:
+        """The ``library`` target for an installed callable named in the package, from the capture."""
+        key = f"external {dotted}"
+        if key in self._filled:
+            return self._filled[key]
+        view = self._library
+        entry = view.external(dotted) if view is not None else None
+        filled: DepTarget | None = None
+        if view is not None and entry is not None:
+            self._matched.add(("external", dotted))
+            subs = self._usable(f"dependency {dotted}", entry["sub"])
+            if subs is not None:
+                filled = self._library_target(CapturedNode(entry["id"], None, view.library(entry["id"]), subs))
+        self._filled[key] = filled
+        return filled
+
+    def _usable(self, entry: str, nodes: list[DepNode]) -> tuple[CapturedNode, ...] | None:
+        """The captured nodes, or None (reporting why) when one names a callable of the package the analysis cannot find."""
+        view = self._library
+        assert view is not None
+        missing = self.missing_leaf(nodes)
+        if missing is not None:
+            self._stale(view.not_applied(entry, f"it names {missing}, which the analysis cannot find in the package"))
+            return None
+        return tuple(view.node(node) for node in nodes)
+
+    def missing_leaf(self, nodes: list[DepNode]) -> str | None:
+        """The first callable of the backend package in ``nodes`` that cannot be found from source."""
+        return next((i for i in sorted(package_ids(nodes)) if self.leaf(i) is None), None)
+
+    @property
+    def applied_entries(self) -> int:
+        """How many of the capture's dependency entries filled a dependency."""
+        return sum(1 for target in self._filled.values() if target is not None)
+
+    def _stale(self, problem: Problem) -> None:
+        if all(p.message != problem.message for p in self._problems):
+            self._problems.append(problem)
+
+    def stale_entries(self) -> None:
+        """Report the capture's dependency entries nothing in the package matched."""
+        view = self._library
+        if view is None or view.capture is None:
+            return
+        for entry in view.capture["dependencies"]:
+            kind, name = ("binding", entry["binding"]) if "binding" in entry else ("external", entry["external"])
+            if (kind, name) not in self._matched:
+                what = "no external dependency binding" if kind == "binding" else "no unresolved dependency"
+                self._stale(view.not_applied(f"{kind} {name}", f"{what} of that name is used"))
+
+    def _library_target(self, node: CapturedNode) -> DepTarget:
+        """The ``library`` target of an installed callable; its sub-dependencies are the capture's."""
+        module, _, qualname = node.id.partition(":")
+        target = DepTarget(
+            id=node.id,
+            module=module,
+            qualname=qualname,
+            name=qualname.rsplit(".", 1)[-1].removesuffix("()"),
+            kind="library",
+            file=None,
+            line=None,
+            library=node.library,
+        )
+        key = _key(target)
+        known = self._captured.get(key)
+        subs = node.sub or ()
+        if known is None:
+            self._captured[key] = subs
+        elif known != subs:
+            self._limit(
+                "shared_dependency_id",
+                module,
+                None,
+                f"dependency {node.id}: two installed callables FastAPI reads with different parameters share "
+                "this id; both are resolved with the sub-dependencies of the first one captured",
+            )
+        return target
+
+    def _captured_use(self, node: CapturedNode, via: DepVia, param: str | None, file: str, line: int) -> DepUse:
+        target = self._library_target(node) if node.sub is not None else self.leaf(node.id)
+        if target is None:
+            module, _, qualname = node.id.partition(":")
+            target = DepTarget(f"unresolved:{node.id}", module, qualname, qualname, "unresolved", None, None)
+        return DepUse(
+            target=target,
+            display=target.name,
+            via=via,
+            param=param,
+            alias=None,
+            marker="Depends",
+            file=file,
+            line=line,
+        )
+
+    def leaf(self, leaf_id: str) -> DepTarget | None:
+        """The target a callable of the backend package has as ``module:qualname`` (a
+        function, a class, ``C()`` an instance, ``C().m`` and ``C.m`` methods), read from
+        source; None when the package has no such callable, or when its id is shared with
+        a closure the analysis could not tell apart."""
+        if leaf_id not in self._leaves:
+            self._leaves[leaf_id] = self._find_leaf(leaf_id)
+        return self._leaves[leaf_id]
+
+    def _find_leaf(self, leaf_id: str) -> DepTarget | None:
+        module, _, qualname = leaf_id.partition(":")
+        if not module or not qualname or self._sources.module(module) is None:
+            return None
+        head, *members = qualname.split(".")
+        instance = head.endswith("()")
+        found = _distinct(self._resolver.resolve_name(module, head.removesuffix("()"), None))
+        if len(found) != 1 or not isinstance(found[0], Def):
+            return None
+        owner = found[0]
+        resolved: tuple[_Callable, str] | str
+        if members:
+            member = self._class_member(owner, members[0]) if len(members) == 1 else None
+            if member is None:
+                return None
+            resolved = self._callable_of(_Member(member.module, member.qualname, member.node, via_instance=instance))
+        elif instance and isinstance(owner.node, ast.ClassDef):
+            resolved = self._callable_of(_Instance(owner, Located(module, owner.node)))
+        elif not instance:
+            if self._makes_closure(owner.node):
+                return None
+            resolved = self._callable_of(owner)
+        else:
+            return None
+        if isinstance(resolved, str) or resolved[0].target.id != leaf_id:
+            return None
+        return resolved[0].target
+
+    def _makes_closure(self, node: ast.AST) -> bool:
+        """Whether a function returns a function or lambda it defines: FastAPI identifies that
+        closure by this function, but reads the closure's parameters."""
+        if not isinstance(node, _FUNCTION_NODES):
+            return False
+        nested = {n.name for n in ast.walk(node) if isinstance(n, _FUNCTION_NODES) and n is not node}
+        return any(
+            isinstance(value, ast.Lambda) or (isinstance(value, ast.Name) and value.id in nested)
+            for value in self._returned_values(node)
         )
 
     # ── Annotations and markers ──────────────────────────────────────────

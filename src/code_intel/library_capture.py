@@ -103,7 +103,7 @@ class IncludeSite:
     occurrence: int
 
 
-def include_sites(tree: ast.Module) -> list[IncludeSite]:
+def _include_calls(tree: ast.Module) -> list[tuple[ast.Call, IncludeSite]]:
     calls: list[tuple[int, int, ast.Call, ast.expr]] = []
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
@@ -114,12 +114,21 @@ def include_sites(tree: ast.Module) -> list[IncludeSite]:
         if router is not None:
             calls.append((node.lineno, node.col_offset, node, router))
     seen: dict[str, int] = {}
-    sites: list[IncludeSite] = []
+    found: list[tuple[ast.Call, IncludeSite]] = []
     for line, _, call, router in sorted(calls, key=lambda item: item[:2]):
         text = ast.unparse(router)
         seen[text] = seen.get(text, 0) + 1
-        sites.append(IncludeSite(line, call.end_lineno or line, text, seen[text]))
-    return sites
+        found.append((call, IncludeSite(line, call.end_lineno or line, text, seen[text])))
+    return found
+
+
+def include_sites(tree: ast.Module) -> list[IncludeSite]:
+    return [site for _, site in _include_calls(tree)]
+
+
+def include_site_of(tree: ast.Module, call: ast.Call) -> IncludeSite | None:
+    """The site of ``call``, one of the ``include_router`` calls of ``tree``."""
+    return next((site for node, site in _include_calls(tree) if node is call), None)
 
 
 # ── Reading ──────────────────────────────────────────────────────────────

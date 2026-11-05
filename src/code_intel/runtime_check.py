@@ -15,14 +15,20 @@ on with ``[backend.capture] env``, ``--set`` and ``--env-file``.
 Some differences are known blind spots of a static analysis. They are listed
 as explained, each with its reason, and do not fail the check:
 
-- a route the runtime serves from an installed library, when the analysis
-  reported a limitation that can hide routes (an ``unresolved_include``, an
-  ``opaque_router_call``, ...): the analysis could not see inside that call;
+- a route the runtime serves from an installed library (the oracle attributes
+  its handler to a distribution), when the analysis reported a limitation that
+  can hide routes (an ``unresolved_include``, an ``opaque_router_call``, a
+  ``library_capture_stale``, ...): the analysis could not see inside that call;
 - a dependency difference located at a dependency the analysis cannot see
   into (``external``: a module-level name bound to a call result such as
-  ``fastapi_users.current_user(...)``; ``unresolved``): the runtime
-  dependency standing in its place, and everything beneath it, is explained.
-  Every other dependency of the route must still agree.
+  ``fastapi_users.current_user(...)``; ``unresolved``) and the library capture
+  does not fill: the runtime dependency standing in its place, and everything
+  beneath it, is explained. Every other dependency of the route must still agree.
+
+The library capture (``code-intel capture``) removes most of these: routes and
+dependencies it fills are compared like any other, an analyzer dependency the
+capture filled standing for the id FastAPI reports (``runtime_id``), and an
+installed handler's location compared as (distribution, file in it, line).
 
 Exit codes: 0 no unexplained difference, 1 an unexplained difference, 2 the
 check could not run (no usable ``--python``, the app did not import, the
@@ -36,7 +42,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from code_intel import problems, runner
@@ -50,7 +56,6 @@ SHOWN = 20
 SHOWN_EXPLAINED = 5
 CLIP = 200
 OPAQUE_KINDS = frozenset({"external", "unresolved"})
-INSTALLED_DIRS = frozenset({".venv", "venv", "site-packages", "dist-packages"})
 DEPENDENCY_CLASSES = ("route_deps_mismatch", "param_deps_mismatch", "closure_mismatch")
 
 Node = Mapping[str, Any]
@@ -65,17 +70,18 @@ class Classified:
 # ── Classifying differences ──────────────────────────────────────────────
 
 
-def is_installed(file: str | None) -> bool:
-    """A handler defined in installed code: outside the repository, or under a virtual environment."""
-    if not file:
-        return True
-    path = PurePosixPath(file)
-    return path.is_absolute() or any(part in INSTALLED_DIRS for part in path.parts)
-
-
 def opaque_ids(di: Mapping[str, Any]) -> frozenset[str]:
-    """The dependency ids the analysis cannot see into."""
-    return frozenset(dep_id for dep_id, entry in di["dependency_functions"].items() if entry["kind"] in OPAQUE_KINDS)
+    """The dependency ids the analysis cannot see into: the library capture has no entry for them."""
+    return frozenset(
+        dep_id
+        for dep_id, entry in di["dependency_functions"].items()
+        if entry["kind"] in OPAQUE_KINDS and "runtime_id" not in entry
+    )
+
+
+def runtime_id(functions: Mapping[str, Any], dep_id: str) -> str:
+    """The id FastAPI reports for the analyzer's ``dep_id``."""
+    return functions.get(dep_id, {}).get("runtime_id", dep_id)
 
 
 def subtree(node: Node) -> set[str]:
@@ -104,14 +110,14 @@ def pair_tree(node: Node, have_id: str, functions: Mapping[str, Any], opaque: fr
     dependency ``have_id`` and its ``sub_deps``."""
     if have_id in opaque:
         return Pairing(frozenset(subtree(node)), True)
-    if node["id"] != have_id:
+    if node["id"] != runtime_id(functions, have_id):
         return Pairing(frozenset(), False)
     children = list(node.get("sub", ()))
     pending: list[str] = []
     covered: set[str] = set()
     agrees = True
     for sub_id in functions.get(have_id, {}).get("sub_deps", ()):
-        match = next((c for c in children if c["id"] == sub_id), None)
+        match = next((c for c in children if c["id"] == runtime_id(functions, sub_id)), None)
         if match is None:
             pending.append(sub_id)
             continue
@@ -186,7 +192,7 @@ def dependency_reason(cls: str, runtime_row: Node, analyzer_row: Node, di: Mappi
         ok = param_pair.agrees and bool(param_pair.covered)
     else:
         runtime_closure = set(runtime_row["closure"])
-        analyzer_closure = set(analyzer_row.get("all_deps") or ())
+        analyzer_closure = {runtime_id(functions, dep_id) for dep_id in analyzer_row.get("all_deps") or ()}
         ok = (
             route_pair.agrees
             and param_pair.agrees
@@ -203,7 +209,7 @@ def route_gaps(di: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
 def missing_route_reason(row: Node, di: Mapping[str, Any]) -> str | None:
     """Why a route the analysis lacks is explained, or None."""
-    if not is_installed(row.get("file")):
+    if row.get("library") is None:
         return None
     gaps = route_gaps(di)
     if not gaps:
@@ -282,7 +288,16 @@ def version_note(runtime: Mapping[str, Any], di: Mapping[str, Any]) -> str | Non
 def oracle_arguments(
     repo_root: Path, backend: BackendConfig, settings: Sequence[str], env_file: Path | None
 ) -> list[str]:
-    arguments = ["--import-root", str(repo_root / backend.root), "--repo-root", str(repo_root), "--app", backend.app]
+    arguments = [
+        "--import-root",
+        str(repo_root / backend.root),
+        "--repo-root",
+        str(repo_root),
+        "--package",
+        backend.package,
+        "--app",
+        backend.app,
+    ]
     for item in settings:
         arguments += ["--set", item]
     if env_file is not None:

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from code_intel import problems, queries
-from code_intel.result_types import ERROR_FIELDS, SCHEMA_VERSION, ErrorCode
+from code_intel.result_types import ERROR_FIELDS, SCHEMA_VERSION, ErrorCode, library_text, route_where
 
 STALE_CODE_WARNING = (
     "⚠ code-intel changed since this server started (its code, or the version pinned in "
@@ -240,6 +240,15 @@ def format_line_range(start: int, end: int | None) -> str:
     return str(start)
 
 
+def _target_where(info: Mapping[str, Any]) -> str:
+    """Where a dependency target is defined: its file and line, or the installed code that defines it."""
+    if info.get("file"):
+        return f"[{info['file']}:{info['line']}]"
+    if info.get("library"):
+        return f"[{library_text(info['library'])}]"
+    return "[unresolved]"
+
+
 def _with_alias(display: str, alias: str | None) -> str:
     return f"{display} [as {alias}]" if alias else display
 
@@ -261,8 +270,9 @@ def _dependency_listing(result: queries.DependencyListing) -> Body:
         ident = f"  {row['id']}" if row["label"] != row["name"] else ""
         aliases = f"  [as {', '.join(row['aliases'])}]" if row["aliases"] else ""
         sub = ", ".join(row["sub_dep_labels"]) or "(leaf)"
-        loc = f"[{row['file']}:{row['line']}]" if row.get("file") else "[unresolved]"
-        lines.append(f"  {row['name']}{kind}  {loc}{ident}{aliases}  -> {sub}")
+        loc = _target_where(row)
+        bound = f"  = {row['bound_to']}" if row.get("bound_to") else ""
+        lines.append(f"  {row['name']}{kind}  {loc}{ident}{aliases}  -> {sub}{bound}")
     if functions.omitted:
         lines.append(omitted_note(len(functions.items), functions.total, "targets", "  "))
     lines.append("")
@@ -302,7 +312,7 @@ def _di_routes(result: queries.DiRouteSelection) -> Body:
 
     lines = []
     for r in routes.items:
-        lines.append(f"{r['method']} {r['path']}  →  {r['handler']}()  [{r['file']}:{r['line']}]")
+        lines.append(f"{r['method']} {r['path']}  →  {r['handler']}()  [{route_where(r)}]")
         for via, label in _DEP_SECTIONS:
             shown = [_with_alias(d["display"], d.get("alias")) for d in r["deps"] if d["via"] == via]
             lines.append(f"  {label}{', '.join(shown) or '(none)'}")
@@ -382,8 +392,10 @@ def _di_reverse_preamble(result: queries.DependencyUsage) -> list[str]:
 
 def _dependency_group_lines(group: queries.DependencyGroup, limit_for_all: int) -> list[str]:
     info = group.target
-    loc = f"[{info['file']}:{info['line']}]" if info.get("file") else "[unresolved]"
+    loc = _target_where(info)
     lines = [f"{info['name']}  {loc}  {info['id']}", f"  Kind: {info['kind']}"]
+    if info.get("bound_to"):
+        lines.append(f"  Bound to: {info['bound_to']}")
     if info["aliases"]:
         lines.append(f"  Aliases: {', '.join(info['aliases'])}")
     lines.append(f"  Sub-deps: {', '.join(group.sub_dep_labels) or '(none)'}")
@@ -391,9 +403,7 @@ def _dependency_group_lines(group: queries.DependencyGroup, limit_for_all: int) 
     breakdown = ", ".join(f"{n} {label}" for label, n in sorted(group.via_counts.items()))
     lines.append(f"  Routes using it ({group.route_count}{': ' + breakdown if breakdown else ''}):")
     for r in group.routes:
-        lines.append(
-            f"    {r['method']} {r['path']}  →  {r['handler']}()  [{r['file']}:{r['line']}]  ({_via_text(r, info)})"
-        )
+        lines.append(f"    {r['method']} {r['path']}  →  {r['handler']}()  [{route_where(r)}]  ({_via_text(r, info)})")
     if group.omitted:
         lines.append(omitted_note(len(group.routes), group.route_count, "routes", "    ", limit_for_all=limit_for_all))
     lines.append("")
@@ -521,6 +531,12 @@ def _figure(value: Any, bound: str | None, extra: str | None = None) -> str:
     return f"{value} ({'; '.join(words)})" if words else str(value)
 
 
+def _library_routes(summary: Mapping[str, Any]) -> str:
+    """``8 (3 matched)``: the routes installed code adds, which neither coverage nor backend-only counts."""
+    matched = summary.get("matched_library_routes")
+    return f"{summary['library_routes']}" + ("" if matched is None else f" ({matched} matched)")
+
+
 def _route_summary(result: queries.RouteSummary) -> Body:
     s = result.summary
     coverage = s.get("coverage_pct")
@@ -547,6 +563,8 @@ def _route_summary(result: queries.RouteSummary) -> Body:
         f"  Frontend-only:   {_figure(_count(s['frontend_only']), bounds['frontend_only'])}\n"
         f"  Coverage:        {coverage_line}"
     )
+    if s.get("library_routes"):
+        text = f"{text}\n  Library routes:  {_library_routes(s)}"
     if result.frontend_problem:
         text = f"{text}\n  Frontend:        not analyzed: {result.frontend_problem}"
     bounded = [f for f in queries.SUMMARY_FIGURES if bounds[f] in _BOUND_WORDS]
@@ -607,7 +625,7 @@ def _route_matches(result: queries.RouteMatches) -> Body:
         possible = f"  (possible: {m['reason']})" if m["confidence"] == "possible" else ""
         lines.append(
             f"{b['method']} {b['path']}{possible}\n"
-            f"  Backend:  {b['handler']}()  [{b['file']}:{b['line']}]\n"
+            f"  Backend:  {b['handler']}()  [{route_where(b)}]\n"
             f"  Frontend: {f['method']} {f['raw_path']}  {_frontend_line(f)}"
         )
     if matches.omitted:
@@ -634,7 +652,7 @@ def _route_frontend_missing(result: queries.RouteFrontendMissing) -> Body:
     if backend.total:
         lines.append(f"\nBackend routes that fit the query ({backend.total}):")
         for r in backend.items:
-            lines.append(f"  {r['method']} {r['path']}  →  {r['handler']}()  [{r['file']}:{r['line']}]")
+            lines.append(f"  {r['method']} {r['path']}  →  {r['handler']}()  [{route_where(r)}]")
         if backend.omitted:
             lines.append(omitted_note(len(backend.items), backend.total, "routes", "  "))
     elif result.query.handler is not None or result.query.path is not None:
@@ -670,7 +688,7 @@ def _route_orphans(result: queries.RouteOrphans) -> Body:
         lines.append("\n" + _orphan_heading(title, backend.total, confirmed, bound))
         lines.extend(_orphan_notes(result.gaps, "backend_only", backend.total))
         for r in backend.items:
-            lines.append(f"  {r['method']} {r['path']}  →  {r['handler']}()  [{r['file']}:{r['line']}]")
+            lines.append(f"  {r['method']} {r['path']}  →  {r['handler']}()  [{route_where(r)}]")
         if backend.omitted:
             lines.append(omitted_note(len(backend.items), backend.total, "routes", "  "))
     if frontend.total:
@@ -741,7 +759,7 @@ def route_unmatched(result: queries.UnmatchedRoutes) -> Body:
         lines.append(_orphan_heading("Backend-only routes", bo.total, confirmed, bound))
         lines.extend(_orphan_notes(result.gaps, "backend_only", bo.total))
         for r in bo.items:
-            lines.append(f"  {r['method']:<6} {r['path']:<50} {r['handler']}()  [{r['file']}:{r['line']}]")
+            lines.append(f"  {r['method']:<6} {r['path']:<50} {r['handler']}()  [{route_where(r)}]")
         if bo.omitted:
             lines.append(omitted_note(len(bo.items), bo.total, "routes", "  "))
         lines.append("")
@@ -942,6 +960,8 @@ def status(s: Any) -> Body:
     ]
     if s.fastapi:
         lines.append(f"  Include model:  {s.fastapi['include_model']} ({s.fastapi['summary']})")
+    if s.library_capture is not None:
+        lines.append(f"  Library capture: {_library_capture_text(s.library_capture)}")
     if s.config.get("error"):
         lines.append(f"  Config error:   {s.config['error']}")
     if s.runtime_compatible is False:
@@ -963,6 +983,23 @@ def status(s: Any) -> Body:
     return Body("\n".join(lines), _status_payload(s))
 
 
+def _library_capture_text(block: Mapping[str, Any]) -> str:
+    if not block["present"]:
+        return f"{block['file']} does not exist; run code-intel capture"
+    entries = block["entries"]
+    applied = block["applied"]
+    counts = (
+        f"{entries['includes']} includes ({entries['routes']} routes), {entries['dependencies']} dependencies"
+        if applied is None
+        else f"{applied['includes']} includes ({applied['routes']} routes), "
+        f"{applied['dependencies']} dependencies applied"
+    )
+    versions = ", ".join(f"{name} {version}" for name, version in block["distributions"].items())
+    stale = [*block["problems"], *block["stale"]]
+    suffix = f"; stale: {len(stale)} (run code-intel capture)" if stale else ""
+    return f"{block['file']}: {counts}; {versions or 'no distributions'}{suffix}"
+
+
 def _status_payload(s: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "repo_root": s.repo_root,
@@ -979,6 +1016,7 @@ def _status_payload(s: Any) -> dict[str, Any]:
         "cache": s.cache,
         "toolchain": s.toolchain,
         "fastapi": s.fastapi,
+        "library_capture": s.library_capture,
         "config": s.config,
         "counts": s.counts,
     }

@@ -115,6 +115,10 @@ LIMITATION_KINDS: Mapping[str, str] = {
         "Node or TypeScript is unavailable, so the docs check has no frontend definition locations; "
         "frontend symbols still resolve through tracked code"
     ),
+    "library_capture_stale": (
+        "the library capture does not match the code: an installed version differs from the lock, or an entry "
+        "matches nothing the analysis finds; run code-intel capture"
+    ),
     "frontend_pages_unavailable": (
         "the frontend pages could not be read (Node or TypeScript is unavailable), so a path that only a page "
         "could satisfy is not checked"
@@ -151,6 +155,7 @@ BACKEND_ROUTE_GAP_KINDS: frozenset[str] = frozenset(
         "recursive_router_call",
         "router_call_limit",
         "unimported_router_change",
+        "library_capture_stale",
     }
 )
 

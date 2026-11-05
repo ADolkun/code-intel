@@ -64,11 +64,33 @@ def backend_section(runtime: AnalysisRuntime) -> Rows:
         ("Routes", f"{s['routes']} ({s['http']} HTTP, {s['websocket']} WebSocket)"),
         ("Unmounted routes", len(di["unmounted_routes"])),
         ("Dependency targets", s["dependency_functions"]),
+        *library_capture_rows(di["library"]),
         ("Backend files scanned", s["files_scanned"]),
         ("Diagnostics", problem_kinds(di["diagnostics"])),
         ("Limitations", problem_kinds(di["analysis_limitations"])),
         ("Cold DI analysis", elapsed),
     ]
+
+
+def library_capture_rows(library: Mapping[str, Any] | None) -> Rows:
+    if library is None:
+        return []
+    applied = (
+        f"{library['includes']} includes ({library['routes']} routes), {library['dependencies']} dependencies applied"
+    )
+    return [("Library capture", f"{library['file']}: {applied}")]
+
+
+def library_rows(summary: Mapping[str, Any], *, matched: bool) -> Rows:
+    """The routes installed code adds, counted apart from the repository's (none: no row)."""
+    if not summary["library_routes"]:
+        return []
+    shown = (
+        f"{summary['library_routes']} ({summary['matched_library_routes']} matched)"
+        if matched
+        else summary["library_routes"]
+    )
+    return [("Library routes", shown)]
 
 
 def routes_section(runtime: AnalysisRuntime) -> Rows:
@@ -81,6 +103,7 @@ def routes_section(runtime: AnalysisRuntime) -> Rows:
         # Without the frontend every backend route would count as backend-only.
         return [
             ("Backend routes", s["backend_routes"]),
+            *library_rows(s, matched=False),
             (
                 "Frontend",
                 f"not analyzed ({frontend_problem.code}): {frontend_problem.message}. Fix: {frontend_problem.fix}",
@@ -98,6 +121,7 @@ def routes_section(runtime: AnalysisRuntime) -> Rows:
     coverage = bounded("coverage_pct", f"{s['coverage_pct']}%") if s["coverage_pct"] is not None else "n/a (incomplete)"
     return [
         ("Backend routes", bounded("backend_routes")),
+        *library_rows(s, matched=True),
         ("Frontend calls", f"{bounded('frontend_calls')} ({by_kind(calls_by_kind(routes['frontend_calls']))})"),
         ("Test-file calls skipped", s["test_calls_skipped"]),
         (

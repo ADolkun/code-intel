@@ -413,6 +413,7 @@ FRONTEND_SUMMARY_KEYS = (
     "frontend_calls",
     "test_calls_skipped",
     "matched_routes",
+    "matched_library_routes",
     "matched_calls",
     "match_rows",
     "backend_only",
@@ -510,6 +511,7 @@ BACKEND_ROUTE_GAPS: Mapping[str, frozenset[str]] = {
             "recursive_router_call",
             "router_call_limit",
             "unimported_router_change",
+            "library_capture_stale",
         ),
         frozenset({ROUTES_CHANGED}),
     ),
@@ -778,7 +780,7 @@ def route_match(
     query = RouteQuery(path=path, handler=handler, frontend_func=frontend_func, match=match)
     gaps = orphan_gaps(data)
     if unavailable is not None:
-        backend = [r for r in data["backend_routes"] if _orphan_matches_backend(r, query)]
+        backend = [r for r in _live_routes(data) if _orphan_matches_backend(r, query)]
         return RouteFrontendMissing(
             query=query,
             backend=page(backend, limit),
@@ -822,8 +824,13 @@ def _pair_matches(m: Mapping, query: RouteQuery) -> bool:
     return not query.frontend_func or f["function"] == query.frontend_func
 
 
+def _live_routes(data: Mapping) -> list[dict]:
+    """The routes the repository defines and the ones installed code adds."""
+    return [*data["backend_routes"], *data.get("library_routes", ())]
+
+
 def _route_no_match_hints(data: Mapping, query: RouteQuery) -> list[str]:
-    known_handlers = [r["handler"] for r in data["backend_routes"]]
+    known_handlers = [r["handler"] for r in _live_routes(data)]
     known_funcs = [c["function"] for c in data["frontend_calls"] if c["function"]]
     return no_match_hints(
         query.path,
@@ -831,7 +838,7 @@ def _route_no_match_hints(data: Mapping, query: RouteQuery) -> list[str]:
         [
             unknown_name_hint("handler", query.handler, known_handlers),
             unknown_name_hint("frontend function", query.frontend_func, known_funcs),
-            slash_hint(query.path, query.match, (r["path"] for r in data["backend_routes"])),
+            slash_hint(query.path, query.match, (r["path"] for r in _live_routes(data))),
         ],
     )
 

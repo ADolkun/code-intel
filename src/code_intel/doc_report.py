@@ -15,6 +15,7 @@ from typing import Any, NamedTuple
 from code_intel.doc_rules import BROKEN_STATUSES, NO_BINDINGS, DocRefsConfig, backend_route_segments
 from code_intel.markdown_facts import Heading
 from code_intel.problems import Problem, partition
+from code_intel.result_types import library_text
 
 # ── Results ──────────────────────────────────────────────────────────────
 
@@ -96,6 +97,7 @@ class RouteRow:
     file: str
     line: int
     segments: tuple[str, ...] = ()
+    library: str = ""  # where installed code defines the handler; ``file``/``line`` are then the include that mounts it
 
     @property
     def display(self) -> str:
@@ -216,6 +218,7 @@ def route_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[RouteRow, ...]:
             file=str(row.get("file", "")),
             line=int(row.get("line") or 0),
             segments=backend_route_segments(str(row["path"])),
+            library=library_text(row["library"]) if row.get("library") else "",
         )
         for row in rows
     )

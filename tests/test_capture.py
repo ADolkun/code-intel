@@ -17,7 +17,7 @@ from fixture_repo import hermetic_git
 from library_fixture import checkout, lock_text
 from mcp_fixtures import write
 
-from code_intel import cli, library_capture, runner, ts_bridge
+from code_intel import cli, library_capture, runner, ts_bridge, verify
 from code_intel import server as mcp_server
 from code_intel.analysis_runtime import AnalysisRuntime
 from code_intel.config import ConfigFile
@@ -343,12 +343,29 @@ def test_the_marker_interpreter_shows_when_the_app_is_started(marker_repo: Path)
         ["dump", "symbols", "Items"],
         ["doc-check"],
         ["summary"],
-        ["verify"],
+        ["verify", *(c.name for c in verify.CHECKS if c.name != "library-capture")],
     ],
-    ids=lambda argv: " ".join(argv),
+    ids=lambda argv: " ".join(argv[:3]),
 )
 def test_no_other_command_starts_the_interpreter(marker_repo: Path, argv: list[str]) -> None:
     assert run_quietly(*argv, "--repo-root", str(marker_repo)) == 0
+    assert not started(marker_repo)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the marker interpreter is a shell script")
+def test_only_the_library_capture_check_of_verify_starts_the_interpreter(marker_repo: Path) -> None:
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        code = cli.main(["verify", "library-capture", "--repo-root", str(marker_repo)])
+    assert code == 2 and started(marker_repo)
+    assert "ERROR   library-capture" in out.getvalue() and "the app did not import" in out.getvalue()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the marker interpreter is a shell script")
+def test_reading_the_capture_file_never_starts_the_interpreter(marker_repo: Path) -> None:
+    write(marker_repo / CAPTURE_FILE, "{}\n")
+    test_verify.git(marker_repo, "add", "-A")
+    assert run_quietly("dump", "di", "--repo-root", str(marker_repo)) == 2
     assert not started(marker_repo)
 
 

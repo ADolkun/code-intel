@@ -3,7 +3,7 @@
 
 Run modes:
 
-    fastapi_oracle.py --import-root DIR --app module:attr [--repo-root R]
+    fastapi_oracle.py --import-root DIR --app module:attr [--repo-root R] [--package P]
                       [--env-file F] [--set K=V ...] --out OUT.json
     fastapi_oracle.py --import-root DIR --app module:attr --repo-root R
                       --capture REQUEST.json [--env-file F] [--set K=V ...] --out OUT.json
@@ -25,6 +25,9 @@ sub-applications, skipping FastAPI's own docs routes; from FastAPI 0.137, where
 - ``method``, ``path``, ``kind`` (``http``/``websocket``), ``handler``,
   ``handler_id`` (``module:qualname``), ``file`` (repo-relative POSIX when
   ``--repo-root`` is given) and ``line`` (the ``def`` line, not a decorator);
+- ``library`` (with ``--package``, the backend package's name): where installed
+  code defines the handler (``dist``, ``file`` relative to the distribution,
+  ``line``), null for a handler of the package;
 - ``route_deps``: the route-level dependencies (the first
   ``len(route.dependencies)`` of ``route.dependant.dependencies``) in FastAPI's
   order, each with ``via``: ``app``, ``router`` or ``route decorator``;
@@ -48,7 +51,9 @@ of the package (``package`` in the request) is a leaf, with the definition
 (distribution, file, line) of every installed callable and the version of each
 distribution named. It writes one result per requested item, or the reason.
 
-``--compare`` checks DI JSON (schema v2) against a runtime dump and prints the
+``--compare`` checks DI JSON (schema v2) against a runtime dump, reading an
+analyzer id that names a dependency the library capture filled (``runtime_id``)
+as the id FastAPI reports, and prints the
 differences by class: ``route_missing``, ``route_extra``, ``order_mismatch``
 (Starlette dispatch order), ``handler_mismatch``, ``location_mismatch`` (kind,
 file and ``def`` line), ``route_deps_mismatch``, ``via_mismatch`` (app, router
@@ -314,8 +319,9 @@ def _served_routes(route_list):
             yield original, effective.starlette_route or original
 
 
-def walk_app(app, repo_root: Path | None) -> dict:
-    """Every route of ``app`` in dispatch order, entering mounted applications."""
+def walk_app(app, repo_root: Path | None, installed: _Installed | None = None) -> dict:
+    """Every route of ``app`` in dispatch order, entering mounted applications.
+    ``installed`` attributes a handler of installed code to its distribution."""
     from fastapi import FastAPI, routing
     from starlette.routing import Mount, Route, WebSocketRoute
 
@@ -327,7 +333,7 @@ def walk_app(app, repo_root: Path | None) -> dict:
         for original, route in _served_routes(route_list):
             if isinstance(original, (routing.APIRoute, routing.APIWebSocketRoute)):
                 is_ws = isinstance(original, routing.APIWebSocketRoute)
-                routes.extend(_api_route_rows(route, is_ws, prefix, n_app, app_id, repo_root, len(routes)))
+                routes.extend(_api_route_rows(route, is_ws, prefix, n_app, app_id, repo_root, len(routes), installed))
             elif isinstance(route, Mount):
                 visit_mount(route, prefix, app_id)
             elif isinstance(route, (Route, WebSocketRoute)):
@@ -362,7 +368,14 @@ def walk_app(app, repo_root: Path | None) -> dict:
 
 
 def _api_route_rows(
-    route, is_ws: bool, prefix: str, n_app: int, app_id: str, repo_root: Path | None, order: int
+    route,
+    is_ws: bool,
+    prefix: str,
+    n_app: int,
+    app_id: str,
+    repo_root: Path | None,
+    order: int,
+    installed: _Installed | None,
 ) -> list[dict]:
     """One row per method of a FastAPI route (``WS`` for a WebSocket route)."""
     endpoint = route.endpoint
@@ -375,6 +388,7 @@ def _api_route_rows(
         "handler_id": endpoint_id(endpoint),
         "file": file,
         "line": line,
+        "library": _library_of(endpoint, installed),
         "app": app_id,
         "route_deps": route_deps,
         "param_deps": param_deps,
@@ -382,6 +396,16 @@ def _api_route_rows(
     }
     methods = ["WS"] if is_ws else sorted(route.methods or ())
     return [{"method": method, "order": order + k, **row} for k, method in enumerate(methods)]
+
+
+def _library_of(endpoint, installed: _Installed | None) -> dict | None:
+    """Where installed code defines ``endpoint``; None for a handler of the package or without ``installed``."""
+    if installed is None:
+        return None
+    try:
+        return installed.location(endpoint)
+    except _NotCapturable:
+        return None
 
 
 def _layered_dependants(route, endpoint, n_app: int, is_ws: bool) -> list[tuple[Any, str]]:
@@ -783,6 +807,11 @@ def differences(runtime: dict, di: Mapping) -> list[Difference]:
     out: list[Difference] = []
     expected = keyed(runtime["routes"])
     actual = keyed(sorted(di["routes"], key=lambda r: r.get("order", 0)))
+    runtime_ids = {
+        dep_id: entry["runtime_id"]
+        for dep_id, entry in di.get("dependency_functions", {}).items()
+        if "runtime_id" in entry
+    }
     common = [key for key in expected if key in actual]
     analyzer_order = [key for key in actual if key in expected]
     if common != analyzer_order:
@@ -806,7 +835,7 @@ def differences(runtime: dict, di: Mapping) -> list[Difference]:
         if got is None:
             out.append(Difference("route_missing", key, _label(key)))
         else:
-            out.extend(_compare_route(key, row, got))
+            out.extend(_compare_route(key, row, got, runtime_ids))
     out.extend(Difference("route_extra", key, _label(key)) for key in actual if key not in expected)
     return out
 
@@ -818,8 +847,21 @@ def compare(runtime: dict, di: Mapping) -> dict[str, list[str]]:
     return diffs
 
 
-def _compare_route(key: tuple[str, str, int], row: dict, got: dict) -> list[Difference]:
-    """One route both sides have: its handler, location and dependencies."""
+def _where(row: Mapping) -> tuple:
+    """Where a handler is defined: its ``def`` in the repository, or in installed code (dist, file in the dist, line)."""
+    library = row.get("library")
+    if library:
+        return (row.get("kind"), library["dist"], library["file"], library["line"])
+    return (row.get("kind"), row.get("file"), row.get("line"))
+
+
+def _compare_route(key: tuple[str, str, int], row: dict, got: dict, runtime_ids: Mapping[str, str]) -> list[Difference]:
+    """One route both sides have: its handler, location and dependencies. An analyzer
+    dependency the library capture filled is read as the id FastAPI reports for it (``runtime_ids``)."""
+
+    def known(dep_id: str) -> str:
+        return runtime_ids.get(dep_id, dep_id)
+
     label = _label(key)
     out: list[Difference] = []
 
@@ -828,13 +870,12 @@ def _compare_route(key: tuple[str, str, int], row: dict, got: dict) -> list[Diff
 
     if got.get("handler_id") != row["handler_id"]:
         differ("handler_mismatch", f"runtime {row['handler_id']}, analyzer {got.get('handler_id')}")
-    want_where = (row.get("kind"), row.get("file"), row.get("line"))
-    have_where = (got.get("kind"), got.get("file"), got.get("line"))
+    want_where, have_where = _where(row), _where(got)
     if want_where != have_where:
         differ("location_mismatch", f"runtime {want_where}, analyzer {have_where}")
     deps = got.get("deps") or []
     want_route = [d["id"] for d in row["route_deps"]]
-    have_route = [d["id"] for d in deps if d.get("via") != "direct"]
+    have_route = [known(d["id"]) for d in deps if d.get("via") != "direct"]
     if want_route != have_route:
         differ("route_deps_mismatch", f"runtime {want_route}, analyzer {have_route}")
     else:
@@ -844,10 +885,10 @@ def _compare_route(key: tuple[str, str, int], row: dict, got: dict) -> list[Diff
         if any(w != h for w, h in zip(want_via, have_via, strict=False) if w != "unknown"):
             differ("via_mismatch", f"runtime {want_via}, analyzer {have_via}")
     want_params = sorted((d["param"], d["id"]) for d in row["param_deps"])
-    have_params = sorted((d.get("param"), d["id"]) for d in deps if d.get("via") == "direct")
+    have_params = sorted((d.get("param"), known(d["id"])) for d in deps if d.get("via") == "direct")
     if want_params != have_params:
         differ("param_deps_mismatch", f"runtime {want_params}, analyzer {have_params}")
-    have_closure = set(got.get("all_deps") or ())
+    have_closure = {known(dep_id) for dep_id in got.get("all_deps") or ()}
     if set(row["closure"]) != have_closure:
         missing = sorted(set(row["closure"]) - have_closure)
         extra = sorted(have_closure - set(row["closure"]))
@@ -877,6 +918,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--app")
     parser.add_argument("--cases", type=Path)
     parser.add_argument("--repo-root", type=Path)
+    parser.add_argument("--package")
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", type=Path)
@@ -924,7 +966,8 @@ def main(argv: list[str] | None = None) -> int:
         result = run_cases(root, repo_root)
     else:
         sys.path.insert(0, str(args.import_root.resolve()))
-        result = {"app": args.app, **walk_app(load_app(args.app), repo_root)}
+        app = load_app(args.app)
+        result = {"app": args.app, **walk_app(app, repo_root, _Installed(args.package) if args.package else None)}
     import fastapi
 
     # The include model the analysis must use to compare with this run.
