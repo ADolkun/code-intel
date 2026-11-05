@@ -58,6 +58,7 @@ import re
 import sys
 import typing
 from collections import defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 
 ORACLES_DIR = Path(__file__).resolve().parent
@@ -491,7 +492,7 @@ def _label(key: tuple[str, str, int]) -> str:
     return f"{key[0]} {key[1]}" + (f" #{key[2] + 1}" if key[2] else "")
 
 
-def compare(runtime: dict, di: dict) -> dict[str, list[str]]:
+def compare(runtime: dict, di: Mapping) -> dict[str, list[str]]:
     diffs: dict[str, list[str]] = {name: [] for name in _CLASSES}
     expected = _keyed(runtime["routes"])
     actual = _keyed(sorted(di["routes"], key=lambda r: r.get("order", 0)))

@@ -467,7 +467,7 @@ class DependencyResolver:
                 line,
                 f"{marker_kind}({text}): could not resolve the dependency to a callable ({resolved})",
             )
-            target = DepTarget(
+            target = self._external_binding(module, target_expr, marker.ctx) or DepTarget(
                 id=f"unresolved:{module}:{text}",
                 module=module,
                 qualname=text,
@@ -496,6 +496,42 @@ class DependencyResolver:
             marker=marker_kind,
             file=file or "",
             line=line,
+        )
+
+    def _external_binding(self, module: str, expr: ast.expr | None, ctx: ast.AST, depth: int = 0) -> DepTarget | None:
+        """The target for a name that resolves, through imports and aliases, to a
+        module-level ``name = <expression>`` the analysis cannot see into: every
+        importer of the name gets the one id of that binding."""
+        if depth > MAX_DEPTH or not isinstance(expr, (ast.Name, ast.Attribute)):
+            return None
+        targets = _distinct(self._targets(module, expr, ctx, depth=depth))
+        if len(targets) != 1 or not isinstance(targets[0], Value):
+            return None
+        value = targets[0].loc
+        node = value.node
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            return self._external_binding(value.module, node, node, depth + 1)
+        index = self._module_index(value.module)
+        stmt = index.parents.get(id(node)) if index is not None else None
+        if index is None or id(stmt) not in index.top_index:
+            return None
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            bound = stmt.targets[0]
+        elif isinstance(stmt, ast.AnnAssign):
+            bound = stmt.target
+        else:
+            return None
+        if not isinstance(bound, ast.Name) or not isinstance(node, ast.expr):
+            return None
+        return DepTarget(
+            id=f"{value.module}:{bound.id}",
+            module=value.module,
+            qualname=bound.id,
+            name=bound.id,
+            kind="external",
+            file=self._file(value.module),
+            line=getattr(stmt, "lineno", None),
+            bound_to=_text(node),
         )
 
     # ── Annotations and markers ──────────────────────────────────────────

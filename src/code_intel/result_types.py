@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from code_intel.backend_model import DepKind, DepMarker, DepVia, IncludeModelKind, MountState, RouteKind
 
@@ -94,6 +94,8 @@ class DiDependencyFunction(TypedDict):
     sub_deps: list[str]
     transitive_deps: list[str]
     aliases: list[str]
+    # Only for an ``external`` kind: the expression the module-level name is assigned.
+    bound_to: NotRequired[str]
 
 
 class DiDepRow(TypedDict):

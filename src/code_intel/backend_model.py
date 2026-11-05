@@ -25,7 +25,7 @@ MountState = Literal["static", "conditional", "deferred"]
 LayerVia = Literal["app", "router", "route decorator"]
 DepVia = Literal["app", "router", "route decorator", "direct"]
 DepMarker = Literal["Depends", "Security"]
-DepKind = Literal["function", "class", "instance", "method", "lambda", "factory_result", "unresolved"]
+DepKind = Literal["function", "class", "instance", "method", "lambda", "factory_result", "external", "unresolved"]
 BindingKind = Literal[
     "assign",
     "annotated_assign",
@@ -352,7 +352,8 @@ class BackendModel:
 class DepTarget:
     # "{module}:{qualname}", "{module}:{qualname}()" for an instance (FastAPI reads its
     # __call__), "{module}:{class}().{method}" for a method bound to an instance,
-    # "module:<lambda>@L{line}" or "unresolved:{module}:{text}"
+    # "module:<lambda>@L{line}", "unresolved:{module}:{text}", or for an external
+    # binding "{module}:{name}" of the module-level name it is bound to
     id: str
     module: str
     qualname: str
@@ -368,6 +369,8 @@ class DepTarget:
     # with "()" for an instance: two forms that share an id after folding (a local
     # class and its instance) keep their own parameters.
     form: str = ""
+    # The expression an external binding is assigned (``fastapi_users.current_user(active=True)``).
+    bound_to: str = ""
 
 
 @dataclass(frozen=True)

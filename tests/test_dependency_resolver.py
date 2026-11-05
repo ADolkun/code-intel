@@ -951,7 +951,7 @@ def test_alias_cycles_and_rebinding_follow_module_execution(analyze) -> None:
     assert ids(a.params("pkg.a", "rebound")) == ["pkg.deps:get_user"], "the last binding wins"
 
 
-def test_wrapper_aliases_are_unresolved_instead_of_making_the_wrapper_a_dependency(analyze) -> None:
+def test_wrapper_aliases_are_identified_by_their_binding_instead_of_making_the_wrapper_a_dependency(analyze) -> None:
     """`get_settings = lru_cache(_settings)` must not register `lru_cache` as a dependency."""
     a = analyze(
         {
@@ -968,10 +968,65 @@ def test_wrapper_aliases_are_unresolved_instead_of_making_the_wrapper_a_dependen
         }
     )
     (use,) = a.params("pkg.a", "cached")
-    assert (use.target.id, use.target.kind) == ("unresolved:pkg.a:get_settings", "unresolved")
+    assert (use.target.id, use.target.kind) == ("pkg.a:get_settings", "external")
     ((kind, _file, line, message),) = a.problems()
     assert (kind, line) == ("unresolved_dependency", 8)
     assert "functools.lru_cache" in message
+
+
+def test_an_external_object_has_one_id_however_it_is_imported(analyze) -> None:
+    """`guard = make_guard(...)` is built by a library the analysis cannot see into; every
+    module that imports it, under any name, depends on the one object bound in `pkg.auth`."""
+    a = analyze(
+        {
+            "pkg/auth.py": """
+            from lib import make_guard
+
+            guard = make_guard(active=True)
+            """,
+            "pkg/a.py": """
+            from fastapi import Depends
+            from pkg.auth import guard
+
+            def first(user=Depends(guard)): ...
+            """,
+            "pkg/b.py": """
+            from fastapi import Depends
+            from pkg.auth import guard as current
+
+            def second(user=Depends(current)): ...
+            """,
+            "pkg/c.py": """
+            from fastapi import Depends
+            from pkg import auth
+            from pkg.b import current as who
+
+            def third(user=Depends(who), other=Depends(auth.guard)): ...
+            """,
+        }
+    )
+    uses = [
+        *a.params("pkg.a", "first"),
+        *a.params("pkg.b", "second"),
+        *a.params("pkg.c", "third"),
+    ]
+    assert ids(uses) == ["pkg.auth:guard"] * 4
+    assert [u.display for u in uses] == ["guard", "current", "who", "auth.guard"]
+    target = uses[0].target
+    assert (target.kind, target.module, target.name, target.file, target.line) == (
+        "external",
+        "pkg.auth",
+        "guard",
+        "backend/pkg/auth.py",
+        3,
+    )
+    assert target.bound_to == "make_guard(active=True)"
+    assert [(kind, file) for kind, file, _line, _message in a.problems()] == [
+        ("unresolved_dependency", "backend/pkg/a.py"),
+        ("unresolved_dependency", "backend/pkg/b.py"),
+        ("unresolved_dependency", "backend/pkg/c.py"),
+        ("unresolved_dependency", "backend/pkg/c.py"),
+    ]
 
 
 # ── What FastAPI calls: factories, wrappers, partials, dataclasses ───────

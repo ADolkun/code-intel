@@ -15,6 +15,7 @@ import pytest
 from code_intel import di_map, include_model
 from code_intel.oracles import case_package
 from code_intel.oracles.fastapi_dependency_cases import DEPENDENCY_CASES, INEXACT_DEPENDENCIES
+from code_intel.result_types import DiResult
 
 
 def _runtime(results, case_id: str) -> dict:
@@ -32,10 +33,10 @@ def _short(dep_id: str) -> str:
     return dep_id.split(":", 1)[1]
 
 
-_DI_CACHE: dict[str, dict] = {}
+_DI_CACHE: dict[str, DiResult] = {}
 
 
-def _di(results, case_id: str) -> dict:
+def _di(results, case_id: str) -> DiResult:
     if case_id not in _DI_CACHE:
         from code_intel import router_graph
 
@@ -44,7 +45,6 @@ def _di(results, case_id: str) -> dict:
         model = router_graph.build_backend_model(
             results.root, case_package(case_id), case.app, results.root, include_model=version
         )
-        # pyrefly: ignore[unsupported-operation]
         _DI_CACHE[case_id] = di_map.build_di(model)
     return _DI_CACHE[case_id]
 
@@ -195,7 +195,6 @@ def test_class_and_instance_are_distinct_targets(fastapi_oracle_results) -> None
     assert reverse["case_d24.checkers:Checker()"] == ["GET /alias", "GET /instance", "GET /route-level"]
     assert reverse["case_d24.deps:verify_key"] == ["GET /inherited-class"]
 
-    # pyrefly: ignore[bad-argument-type]
     rows = {tuple(line.split()[:2]) for line in di_map.format_text(di).splitlines()}
     assert ("case_d24.checkers:Checker()", "instance") in rows
     assert ("case_d24.checkers:Checker", "class") in rows
@@ -211,6 +210,31 @@ def test_class_and_instance_are_distinct_reverse_groups(fastapi_oracle_results) 
     assert groups["case_d24.checkers:Checker"].sub_dep_labels == ["get_db"]
     assert groups["case_d24.checkers:Checker()"].sub_dep_labels == ["get_user"]
     assert {r["path"] for r in groups["case_d24.checkers:Checker"].routes} == {"/class", "/route-level"}
+
+
+def test_an_external_object_is_one_dependency_in_every_importing_module(fastapi_oracle_results) -> None:
+    """d29: at runtime one object; the analyzer names it by its binding, once."""
+    routes = _routes(fastapi_oracle_results, "d29")
+    runtime_ids = {routes[("GET", path)]["param_deps"][0]["id"] for path in ("/a", "/b", "/c")}
+    assert len(runtime_ids) == 1
+
+    di = _di(fastapi_oracle_results, "d29")
+    registry = di["dependency_functions"]
+    assert [i for i in registry if i.startswith("unresolved:")] == []
+    entry = registry["case_d29.auth:key_header"]
+    assert (entry["kind"], entry["name"], entry["bound_to"]) == ("external", "key_header", "APIKeyHeader(name='x-key')")
+    assert di["reverse_index"]["case_d29.auth:key_header"] == ["GET /a", "GET /b", "GET /c"]
+    assert {lim["kind"] for lim in di["analysis_limitations"]} == {"unresolved_dependency"}
+    assert "= APIKeyHeader(name='x-key')" in di_map.format_text(di)
+
+
+def test_an_external_object_is_one_reverse_group(fastapi_oracle_results) -> None:
+    queries = pytest.importorskip("code_intel.queries")
+    usage = queries.di_reverse(_di(fastapi_oracle_results, "d29"), "key_header", limit=None)
+    assert isinstance(usage, queries.DependencyUsage)
+    (group,) = usage.groups
+    assert group.target["id"] == "case_d29.auth:key_header"
+    assert {r["path"] for r in group.routes} == {"/a", "/b", "/c"}
 
 
 def test_bound_methods_are_distinct_from_functions(fastapi_oracle_results) -> None:

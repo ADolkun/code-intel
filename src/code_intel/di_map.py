@@ -111,6 +111,7 @@ _FORMS = {
     "method": "the method",
     "lambda": "a lambda",
     "factory_result": "a factory's result",
+    "external": "an external object",
     "unresolved": "an unresolved target",
 }
 
@@ -177,6 +178,8 @@ def _registry(
             "transitive_deps": transitive,
             "aliases": sorted(aliases.get(target_id, ())),
         }
+        if target.bound_to:
+            out[target_id]["bound_to"] = target.bound_to
     return out, shared
 
 
@@ -300,7 +303,8 @@ def format_text(result: DiResult) -> str:
         where = f"{entry['file']}:{entry['line']}" if entry["file"] else "?"
         subs = ", ".join(label(s) for s in entry["sub_deps"]) or "(leaf)"
         aliases = f"  [aliases: {', '.join(entry['aliases'])}]" if entry["aliases"] else ""
-        lines.append(f"  {label(target_id):<40} {entry['kind']:<14} {where}  → {subs}{aliases}")
+        bound = f"  = {entry['bound_to']}" if "bound_to" in entry else ""
+        lines.append(f"  {label(target_id):<40} {entry['kind']:<14} {where}  → {subs}{aliases}{bound}")
 
     lines.append(f"\nRoutes ({len(result['routes'])})")
     lines.append("─" * 72)

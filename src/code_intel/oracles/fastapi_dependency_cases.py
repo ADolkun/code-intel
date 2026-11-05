@@ -1275,11 +1275,59 @@ DEPENDENCY_CASES["d28"] = _case(
     allow=frozenset({"shared_dependency_id"}),
 )
 
+# d29_external_binding: a module-level object built by a library, imported under
+# two names and used as an attribute of its module in three route modules. At
+# runtime it is one object; the analyzer cannot see into the library, so it
+# identifies it by the binding, once, and reports the target as unresolved.
+DEPENDENCY_CASES["d29"] = _case(
+    "d29",
+    {
+        "auth.py": """
+            from fastapi.security import APIKeyHeader
+            key_header = APIKeyHeader(name="x-key")
+            """,
+        "api/routes/a.py": """
+            from fastapi import APIRouter, Depends
+            from APP_PKG.auth import key_header
+            router = APIRouter()
+            @router.get("/a")
+            def a(key=Depends(key_header)): ...
+            """,
+        "api/routes/b.py": """
+            from fastapi import APIRouter, Depends
+            from APP_PKG.auth import key_header as header
+            router = APIRouter()
+            @router.get("/b")
+            def b(key=Depends(header)): ...
+            """,
+        "api/routes/c.py": """
+            from fastapi import APIRouter, Depends
+            from APP_PKG import auth
+            router = APIRouter()
+            @router.get("/c")
+            def c(key=Depends(auth.key_header)): ...
+            """,
+        "main.py": """
+            from fastapi import FastAPI
+            from APP_PKG.api.routes.a import router as a_router
+            from APP_PKG.api.routes.b import router as b_router
+            from APP_PKG.api.routes.c import router as c_router
+            app = FastAPI()
+            app.include_router(a_router)
+            app.include_router(b_router)
+            app.include_router(c_router)
+            """,
+    },
+    allow=frozenset({"unresolved_dependency"}),
+)
+
 # Cases where FastAPI reads a signature the analysis cannot see (a decorator
-# without functools.wraps) or a callable chosen at runtime (a factory returning
-# different forms under one id): the analyzer must report these limitation kinds.
+# without functools.wraps), a callable chosen at runtime (a factory returning
+# different forms under one id) or an object a library built: the analyzer must
+# report these limitation kinds.
 INEXACT_DEPENDENCIES: dict[str, frozenset[str]] = {
     "d05": frozenset({"opaque_decorator"}),
     "d08": frozenset({"opaque_decorator"}),
     "d28": frozenset({"shared_dependency_id"}),
+    "d29": frozenset({"unresolved_dependency"}),
 }
