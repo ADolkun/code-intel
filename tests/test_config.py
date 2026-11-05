@@ -306,7 +306,14 @@ def fake_command(monkeypatch: pytest.MonkeyPatch, name: str, calls: list) -> Non
     monkeypatch.setitem(sys.modules, f"code_intel.{name}", module)
 
 
-def test_only_commands_with_a_module_are_offered(capsys: pytest.CaptureFixture[str]) -> None:
+def test_only_commands_with_a_module_are_offered(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "COMMANDS",
+        {"doc-check": ("no_such_module", "absent"), "dump absent": ("no_such_dump_module", "absent")},
+    )
     with pytest.raises(SystemExit) as caught:
         cli.main(["--help"])
     assert caught.value.code == 0

@@ -18,6 +18,8 @@ from code_intel import code_paths
 
 REQUIRE_TOOLCHAIN_ENV = "CODE_INTEL_REQUIRE_TOOLCHAIN"
 
+pytest_plugins = ["fastapi_fixtures"]
+
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
