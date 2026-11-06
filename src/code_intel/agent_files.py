@@ -5,10 +5,13 @@
   least one git-visible file (a renamed directory would otherwise stop the
   rule from loading without a sound).
 - Every ``SKILL.md`` under ``skills_dir`` has a ``name`` equal to its
-  directory, unique among skills, and a non-empty ``description``.
+  directory, unique among skills, and a non-empty ``description``; every
+  directory under ``skills_dir`` has a ``SKILL.md``.
 - No frontmatter key repeats.
 - The ``instruction_map`` section's ``- `label`: `glob`, ...`` lines name
   exactly the rule files' stems, each with exactly that file's ``paths``.
+- A ``.mcp.json`` at the repository root is a JSON object whose ``mcpServers``
+  object holds only servers with a non-blank string ``command`` or ``url``.
 
 A finding is a ``doc_report.Finding`` (``path:line: message`` when printed),
 so the docs check reports it with the docs findings.
@@ -16,6 +19,7 @@ so the docs check reports it with the docs findings.
 
 from __future__ import annotations
 
+import json
 import posixpath
 import re
 from collections.abc import Collection, Iterable
@@ -31,6 +35,7 @@ from code_intel.markdown_facts import doc_facts_from_text
 
 KIND = "agent"
 STATUS = "invalid"
+MCP_CONFIG = ".mcp.json"
 
 _MAP_LINE = re.compile(r"^\s*[-*+]\s+`([^`]+)`\s*:(.*)$")
 _BRACES = re.compile(r"\{([^{}]*)\}")
@@ -149,6 +154,13 @@ def _check_rule(rel: str, text: str, visible: Collection[str], findings: list[Fi
 
 
 def _check_skills(repo_root: Path, skills_dir: str, visible: Collection[str], findings: list[Finding]) -> None:
+    prefix = posixpath.normpath(skills_dir) + "/"
+    below = [rel[len(prefix) :] for rel in visible if rel.startswith(prefix)]
+    skills = {rel.split("/", 1)[0] for rel in below if rel.endswith("/SKILL.md")}
+    for directory in sorted({rel.split("/", 1)[0] for rel in below if "/" in rel} - skills):
+        findings.append(
+            _finding(f"{prefix}{directory}", 1, directory, f"skill directory {directory!r} has no SKILL.md")
+        )
     first_by_name: dict[str, str] = {}
     for rel in _files_under(skills_dir, visible, "/SKILL.md"):
         text = _read(repo_root, rel, findings)
@@ -179,6 +191,38 @@ def _check_skills(repo_root: Path, skills_dir: str, visible: Collection[str], fi
             findings.append(
                 _finding(
                     rel, meta.line("description"), "description", "frontmatter 'description' must be a non-blank string"
+                )
+            )
+
+
+def _is_command_or_url(server: object) -> bool:
+    return isinstance(server, dict) and any(
+        isinstance(server.get(key), str) and server[key].strip() for key in ("command", "url")
+    )
+
+
+def _check_mcp_config(repo_root: Path, findings: list[Finding]) -> None:
+    text = _read(repo_root, MCP_CONFIG, findings)
+    if text is None:
+        return
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        findings.append(_finding(MCP_CONFIG, exc.lineno, MCP_CONFIG, f"invalid JSON: {exc.msg}"))
+        return
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict):
+        findings.append(
+            _finding(MCP_CONFIG, 1, "mcpServers", "the file must be a JSON object with an 'mcpServers' object")
+        )
+        return
+    lines = text.splitlines()
+    for name, server in servers.items():
+        line = next((i for i, row in enumerate(lines, 1) if json.dumps(name) in row), 1)
+        if not _is_command_or_url(server):
+            findings.append(
+                _finding(
+                    MCP_CONFIG, line, name, f"MCP server {name!r} must be an object with a string 'command' or 'url'"
                 )
             )
 
@@ -249,6 +293,8 @@ def check(repo_root: Path, agents: AgentsConfig, visible: Collection[str]) -> li
         stem = rel[len(rules_dir) + 1 : -len(".md")]
         rule_paths[stem] = None if text is None else _check_rule(rel, text, visible, findings)
     _check_skills(repo_root, agents.skills_dir, visible, findings)
+    if MCP_CONFIG in visible:
+        _check_mcp_config(repo_root, findings)
     if agents.instruction_map is not None:
         _check_map(repo_root, agents.instruction_map, rules_dir, rule_paths, findings)
     return sorted(findings, key=lambda f: (f.file, f.line, f.kind, f.text))
