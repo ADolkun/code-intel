@@ -249,7 +249,7 @@ def test_missing_required_keys_are_named() -> None:
         (
             MINIMAL_CONFIG
             + '\n[docs]\nscope = ["a.md"]\n[[docs.rules]]\npaths = ["a.md"]\nchecks = ["spelling"]\nreason = "r"\n',
-            "invalid value for 'checks' in [[docs.rules]] #1: 'spelling' is not one of links, paths, routes, symbols",
+            "invalid value for 'checks' in [[docs.rules]] #1: 'spelling' is not one of links, paths, routes, symbols, scripts",
         ),
         (
             MINIMAL_CONFIG

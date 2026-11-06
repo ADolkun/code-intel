@@ -224,6 +224,88 @@ def test_a_repeated_skill_key_is_reported(repo: Path) -> None:
     assert lines(repo) == [".claude/skills/deploy/SKILL.md:4: frontmatter key 'name' is repeated (first at line 2)"]
 
 
+def test_a_skill_directory_without_a_skill_md_is_reported(repo: Path) -> None:
+    put(repo, ".claude/skills/notes/README.md", "# Notes\n")
+    assert lines(repo) == [".claude/skills/notes:1: skill directory 'notes' has no SKILL.md"]
+
+
+def test_a_skill_md_in_the_wrong_case_is_not_a_skill(repo: Path) -> None:
+    put(repo, ".claude/skills/notes/skill.md", SKILL.replace("name: deploy", "name: notes"))
+    assert lines(repo) == [".claude/skills/notes:1: skill directory 'notes' has no SKILL.md"]
+
+
+def test_a_directory_grouping_skills_and_loose_files_are_not_reported(repo: Path) -> None:
+    put(repo, ".claude/skills/group/inner/SKILL.md", SKILL.replace("name: deploy", "name: inner"))
+    put(repo, ".claude/skills/README.md", "# Skills\n")
+    assert lines(repo) == []
+
+
+# ── MCP servers ──────────────────────────────────────────────────────────
+
+MCP_JSON = """\
+{
+  "mcpServers": {
+    "local": {"command": "uv", "args": ["run", "server"]},
+    "remote": {"url": "https://example.com/mcp"}
+  }
+}
+"""
+
+
+def test_a_valid_mcp_json_has_no_findings(repo: Path) -> None:
+    put(repo, ".mcp.json", MCP_JSON)
+    assert lines(repo) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("{", ".mcp.json:1: invalid JSON: Expecting property name enclosed in double quotes"),
+        (
+            '{\n  "mcpServers": {\n    "a": 1,\n  }\n}\n',
+            ".mcp.json:3: invalid JSON: Illegal trailing comma before end of object",
+        ),
+        ("[]", ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
+        ("{}", ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
+        ('{"mcpServers": []}', ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
+        ('{"servers": {}}', ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
+    ],
+    ids=["unclosed", "trailing-comma", "array", "no-servers-key", "servers-not-an-object", "wrong-key"],
+)
+def test_an_mcp_json_that_is_not_an_object_with_servers_is_reported(repo: Path, text: str, expected: str) -> None:
+    put(repo, ".mcp.json", text)
+    assert lines(repo) == [expected]
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        '"uv"',
+        "null",
+        "{}",
+        '{"args": ["x"]}',
+        '{"command": ""}',
+        '{"command": "  "}',
+        '{"command": 3}',
+        '{"url": ["x"]}',
+    ],
+)
+def test_a_server_needs_a_string_command_or_url(repo: Path, server: str) -> None:
+    put(repo, ".mcp.json", f'{{\n  "mcpServers": {{\n    "ok": {{"command": "uv"}},\n    "bad": {server}\n  }}\n}}\n')
+    assert lines(repo) == [".mcp.json:4: MCP server 'bad' must be an object with a string 'command' or 'url'"]
+
+
+def test_an_empty_mcp_servers_object_is_valid(repo: Path) -> None:
+    put(repo, ".mcp.json", '{"mcpServers": {}}')
+    assert lines(repo) == []
+
+
+def test_an_mcp_json_git_does_not_see_is_not_checked(repo: Path) -> None:
+    put(repo, ".mcp.json", "{")
+    visible = {p.relative_to(repo).as_posix() for p in repo.rglob("*") if p.is_file()} - {".mcp.json"}
+    assert agent_files.check(repo, AGENTS, visible) == []
+
+
 # ── Instruction map ──────────────────────────────────────────────────────
 
 

@@ -836,7 +836,7 @@ def test_the_ambiguity_note_names_five_owners_then_counts_the_rest() -> None:
 def test_doc_refs_doc_text_has_links_references_and_inbound_blocks(doc_report) -> None:
     lines = _doc_refs(doc_report, limit=1, doc="docs/a.md").text.splitlines()
     assert lines[:4] == [
-        "docs/a.md: checks links, paths, routes, symbols",
+        "docs/a.md: checks links, paths, routes, symbols, scripts",
         "Reachability: reachable from docs/README.md.",
         "",
         "Links (3):",

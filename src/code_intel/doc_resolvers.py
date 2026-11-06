@@ -28,12 +28,14 @@ from code_intel.doc_rules import (
     FRAMEWORK_PATHS,
     NO_BINDINGS,
     NO_PAGES,
+    PACKAGE_MANIFEST,
     WILD,
     DocRefsConfig,
     FrontendPage,
     PageSet,
     PathForm,
     RouteMention,
+    ScriptMention,
     SymbolMention,
     added_prefix_variants,
     expand_braces,
@@ -73,6 +75,7 @@ _EXISTS_ERRORS: tuple[type[Exception], ...] = (OSError, ValueError)
 
 FactsReader = Callable[[str], "DocFacts | None"]
 WordsReader = Callable[[], CodeWords]
+ScriptsReader = Callable[[str], "frozenset[str] | None"]
 
 
 def untracked_path(repo: RepoFiles, file: str | None) -> bool:
@@ -177,6 +180,8 @@ class ResolutionContext:
     python_classes: frozenset[str]
     # Package directory → the names its `__init__.py` binds (`qualifiers_match`).
     package_bindings: Mapping[str, frozenset[str]]
+    # Directories holding a tracked package.json.
+    manifest_dirs: frozenset[str]
 
     @classmethod
     def build(
@@ -242,6 +247,11 @@ class ResolutionContext:
             by_name=MappingProxyType({name: tuple(rows) for name, rows in by_name.items()}),
             python_classes=python_classes,
             package_bindings=MappingProxyType(dict(package_bindings)),
+            manifest_dirs=frozenset(
+                posixpath.dirname(path)
+                for path in repo.tracked
+                if posixpath.basename(path) == PACKAGE_MANIFEST and not has_skip_dir(path)
+            ),
         )
 
     def dir_landing(self, directory: str) -> str | None:
@@ -834,3 +844,41 @@ class SymbolResolver:
         # from a submodule, so a name the docs share with it resolves through
         # tracked code whether or not the submodule is checked out.
         return draft.set("missing", "no definition in the symbol index and no use in tracked code")
+
+
+# ── npm scripts ──────────────────────────────────────────────────────────
+
+
+class ScriptResolver:
+    """An npm script a doc runs against the ``scripts`` of a package.json, read
+    through ``scripts`` (a directory's scripts, None when the file cannot be
+    read). A named directory is checked in its own package.json; without one the
+    script may be in the repository root's or in any package.json under the
+    frontend root, because the doc does not say which package it means."""
+
+    def __init__(self, ctx: ResolutionContext, scripts: ScriptsReader) -> None:
+        self.ctx = ctx
+        self.scripts = scripts
+
+    def script(self, doc: str, mention: ScriptMention, line: int, context: str) -> Draft | None:
+        """None when the repository has no package.json at all."""
+        manifests = self.ctx.manifest_dirs
+        if not manifests:
+            return None
+        draft = Draft(doc, line, "script", mention.text, context)
+        if mention.directory is not None:
+            candidates = [mention.directory] if mention.directory in manifests else []
+        else:
+            root = self.ctx.config.frontend_root
+            candidates = sorted(d for d in manifests if d == "" or root == "." or is_under(d, root))
+        if not candidates:
+            return draft.set("skipped", "no package.json to check it against", checked=False)
+        files = [posixpath.join(directory, PACKAGE_MANIFEST) for directory in candidates]
+        found = [self.scripts(directory) for directory in candidates]
+        for file, names in zip(files, found, strict=True):
+            if names is not None and mention.script in names:
+                draft.target = file
+                return draft.set("ok", f"defined in {file}")
+        if None in found:
+            return draft.set("skipped", "a package.json could not be read", checked=False)
+        return draft.set("missing", f"{_join_or(files)} defines no script {mention.script!r}")

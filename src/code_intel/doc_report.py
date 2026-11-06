@@ -195,6 +195,7 @@ _MESSAGE_HEADS: Mapping[tuple[str, str], str] = {
     ("route", "method_differs"): "route method differs",
     ("route", "unmounted"): "route not mounted",
     ("symbol", "missing"): "symbol not found",
+    ("script", "missing"): "script not found",
 }
 
 

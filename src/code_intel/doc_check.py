@@ -1,7 +1,7 @@
 """``code-intel doc-check``: the docs against the code, plus the agent instruction files.
 
 Checks links, anchors, repository paths, backend routes, frontend pages, code
-symbols and orphaned docs in the config's ``[docs]`` scope, and the files under
+symbols, npm scripts and orphaned docs in the config's ``[docs]`` scope, and the files under
 ``[agents]``. It needs only Python, git and markdown-it-py, plus Node and the
 shared TypeScript install (``code-intel setup``) for react-router pages and
 frontend definition locations.

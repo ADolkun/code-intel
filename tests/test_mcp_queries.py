@@ -897,7 +897,7 @@ def test_a_doc_query_lists_links_references_inbound_reachability_and_checks(doc_
         {"file": "docs/plans/p.md", "line": 3},
     ]
     assert (result.reachable, result.reachability_root, result.in_scope) == (True, "docs/README.md", True)
-    assert result.checks == ["links", "paths", "routes", "symbols"]
+    assert result.checks == ["links", "paths", "routes", "symbols", "scripts"]
     assert (result.mentions, result.definitions, result.doc_count) == (None, None, None)
 
     plan = doc_queries.doc_refs_lookup(doc_report, doc="docs/plans/p.md", limit=None)

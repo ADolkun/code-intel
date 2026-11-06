@@ -276,8 +276,8 @@ URL builders are found in the modules of the configured clients: exported functi
 | `scope` | Required, non-empty. Globs of the Markdown files to check, if git sees them. |
 | `route_prefixes` | Prefixes a mention may add or omit: with `["/api"]`, a doc may write `GET /items` for the route `/api/items`, or `GET /api/items` for an unprefixed one. Each starts with `/` and does not end with one. |
 | `reachability` | Optional table `root`, `include`, `exclude`. Docs matching `include` (and not `exclude`) must be reachable from `root` through links, else they are `orphaned doc` findings. Without the table there is no orphan check. |
-| `rules` | `[[docs.rules]]`: `paths` (globs), `checks` (a non-empty subset of `links`, `paths`, `routes`, `symbols`) and a required `reason`. A doc gets every check unless the first rule whose `paths` match it names fewer. |
-| `ignore` | `[[docs.ignore]]`: `file`, `kind` (`link`, `path`, `route` or `symbol`), `text` and a required `reason`. Suppresses the failing references of that kind in that file whose text, as written, equals `text`. An entry that suppresses nothing is itself a finding. |
+| `rules` | `[[docs.rules]]`: `paths` (globs), `checks` (a non-empty subset of `links`, `paths`, `routes`, `symbols`, `scripts`) and a required `reason`. A doc gets every check unless the first rule whose `paths` match it names fewer. |
+| `ignore` | `[[docs.ignore]]`: `file`, `kind` (`link`, `path`, `route`, `symbol` or `script`), `text` and a required `reason`. Suppresses the failing references of that kind in that file whose text, as written, equals `text`. An entry that suppresses nothing is itself a finding. |
 
 ### `[agents]`
 
@@ -755,7 +755,7 @@ The `react-router` page provider reads only what the TypeScript parser sees in t
 
 ## Docs check
 
-`doc-check` checks the docs against the code: every link and anchor resolves, every repository path a doc names exists, every backend route and code symbol it names still exists, every doc under the reachability `include` is reachable from its `root`, and the [agent instruction files](#agent-instruction-files) are well-formed. Run it in CI on every pull request and make it unconditional, because a code change can stale a doc that did not change. `doc_refs` answers the reverse question with the same extraction: which docs name a file, route or symbol.
+`doc-check` checks the docs against the code: every link and anchor resolves, every repository path a doc names exists, every backend route and code symbol it names still exists, every npm script it runs is defined in a `package.json`, every doc under the reachability `include` is reachable from its `root`, and the [agent instruction files](#agent-instruction-files) are well-formed. Run it in CI on every pull request and make it unconditional, because a code change can stale a doc that did not change. `doc_refs` answers the reverse question with the same extraction: which docs name a file, route or symbol.
 
 **Scope.** The `[docs] scope` globs: every Markdown file they match, if git sees it (tracked, or untracked and not ignored).
 
@@ -769,6 +769,7 @@ The `react-router` page provider reads only what the TypeScript parser sees in t
 | path | A code span, or a fence line, naming a repository path: from the repository root, from `backend.root`, `frontend.root` or the backend package directory, or from the doc's own directory. Line suffixes (`:12`, `#L12`), globs and `{a,b}` braces are understood. In a fence only paths whose first directory is a top-level repository directory count, so a shell transcript or a sample stack trace is not checked line by line. | No such file or directory (`stale path`). Placeholders (`<name>`, `{x}`, `...`) and example names (`my_…`, `example…`) are skipped. |
 | route | `METHOD /path` in a code span, a fence line or prose, and a code span that is only `/path` when its first segment (after an optional configured prefix) is a route root: the root of a live or unmounted backend route, of a frontend page, of FastAPI's own pages (`/docs`, `/redoc`, `/openapi.json`), or of a `METHOD /path` with an upper-case method (or WebSocket) in any doc whose rule checks routes. In prose the method must be upper case or WebSocket, so English such as "get" before a path is not read as a route. Every parameter syntax matches (`{id}`, `:id`, `[id]`, `<id>`), and a mention with or without a configured prefix matches. A path that opens with an ellipsis (`POST .../checkout`) names the end of a route: it passes as `suffix` when exactly one live route of a compatible method ends with those segments. Any other `...`, `${` or `{{` in a path is a placeholder and is skipped. | No live route fits (`route not found`), including one only a plain word filling a parameter would fit, unless a frontend page has exactly that path; only another method serves it (`route method differs`); or only a router the app does not mount does (`route not mounted`). A route tail fails the same ways, and when live routes at two or more paths end with it (`route not specific`). Blind spot: a root that the docs only ever name as a bare `/path` is skipped once its last route is gone, because nothing declares it a route root any more. |
 | symbol | A code span that is a whole identifier, a dotted name, a call with empty parentheses or a JSX tag. | It is a CamelCase name, a name starting with an underscore, a call, a JSX component or `Class.attr` where `Class` is a Python class the symbol index holds, and the symbol index defines it nowhere and no tracked code file uses it as an identifier (`symbol not found`). Python is read with `ast`, so a name left only in a comment or docstring does not count. The config file is not code here (an ignore entry's text would otherwise resolve itself). Other names (`snake_case`, `UPPER_SNAKE`, a dotted permission string) that resolve nowhere are `unresolved`, which never fails. |
+| script | `npm run <script>` (or `npm run-script`), `npm test` and `npm start` (the `test` and `start` scripts) in a code span or in a fenced shell block (info string empty, `sh`, `bash`, `shell`, `zsh`, `console` or `shell-session`), also `npm run <script> --prefix <dir>`, `npm --prefix <dir> run <script>` and `cd <dir> && npm run <script>`. With a directory the script must be in that directory's `package.json`; without one it may be in the repository root's or in any `package.json` under `frontend.root`. Placeholders (`<script>`, `$X`), a workspace run (`-w`, `--workspace`) and a directory that is not a repository path (`..`, `~/x`, `$DIR`) are not checked as such; a directory with no `package.json`, or an unqualified script when no `package.json` sits at the root or under `frontend.root`, is `skipped`. Only tracked `package.json` files count; a repository with none has no script references. | No such script (`script not found`). A `package.json` that does not parse is a `parse_failed` diagnostic. |
 
 Two file-level findings complete the list: `orphaned doc` for a doc matching the reachability `include` that no chain of links from `root` reaches, and `unused ignore entry`.
 
@@ -792,6 +793,7 @@ Two file-level findings complete the list: `orphaned doc` for a doc matching the
 - `stale path`: write the current path. An illustration that is not a real file gets a placeholder (`<path>`) or an example name.
 - `route not found`, `route method differs`, `route not mounted`: take the route's URL and method from `route_match`, never from the decorator, which omits mount prefixes.
 - `symbol not found`: use the current name. A name that was deliberately removed and that the doc still mentions goes in plain text, not a code span.
+- `script not found`: write a script the `package.json` defines, or add the script. A command that is deliberately not this repository's gets an ignore entry.
 - `orphaned doc`: link it from the reachability root or from a page reachable from it.
 - `unused ignore entry`: delete the entry.
 
@@ -809,9 +811,10 @@ With an `[agents]` table the docs check also validates the instruction files cod
 
 - every rule file under `rules_dir` opens with YAML frontmatter holding a non-empty `paths` list of non-blank strings, and has no `applyTo` key;
 - every `paths` glob matches at least one git-visible file, so a renamed directory cannot silently stop a rule from loading;
-- every skill's `SKILL.md` under `skills_dir` has a `name` equal to its directory, unique among skills, and a non-empty `description`;
+- every skill's `SKILL.md` under `skills_dir` has a `name` equal to its directory, unique among skills, and a non-empty `description`, and every directory under `skills_dir` holds a `SKILL.md` (itself or in a nested skill directory);
 - no frontmatter key repeats;
-- the `instruction_map` section (the `heading` in `file`) lists ``- `label`: `glob`, …`` lines that equal the rule files' stems and their `paths` exactly.
+- the `instruction_map` section (the `heading` in `file`) lists ``- `label`: `glob`, …`` lines that equal the rule files' stems and their `paths` exactly;
+- a `.mcp.json` at the repository root, when git sees one, parses as JSON, is an object with an `mcpServers` object, and every server is an object with a non-blank string `command` or `url`.
 
 ## Freshness and the restart rule
 
