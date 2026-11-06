@@ -4,6 +4,7 @@ orphans and the per-file caches, over fixture repositories in tmp dirs."""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import textwrap
@@ -43,6 +44,7 @@ from code_intel.doc_rules import (
     qualifiers_match,
     route_path_variants,
     route_root,
+    script_mentions,
     split_path_token,
 )
 from code_intel.problems import limitation
@@ -1208,6 +1210,231 @@ def test_camel_case_humps() -> None:
     assert not is_camel_case("UPPER_SNAKE")
 
 
+# ── npm scripts ──────────────────────────────────────────────────────────
+
+
+def _manifest(*scripts: str) -> str:
+    return json.dumps({"name": "pkg", "scripts": {name: "true" for name in scripts}})
+
+
+FRONTEND_MANIFEST = {"frontend/package.json": _manifest("build", "lint:fix", "test", "start")}
+
+
+def _scripts(tmp_path: Path, markdown: str, manifests: Mapping[str, str] = FRONTEND_MANIFEST, **kw: Any) -> Any:
+    return build(tmp_path, {"docs/a.md": markdown, **manifests}, **kw)
+
+
+def _script_results(report: doc_refs.DocReport) -> list[tuple[str, str]]:
+    return [(r.text, r.status) for r in refs(report, kind="script")]
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("`npm run build`", [("npm run build", "ok")]),
+        ("`npm run lint:fix`", [("npm run lint:fix", "ok")]),
+        ("`npm run build -- --watch`", [("npm run build -- --watch", "ok")]),
+        ("`npm test` and `npm start`", [("npm start", "ok"), ("npm test", "ok")]),
+        ("`npm run deploy`", [("npm run deploy", "missing")]),
+        ("`npm run Build`", [("npm run Build", "missing")]),
+        ("```sh\nnpm run build\nnpm run deploy\n```", [("npm run build", "ok"), ("npm run deploy", "missing")]),
+        ("```bash\n$ npm ci && npm run build\n```", [("npm run build", "ok")]),
+        ("```\nnpm run deploy\n```", [("npm run deploy", "missing")]),
+        ("```yaml\nrun: npm run deploy\n```", []),
+        ('```json\n{"deploy": "npm run deploy"}\n```', []),
+        ("Run npm run deploy in prose.", []),
+        ("`npm run <script>` `npm run $TARGET` `npm run` `npm run build:*` `npm run ...`", []),
+        ("`npm install` `npm ci` `npm run-all build` `pnpm run deploy` `yarn run deploy` `npm-run-all deploy`", []),
+        ("`npm run deploy -w web` `npm run deploy --workspace=web` `npm run deploy --workspaces`", []),
+    ],
+)
+def test_npm_scripts_are_checked_against_the_frontend_package_json(
+    tmp_path: Path, markdown: str, expected: list[tuple[str, str]]
+) -> None:
+    assert _script_results(_scripts(tmp_path, markdown)) == expected
+
+
+def test_a_missing_script_is_a_finding_naming_the_package_json(tmp_path: Path) -> None:
+    report = _scripts(tmp_path, "intro\n\n`npm run deploy`\n")
+    assert [(f.file, f.line, f.kind, f.message) for f in ref_findings(report)] == [
+        (
+            "docs/a.md",
+            3,
+            "script",
+            "script not found: npm run deploy (frontend/package.json defines no script 'deploy')",
+        )
+    ]
+
+
+def test_the_script_may_be_in_the_root_or_any_package_json_under_the_frontend_root(tmp_path: Path) -> None:
+    manifests = {
+        "package.json": _manifest("release"),
+        "frontend/package.json": _manifest("build"),
+        "frontend/packages/ui/package.json": _manifest("storybook"),
+        "tools/web/package.json": _manifest("elsewhere"),
+    }
+    report = _scripts(tmp_path, "`npm run release` `npm run build` `npm run storybook` `npm run elsewhere`", manifests)
+    by_text = {r.text: r for r in refs(report, kind="script")}
+    assert {text: r.status for text, r in by_text.items()} == {
+        "npm run release": "ok",
+        "npm run build": "ok",
+        "npm run storybook": "ok",
+        "npm run elsewhere": "missing",
+    }
+    assert by_text["npm run release"].target == "package.json"
+    assert by_text["npm run storybook"].target == "frontend/packages/ui/package.json"
+    (failure,) = ref_findings(report)
+    assert failure.message.endswith(
+        "(package.json, frontend/package.json or frontend/packages/ui/package.json defines no script 'elsewhere')"
+    )
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("`npm run dev --prefix tools/web`", [("npm run dev --prefix tools/web", "ok")]),
+        ("`npm run build --prefix tools/web`", [("npm run build --prefix tools/web", "missing")]),
+        ("`npm --prefix tools/web run dev`", [("npm --prefix tools/web run dev", "ok")]),
+        ("`npm run dev --prefix=tools/web/`", [("npm run dev --prefix=tools/web/", "ok")]),
+        ("`(cd tools/web && npm run dev)`", [("npm run dev", "ok")]),
+        ("`(cd tools/web && npm run build)`", [("npm run build", "missing")]),
+        ("```sh\ncd tools/web && npm run dev\n```", [("npm run dev", "ok")]),
+        ("```sh\ncd tools/web && npm run build\n```", [("npm run build", "missing")]),
+        ("`(cd ./tools/web && npm test)`", [("npm test", "missing")]),
+        ("`npm run dev --prefix .`", [("npm run dev --prefix .", "missing")]),
+    ],
+)
+def test_a_named_directory_is_checked_in_its_own_package_json(
+    tmp_path: Path, markdown: str, expected: list[tuple[str, str]]
+) -> None:
+    manifests = {**FRONTEND_MANIFEST, "tools/web/package.json": _manifest("dev"), "package.json": _manifest("other")}
+    assert _script_results(_scripts(tmp_path, markdown, manifests)) == expected
+
+
+@pytest.mark.parametrize("markdown", ["`(cd docs && npm run nope)`", "`npm run nope --prefix missing/dir`"])
+def test_a_directory_without_a_package_json_is_skipped_not_failed(tmp_path: Path, markdown: str) -> None:
+    manifests = {**FRONTEND_MANIFEST, "tools/web/package.json": _manifest("dev")}
+    report = _scripts(tmp_path, markdown, manifests)
+    assert [r.status for r in refs(report, kind="script")] == ["skipped"]
+    assert ref_findings(report) == []
+
+
+@pytest.mark.parametrize("directory", ["..", "../x", "~/app", "$APP", "/opt/app", "<dir>", '"my app"'])
+def test_a_directory_that_is_not_a_repository_path_falls_back_to_the_frontend_lookup(
+    tmp_path: Path, directory: str
+) -> None:
+    report = _scripts(tmp_path, f"`(cd {directory} && npm run build)` `(cd {directory} && npm run nope)`")
+    assert _script_results(report) == [("npm run build", "ok"), ("npm run nope", "missing")]
+
+
+def test_without_any_package_json_the_rule_does_nothing(tmp_path: Path) -> None:
+    report = _scripts(tmp_path, "`npm run deploy` `npm test`", {})
+    assert refs(report, kind="script") == []
+    assert report.reference_counts().get("script") is None
+    assert ref_findings(report) == []
+
+
+def test_a_package_json_outside_the_frontend_root_cannot_judge_an_unqualified_script(tmp_path: Path) -> None:
+    report = _scripts(tmp_path, "`npm run dev`", {"tools/web/package.json": _manifest("start")})
+    assert _script_results(report) == [("npm run dev", "skipped")]
+    assert ref_findings(report) == []
+
+
+def test_untracked_and_vendored_package_jsons_do_not_count(tmp_path: Path) -> None:
+    manifests = {**FRONTEND_MANIFEST, "frontend/node_modules/dep/package.json": _manifest("deploy")}
+    report = _scripts(tmp_path, "`npm run deploy`", manifests, untracked=["frontend/package.json"])
+    assert refs(report, kind="script") == []
+
+
+def test_a_frontend_root_at_the_repository_root_reads_every_package_json(tmp_path: Path) -> None:
+    layout = LAYOUT.replace('root = "frontend"', 'root = "."').replace("frontend/tsconfig.json", "tsconfig.json")
+    manifests = {"app/web/package.json": _manifest("dev")}
+    report = _scripts(tmp_path, "`npm run dev`", manifests, cfg=doc_config(layout=layout))
+    assert _script_results(report) == [("npm run dev", "ok")]
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", '{"scripts": []}', '{"scripts": null}'])
+def test_a_package_json_without_scripts_defines_none(tmp_path: Path, content: str) -> None:
+    report = _scripts(tmp_path, "`npm run build`", {"frontend/package.json": content})
+    if content == "{not json":
+        assert [r.status for r in refs(report, kind="script")] == ["skipped"]
+        assert [(p.kind, p.file) for p in report.diagnostics] == [("parse_failed", "frontend/package.json")]
+    else:
+        assert _script_results(report) == [("npm run build", "missing")]
+        assert report.complete
+
+
+def test_the_scripts_check_can_be_left_out_of_a_docs_rule(tmp_path: Path) -> None:
+    cfg = doc_config(rules=[{"paths": ["docs/**"], "checks": ["links", "paths"], "reason": "no scripts"}])
+    assert refs(_scripts(tmp_path, "`npm run deploy`", cfg=cfg), kind="script") == []
+
+
+def test_an_ignore_entry_covers_a_script_the_doc_means(tmp_path: Path) -> None:
+    entry = {"file": "docs/a.md", "kind": "script", "text": "npm run deploy", "reason": "the CI image has it"}
+    report = _scripts(tmp_path, "`npm run deploy`", cfg=doc_config(ignore=[entry]))
+    assert _script_results(report) == [("npm run deploy", "ignored")]
+    assert ref_findings(report) == []
+
+
+def test_a_package_json_edit_is_seen_by_the_next_report(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo", {**BASE_FILES, "docs/a.md": "`npm run deploy`\n", **FRONTEND_MANIFEST})
+
+    index = DocIndex(repo.repo_root)
+
+    def run() -> list[str]:
+        report = index.report(repo, ROUTES, UNMOUNTED, [], SYMBOLS, True, doc_config(), pages=PAGES)
+        return [r.status for r in refs(report, kind="script")]
+
+    assert run() == ["missing"]
+    (tmp_path / "repo" / "frontend" / "package.json").write_text(
+        _manifest("build", "deploy", "extra"), encoding="utf-8"
+    )
+    assert run() == ["ok"]
+
+
+def test_the_lookup_of_a_package_json_finds_the_docs_running_its_scripts(tmp_path: Path) -> None:
+    report = _scripts(tmp_path, "`npm run build` `npm run deploy`")
+    found = lookup(report, file="frontend/package.json")
+    assert [(row["file"], row["text"]) for row in found.mentions.items] == [("docs/a.md", "npm run build")]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("npm run build", [("build", None, "npm run build")]),
+        ("npm run-script build", [("build", None, "npm run-script build")]),
+        ("npm test", [("test", None, "npm test")]),
+        ("npm start", [("start", None, "npm start")]),
+        ("npm --silent run build", [("build", None, "npm --silent run build")]),
+        ("npm run build --prefix web", [("build", "web", "npm run build --prefix web")]),
+        ("npm run build --prefix=web/", [("build", "web", "npm run build --prefix=web/")]),
+        ("npm --prefix ./web test", [("test", "web", "npm --prefix ./web test")]),
+        ("cd web && npm run build", [("build", "web", "npm run build")]),
+        ("(cd web && npm test)", [("test", "web", "npm test")]),
+        ("cd . && npm test", [("test", "", "npm test")]),
+        ("cd web && npm ci && npm run build", [("build", None, "npm run build")]),
+        ("cd web && npm run build --prefix other", [("build", None, "npm run build --prefix other")]),
+        (
+            "npm run a && npm run b; npm test | cat",
+            [("a", None, "npm run a"), ("b", None, "npm run b"), ("test", None, "npm test")],
+        ),
+        ("npm run build --prefix", [("build", None, "npm run build --prefix")]),
+        ("npm install", []),
+        ("npm run", []),
+        ("npm run <script>", []),
+        ("npm run -- build", []),
+        ("npm run build -ws", [("build", None, "npm run build -ws")]),
+        ("npm run build -w web", []),
+        ("pnpm run build", []),
+        ("sudo npm run build", [("build", None, "npm run build")]),
+        ("./npm run build", []),
+        ("npm.cmd run build", []),
+    ],
+)
+def test_script_mentions(text: str, expected: list[tuple[str, str | None, str]]) -> None:
+    assert [(m.script, m.directory, m.text) for m in script_mentions(text)] == expected
+
+
 # ── Scope rules ──────────────────────────────────────────────────────────
 
 MIXED_DOC = "[x](gone.md)\n\n`backend/gone.py` `GET /gone` `_gone()`\n"
@@ -1276,7 +1503,7 @@ def test_scope_and_checks_come_from_the_docs_table() -> None:
     assert cfg.checks_for("docs/plans/x.md") == ("links",)
     assert cfg.checks_for("docs/vendor/a/b.md") == ("links",)
     assert cfg.checks_for(".claude/skills/generic-a/r.md") == ("links", "paths")
-    assert cfg.checks_for("docs/appointment-system.md") == ("links", "paths", "routes", "symbols")
+    assert cfg.checks_for("docs/appointment-system.md") == ("links", "paths", "routes", "symbols", "scripts")
     assert cfg.in_scope("tools/t/README.md")
     assert not cfg.in_scope("notes/x.md")
     assert cfg.in_orphan_scope("docs/protos/GAPS.md")

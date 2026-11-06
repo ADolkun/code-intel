@@ -23,9 +23,10 @@ from code_intel.doc_resolvers import (
     PathResolver,
     ResolutionContext,
     RouteResolver,
+    ScriptResolver,
     SymbolResolver,
 )
-from code_intel.doc_rules import DocRefsConfig, NextAppPages, PageSet, RouteMention, SymbolMention
+from code_intel.doc_rules import DocRefsConfig, NextAppPages, PageSet, RouteMention, ScriptMention, SymbolMention
 from code_intel.markdown_facts import DocFacts, Link
 
 CONFIG = doc_config({"scope": ["docs/**/*.md"], "route_prefixes": []})
@@ -126,6 +127,46 @@ def test_a_directory_lands_on_its_readme_before_its_index(tmp_path: Path) -> Non
         "docs/i/INDEX.md",
         None,
     )
+
+
+# ── npm scripts ──────────────────────────────────────────────────────────
+
+
+def test_the_context_lists_tracked_package_json_directories_outside_vendored_code(tmp_path: Path) -> None:
+    files = ["package.json", "web/package.json", "web/node_modules/dep/package.json", "scratch/package.json"]
+    ctx = _context(tmp_path, files, untracked=("scratch/package.json",))
+    assert ctx.manifest_dirs == frozenset({"", "web"})
+
+
+def test_a_script_is_looked_up_only_in_the_package_jsons_that_can_define_it(tmp_path: Path) -> None:
+    ctx = _context(
+        tmp_path, ["package.json", "frontend/package.json", "frontend/ui/package.json", "tools/package.json"]
+    )
+    read: list[str] = []
+
+    def scripts(directory: str) -> frozenset[str] | None:
+        read.append(directory)
+        return frozenset({"ui"}) if directory == "frontend/ui" else frozenset()
+
+    resolver = ScriptResolver(ctx, scripts)
+    draft = resolver.script("docs/a.md", ScriptMention("ui", None, "npm run ui"), 1, "code")
+    assert draft is not None
+    assert (draft.status, draft.target, draft.checked) == ("ok", "frontend/ui/package.json", True)
+    assert read == ["", "frontend", "frontend/ui"]
+    read.clear()
+    draft = resolver.script("docs/a.md", ScriptMention("ui", "tools", "npm run ui --prefix tools"), 1, "code")
+    assert draft is not None
+    assert (draft.status, draft.detail) == ("missing", "tools/package.json defines no script 'ui'")
+    assert read == ["tools"]
+
+
+def test_a_package_json_that_cannot_be_read_leaves_the_script_unchecked(tmp_path: Path) -> None:
+    ctx = _context(tmp_path, ["frontend/package.json"])
+    draft = ScriptResolver(ctx, lambda directory: None).script(
+        "docs/a.md", ScriptMention("build", None, "npm run build"), 1, "code"
+    )
+    assert draft is not None
+    assert (draft.status, draft.checked) == ("skipped", False)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────

@@ -214,7 +214,7 @@ def _file_mention(ref: Any, path: str, nonlocal_defs: frozenset[tuple[str, str]]
     """(whether ``ref`` mentions the file or directory ``path``, ambiguous).
     A symbol counts only through a definition outside a function body: a
     local variable or parameter (``id``, ``value``) is not what a doc names."""
-    if ref.kind in ("link", "path"):
+    if ref.kind in ("link", "path", "script"):
         # An in-page anchor link targets its own doc; it does not mention it.
         own_anchor = ref.kind == "link" and ref.target == ref.doc
         return ref.target is not None and not own_anchor and is_under(ref.target, path), None

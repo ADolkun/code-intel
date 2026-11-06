@@ -66,7 +66,8 @@ class DocRefsConfig:
     so its text never counts as a use of a symbol (an ignore entry's text would
     resolve itself). ``ignore_lines``: the line of each ignore entry in it.
     ``path_roots``: the directories a doc may write a path relative to, besides
-    the repository root and the doc's own directory.
+    the repository root and the doc's own directory. ``frontend_root``: where an
+    npm script named without a directory is looked up, besides the repository root.
     """
 
     scope: tuple[str, ...]
@@ -77,6 +78,7 @@ class DocRefsConfig:
     path_roots: tuple[PathRoot, ...] = ()
     ignore_lines: tuple[int, ...] = ()
     path: str = CONFIG_REL
+    frontend_root: str = "."
 
     @classmethod
     def from_config(cls, config: Config, repo_root: Path) -> DocRefsConfig:
@@ -105,6 +107,7 @@ class DocRefsConfig:
             path_roots=roots,
             ignore_lines=tuple(text.count("\n", 0, m.start()) + 1 for m in _IGNORE_HEADER_RE.finditer(text)),
             path=path,
+            frontend_root=posixpath.normpath(config.frontend.root),
         )
 
     def in_scope(self, rel: str) -> bool:
@@ -974,3 +977,95 @@ def is_example_symbol(mention: SymbolMention) -> bool:
         if lowered in ("x", "xx", "xxx", "xxxx") or lowered.startswith(("my_", "example")):
             return True
     return False
+
+
+# ── npm scripts ──────────────────────────────────────────────────────────
+
+PACKAGE_MANIFEST = "package.json"
+
+_NPM_COMMAND_RE = re.compile(
+    r"(?:\bcd[ \t]+(?P<cd>[^\s;&|()]+)[ \t]*&&[ \t]*)?"
+    r"(?<![\w./@:-])(?P<command>npm(?=\s)(?P<args>[^;&|()\n`]*))"
+)
+_SCRIPT_NAME_RE = re.compile(r"\w[\w:.@/-]*")
+_SHELL_FENCE_INFOS = frozenset({"", "sh", "bash", "shell", "zsh", "console", "shell-session"})
+_WORKSPACE_FLAGS = frozenset({"-w", "--workspace", "--workspaces"})
+
+
+@dataclass(frozen=True)
+class ScriptMention:
+    """``npm run <script>`` (or ``npm test`` / ``npm start``) as a doc writes it.
+
+    ``text``: the command as written. ``directory``: the repository-relative
+    directory its ``--prefix`` or a leading ``cd <dir> &&`` names (``""`` for the
+    repository root), None when it names none or the name is not a repository
+    path (``..``, ``~/x``, ``$APP``).
+    """
+
+    script: str
+    directory: str | None
+    text: str
+
+
+def is_shell_fence(info: str) -> bool:
+    words = info.split()
+    return (words[0].lower() if words else "") in _SHELL_FENCE_INFOS
+
+
+def _script_directory(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    path = posixpath.normpath(raw.strip(_QUOTES))
+    if path.startswith(("/", "~", "..")) or is_placeholder_path(path) or any(ch in path for ch in "\"'`$%*?"):
+        return None
+    return "" if path == "." else path
+
+
+def _npm_target(args: str) -> tuple[str, str | None] | None:
+    """``(script, --prefix value)`` of the arguments after ``npm``, or None when
+    they run no script, or run one in a workspace (another package.json)."""
+    tokens = args.split()
+    command = script = prefix = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token == "--":
+            break
+        if token.split("=", 1)[0] in _WORKSPACE_FLAGS:
+            return None
+        if token == "--prefix" and index < len(tokens):
+            prefix = tokens[index]
+            index += 1
+        elif token.startswith("--prefix="):
+            prefix = token[len("--prefix=") :]
+        elif token.startswith("-"):
+            continue
+        elif command is None:
+            command = token
+            if command in ("test", "start"):
+                script = command
+            elif command not in ("run", "run-script"):
+                return None
+        elif script is None:
+            script = token
+    if script is None or _SCRIPT_NAME_RE.fullmatch(script) is None:
+        return None
+    return script, prefix
+
+
+def script_mentions(text: str) -> list[ScriptMention]:
+    """Every npm script a code span or shell line runs. A script name that is a
+    placeholder (``<script>``, ``$X``) is not read."""
+    out: list[ScriptMention] = []
+    for match in _NPM_COMMAND_RE.finditer(text):
+        target = _npm_target(match["args"])
+        if target is None:
+            continue
+        script, prefix = target
+        if prefix is not None and match["cd"] is not None:
+            directory = None
+        else:
+            directory = _script_directory(prefix if prefix is not None else match["cd"])
+        out.append(ScriptMention(script, directory, match["command"].strip()))
+    return out

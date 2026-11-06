@@ -17,8 +17,8 @@ from code_intel.result_types import ClientSpec
 
 CONFIG_REL = ".code-intel/config.toml"
 
-DOC_CHECKS: tuple[str, ...] = ("links", "paths", "routes", "symbols")
-REFERENCE_KINDS: tuple[str, ...] = ("link", "path", "route", "symbol")
+DOC_CHECKS: tuple[str, ...] = ("links", "paths", "routes", "symbols", "scripts")
+REFERENCE_KINDS: tuple[str, ...] = ("link", "path", "route", "symbol", "script")
 PageKind = Literal["next-app", "react-router", "none"]
 PAGE_KINDS: tuple[PageKind, ...] = ("next-app", "react-router", "none")
 HTTP_METHODS: tuple[str, ...] = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
