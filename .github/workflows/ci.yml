@@ -22,29 +22,38 @@ jobs:
       UV_LINK_MODE: copy
       CODE_INTEL_REQUIRE_TOOLCHAIN: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # No version: installs the newest uv that satisfies `required-version` in pyproject.toml.
+      # PRs restore main's cache and save nothing, since a PR cache cannot be reused after merge.
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          enable-cache: false
+          enable-cache: true
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
 
       - run: uv sync --locked
 
-      - run: uv run ruff check
+      # With a token zizmor adds the online audits (impostor commits, known-vulnerable actions).
+      - name: Audit workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --no-sync zizmor --quiet .github
 
-      - run: uv run ruff format --check
+      - run: uv run --no-sync ruff check
 
-      - run: uv run pyrefly check
+      - run: uv run --no-sync ruff format --check
+
+      - run: uv run --no-sync pyrefly check
 
       - name: Syntax-check the JavaScript
         run: git ls-files '*.cjs' | xargs -r -n1 node --check
 
-      - run: uv run code-intel setup
+      - run: uv run --no-sync code-intel setup
 
-      - run: uv run pytest -n auto
+      - run: uv run --no-sync pytest -n auto --dist worksteal

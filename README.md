@@ -936,11 +936,12 @@ The tests compare the analyzers with the tools they model instead of with hand-w
 
 ```sh
 uv sync
+uv run zizmor --quiet .github
 uv run ruff check && uv run ruff format --check
 uv run pyrefly check
 git ls-files '*.cjs' | xargs -n1 node --check
 uv run code-intel setup
-CODE_INTEL_REQUIRE_TOOLCHAIN=1 uv run pytest -n auto
+CODE_INTEL_REQUIRE_TOOLCHAIN=1 uv run pytest -n auto --dist worksteal
 ```
 
 The dependency groups `fastapi-live` (default) and `fastapi-copy` select the FastAPI the oracle tests run against; install one at a time: `uv sync --no-default-groups --group dev --group fastapi-copy`. The tests turn the automatic install off (`CODE_INTEL_NO_AUTO_SETUP=1`), so run `code-intel setup` first. Tests that need Node, TypeScript, git or FastAPI skip when they are missing; `CODE_INTEL_REQUIRE_TOOLCHAIN=1` (set in CI) turns those skips into failures. The code has no type-check suppressions; keep it that way.

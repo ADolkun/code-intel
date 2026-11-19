@@ -26,6 +26,7 @@ dev = [
     "ruff>=0.17.3",
     "pyrefly>=1.4.1",
     "types-PyYAML>=6.0.12.20261103",
+    "zizmor>=1.32.0",
 ]
 # The oracle tests run the locked FastAPI of the repository under analysis; its
 # include_router model depends on the version (live from 0.137, copy before).
@@ -39,6 +40,8 @@ fastapi-copy = [
 ]
 
 [tool.uv]
+# CI's setup-uv installs the newest uv that satisfies this.
+required-version = ">=0.13.9"
 default-groups = ["dev", "fastapi-live"]
 conflicts = [
     [{ group = "fastapi-live" }, { group = "fastapi-copy" }],
