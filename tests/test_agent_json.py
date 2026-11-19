@@ -272,18 +272,27 @@ def test_an_mcp_json_with_no_keys_is_not_reported(tmp_path: Path) -> None:
     assert lines(tmp_path) == []
 
 
-@pytest.mark.parametrize(
-    ("rel", "text"),
-    [
-        (".github/hooks/h.json", '{"version": ' + "9" * 5001 + ', "hooks": {}}'),
-        (".mcp.json", '{"mcpServers": {"a": {"command": "x", "args": ' + "[" * 100_000 + "]" * 100_000 + "}}}"),
-        (".vscode/mcp.json", "[" * 100_000 + "]" * 100_000),
-    ],
-    ids=["huge-integer", "deep-args", "deep-vscode"],
-)
-def test_json_the_parser_cannot_hold_is_skipped_without_a_crash(tmp_path: Path, rel: str, text: str) -> None:
-    write(tmp_path / rel, text)
+def test_a_number_the_parser_cannot_hold_is_skipped(tmp_path: Path) -> None:
+    write(tmp_path / ".github/hooks/h.json", '{"version": ' + "9" * 5001 + ', "hooks": {}}')
     assert lines(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("rel", "text", "parsed"),
+    [
+        (
+            ".mcp.json",
+            '{"mcpServers": {"a": {"command": "x", "args": ' + "[" * 100_000 + "]" * 100_000 + "}}}",
+            [".mcp.json:1: MCP server 'a' has 'args' that is not a list of strings"],
+        ),
+        (".vscode/mcp.json", "[" * 100_000 + "]" * 100_000, [".vscode/mcp.json:1: the file must be a JSON object"]),
+    ],
+    ids=["deep-args", "deep-vscode"],
+)
+def test_deep_nesting_does_not_crash_the_check(tmp_path: Path, rel: str, text: str, parsed: list[str]) -> None:
+    write(tmp_path / rel, text)
+    # Whether the parser reaches its recursion limit depends on the platform's stack.
+    assert lines(tmp_path) in ([], parsed)
 
 
 # ── .github/hooks ────────────────────────────────────────────────────────
