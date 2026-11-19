@@ -15,7 +15,7 @@ assigned) look at every line, tab-indented or not.
 A target name built from variables is expanded only when each variable it uses
 is assigned exactly once in the whole file, outside a conditional, before the
 rule, from literal text and such variables, and only up to ``_MAX_EXPANSION``
-characters of expanded text in all: past that the file is opaque.
+characters and references of expanded text in all: past that the file is opaque.
 ``MakeTargets.variables`` tells the caller that names depend on variables,
 which a command line or the environment may set.
 
@@ -183,7 +183,8 @@ class _Variables:
                     return None
                 value = expanded
             used.add(name)
-            self.budget -= len(value)
+            # One per reference too, so empty values still spend the budget.
+            self.budget -= len(value) + 1
             if self.budget < 0:
                 return None
             out.append(text[position : match.start()])

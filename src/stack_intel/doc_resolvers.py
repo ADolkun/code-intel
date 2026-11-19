@@ -1305,15 +1305,28 @@ class CommandResolver:
             return True
         if monorepo.config_roots is None:
             return self._has_mise(path)
-        for pattern in monorepo.config_roots:
+        return self._listed_root(monorepo, path)
+
+    def _listed_root(self, monorepo: _Monorepo, path: str) -> bool:
+        """``path`` matches a ``config_roots`` entry; mise ignores a ``**`` entry."""
+        for pattern in monorepo.config_roots or ():
             pattern = _repo_dir(pattern.strip("/"))
+            if "**" in pattern:
+                continue
             if pattern == path or (has_glob(pattern) and glob_regex(pattern).fullmatch(path)):
                 return True
         return False
 
-    def _nearest(self, directory: str) -> str:
-        """The nearest directory at or above ``directory`` with a mise config file."""
-        return next((owner for owner in reversed(_chain(directory)) if self.ctx.mise_configs.get(owner)), "")
+    def _nearest(self, directory: str, monorepo: _Monorepo) -> str:
+        """The project ``directory`` is in: the nearest directory at or above
+        it with a mise config file, or with file tasks when ``config_roots``
+        lists it."""
+        for owner in reversed(_chain(directory)):
+            if self.ctx.mise_configs.get(owner):
+                return owner
+            if owner and self.ctx.mise_task_files.get(owner) and self._listed_root(monorepo, owner):
+                return owner
+        return ""
 
     def _own(self, owner: str, task: str, envs: frozenset[str]) -> _Lookup:
         tasks = self._owner_tasks(owner, envs)
@@ -1323,30 +1336,37 @@ class CommandResolver:
         self, name: str, works: Sequence[str], envs: frozenset[str], monorepo: _Monorepo | None
     ) -> list[_Lookup] | str:
         """Every way mise may read ``name`` run from one of ``works``, or why
-        the name cannot be settled."""
+        the name cannot be settled. As mise 2026.11 does: ``//p:t`` names a
+        config root, or a directory the command runs in or under; ``p:t``
+        is also ``//p:t`` (after path aliases, when ``p`` has no ``/``) from
+        the root project, or from inside ``p``."""
         if name.startswith("//"):
             if monorepo is None:
                 return _NEEDS_MONOREPO.format(form="//path:task")
             path, _, task = name[2:].partition(":")
             path = _repo_dir(monorepo.aliases.get(path, path))
-            if not self._is_config_root(monorepo, path):
+            if not self._is_config_root(monorepo, path) and not any(_at_or_under(work, path) for work in works):
                 return [_Lookup(_Tasks(), task, f"{_where(path)} is not a monorepo config root")]
             return [self._own(path, task, envs)]
         if name.startswith(":"):
             if monorepo is None:
                 return _NEEDS_MONOREPO.format(form=":task")
-            return [self._own(self._nearest(work), name[1:], envs) for work in works]
+            return [self._own(self._nearest(work, monorepo), name[1:], envs) for work in works]
         if monorepo is None:
             return [
                 _Lookup(self._visible(work, envs), name, f"no task {name!r} visible from {_where(work)}")
                 for work in works
             ]
-        lookups = [self._own(self._nearest(work), name, envs) for work in works]
+        lookups = [self._own(self._nearest(work, monorepo), name, envs) for work in works]
         path, colon, task = name.partition(":")
-        if colon and "/" not in path and any(not self._nearest(work) for work in works):
-            path = _repo_dir(monorepo.aliases.get(path, path))
-            if self._is_config_root(monorepo, path):
-                lookups.append(self._own(path, task, envs))
+        if colon and "/" not in path:
+            target = _repo_dir(monorepo.aliases.get(path, path))
+            root = self._is_config_root(monorepo, target)
+            if any(
+                (root and not self._nearest(work, monorepo)) or (target and _at_or_under(work, target))
+                for work in works
+            ):
+                lookups.append(self._own(target, task, envs))
         return lookups
 
     def _task(self, draft: Draft, mention: CommandMention) -> Draft:
@@ -1409,6 +1429,10 @@ class CommandResolver:
 
     def _has_mise(self, owner: str) -> bool:
         return bool(self.ctx.mise_configs.get(owner) or self.ctx.mise_task_files.get(owner))
+
+
+def _at_or_under(directory: str, path: str) -> bool:
+    return directory == path or is_under(directory, path)
 
 
 def _repo_dir(path: str) -> str:

@@ -108,14 +108,19 @@ def _unquote(token: str) -> str:
     return "".join(out)
 
 
+def _continues(line: str) -> bool:
+    """The line ends in an unescaped backslash: an odd run of them."""
+    return (len(line) - len(line.rstrip("\\"))) % 2 == 1
+
+
 def _end_of_input(line: str) -> str:
     """A backslash that ends the input continues nothing, and bash drops it."""
-    return line[:-1] if line.endswith("\\") and not line.endswith("\\\\") else line
+    return line[:-1] if _continues(line) else line
 
 
 def _repo_dir(raw: str) -> str | None:
     """A repository-relative directory, None for one outside the repository or not literal."""
-    path = posixpath.normpath(_unquote(raw))
+    path = posixpath.normpath(raw)
     if path.startswith(("/", "~", "..")) or is_placeholder_path(path) or any(ch in path for ch in "\"'`$%*?"):
         return None
     return "" if path == "." else path
@@ -171,6 +176,9 @@ def _scan(line: str) -> Iterator[tuple[str, int, int] | str]:
     while index < len(line):
         char = line[index]
         if quote is not None:
+            if quote == '"' and char == "\\" and line[index + 1 : index + 2] in ('"', "\\", "$", "`"):
+                index += 2
+                continue
             if char == quote:
                 quote = None
             index += 1
@@ -251,7 +259,7 @@ def _commands(line: str, state: _LineState) -> Iterator[_Command]:
             continue
         redirect_target = False
         if words and words[0] in ("cd", "pushd", "popd"):
-            cwd = _join_dir(cwd, words[1]) if len(words) == 2 and words[0] != "popd" else _LOST
+            cwd = _join_dir(cwd, _unquote(words[1])) if len(words) == 2 and words[0] != "popd" else _LOST
             state.moved = True
         elif words and words[0] == "export":
             state.env.update(_assignment(word) for word in words[1:] if not word.startswith("-"))
@@ -306,7 +314,6 @@ def _named(
     reason: str | None = None,
     overrides: frozenset[str] = frozenset(),
 ) -> CommandMention:
-    name = _unquote(name)
     if verdict != "unchecked" and (_placeholder(name) or any(ch in name for ch in _WILDCARD_CHARS)):
         verdict, reason = "skipped", "a placeholder or a wildcard, not a name"
     elif directory == _LOST and verdict == "check":
@@ -333,6 +340,9 @@ _NPM_WORKSPACE_FLAGS = frozenset({"--workspaces", "-ws", "--include-workspace-ro
 _NPM_FLAGS = frozenset({"-s", "--silent", "-q", "--quiet", "-d", "-dd", "-ddd", "--verbose", "--foreground-scripts"})
 # npm reads `-C` as `--prefix`.
 _NPM_PREFIX = frozenset({"--prefix", "-C"})
+# Options that change which package.json runs or whether a missing script
+# fails; npm expands any unambiguous abbreviation of them (`--if-pres`).
+_NPM_RESOLUTION = ("if-present", "prefix", "workspace", "workspaces", "include-workspace-root", "global", "location", "ws")
 _PNPM_FLAGS = frozenset({"-s", "--silent", "--stream", "--parallel", "--sequential", "--aggregate-output"})
 
 
@@ -347,14 +357,16 @@ def _unknown_option(word: str, known: frozenset[str]) -> bool:
 
 
 def _long_option_reason(option: str) -> str:
-    return (
-        f"{option} is an option the docs check does not know, and the runner reads an unambiguous "
-        "abbreviation as the option it starts (--if-pres is --if-present)"
-    )
+    return f"{option} may abbreviate an npm option that changes which script runs or whether a missing one fails"
+
+
+def _npm_resolution_option(flag: str) -> bool:
+    name = flag.removeprefix("--")
+    return bool(name) and any(option.startswith(name) for option in _NPM_RESOLUTION)
 
 
 def _npm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMention]:
-    command = name = unknown = unknown_long = None
+    command = name = unknown = unknown_long = bundled = None
     directory = cwd
     workspace = if_present = False
     index = 0
@@ -377,7 +389,22 @@ def _npm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMentio
                 directory = _join_dir(cwd, value)
             continue
         elif word.startswith("--") and flag not in _NPM_FLAGS:
-            unknown_long = unknown_long or flag
+            # After the name an option is npm config, which matters only when
+            # it may abbreviate an option that changes resolution.
+            if unknown_long is None and name is None:
+                unknown_long = _option_reason(flag)
+            elif unknown_long is None and _npm_resolution_option(flag):
+                unknown_long = _long_option_reason(flag)
+        elif word.startswith("-") and not word.startswith("--") and "C" in word[1:]:
+            # A bundle of short flags (`-sC web`): its -C is --prefix.
+            if not word.endswith("C"):
+                bundled = bundled or word
+            else:
+                value = words[index + 1] if index + 1 < len(words) else None
+                if value is not None:
+                    directory = _join_dir(cwd, value)
+                index += 2
+                continue
         elif word.startswith("-"):
             if name is None and unknown is None and _unknown_option(word, _NPM_FLAGS):
                 unknown = word
@@ -395,7 +422,10 @@ def _npm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMentio
     if workspace:
         return [_named("npm", name, directory, text, "unchecked", "runs in the workspaces' own package.json files")]
     if unknown_long is not None:
-        return [_named("npm", name, directory, text, "unchecked", _long_option_reason(unknown_long))]
+        return [_named("npm", name, directory, text, "unchecked", unknown_long)]
+    if bundled is not None:
+        reason = f"{bundled} bundles -C with flags after it, so the directory is not certain"
+        return [_named("npm", name, directory, text, "unchecked", reason)]
     if if_present:
         return [_named("npm", name, directory, text, "unproven", "--if-present passes when the script is missing")]
     if unknown is not None:
@@ -453,7 +483,7 @@ def _pnpm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMenti
             selected = selected or any(w.split("=", 1)[0] in _PNPM_SELECTORS for w in later)
             mention = _pnpm_mention(word, directory, text, selected, if_present)
             if unknown_long is not None and mention.verdict != "skipped":
-                return [replace(mention, verdict="unchecked", reason=_long_option_reason(unknown_long))]
+                return [replace(mention, verdict="unchecked", reason=_option_reason(unknown_long))]
             if unknown is not None and mention.verdict == "check":
                 return [replace(mention, verdict="unproven", reason=_option_reason(unknown))]
             return [mention]
@@ -465,7 +495,7 @@ def _pnpm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMenti
     if selected:
         return [_named("pnpm", command, directory, text, "unchecked", "runs in the selected workspace projects")]
     if unknown_long is not None:
-        return [_named("pnpm", command, directory, text, "unchecked", _long_option_reason(unknown_long))]
+        return [_named("pnpm", command, directory, text, "unchecked", _option_reason(unknown_long))]
     if command in _PNPM_TEST:
         return [_named("pnpm", "test", directory, text, "unproven", "pnpm test does not report a missing script")]
     if unknown is not None:
@@ -743,7 +773,6 @@ def _mise_environments(value: str | None) -> frozenset[str] | None:
     """The environments a ``MISE_ENV`` or ``-E`` value names, None when it is not literal."""
     if value is None:
         return None
-    value = _unquote(value)
     if any(ch in value for ch in "$`*?"):
         return None
     return frozenset(env for env in value.split(",") if env)
@@ -754,7 +783,6 @@ def _is_task_shorthand(word: str) -> bool:
 
 
 def _mise_task(name: str, args: _MiseArgs, text: str) -> CommandMention:
-    name = _unquote(name)
     if "..." in name or _placeholder(name) or any(ch in name for ch in _WILDCARD_CHARS):
         return CommandMention("mise", name, _final_dir(args.directory), text, "skipped", "a wildcard or a placeholder")
     if name.startswith("node:"):
@@ -854,7 +882,9 @@ def _line_mentions(line: str, state: _LineState, *, fence: bool) -> list[Command
             continue
         index, assigned = found
         parse = _PARSERS[command.words[index]]
-        mentions = parse(command.words[index + 1 :], command.cwd, command.text_from(index))
+        # Unquoted once here, as the shell passes them: `'-bb'` is an option.
+        arguments = [_unquote(word) for word in command.words[index + 1 :]]
+        mentions = parse(arguments, command.cwd, command.text_from(index))
         listing = fence and command.words[index] in ("make", "gmake") and len(mentions) > 1
         out.extend(_in_environment(mention, {**state.env, **assigned}, listing) for mention in mentions)
     return out
@@ -871,7 +901,7 @@ def _joined(lines: Sequence[str]) -> Iterator[tuple[int, str]]:
     while index < len(lines):
         start = index
         line = lines[index]
-        while line.endswith("\\") and not line.endswith("\\\\") and index + 1 < len(lines):
+        while _continues(line) and index + 1 < len(lines):
             index += 1
             line = line[:-1].rstrip() + " " + lines[index].lstrip()
         index += 1

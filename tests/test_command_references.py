@@ -249,6 +249,34 @@ CASES = [
         id="trailing-backslash-at-the-end-of-a-fence",
     ),
     pytest.param(
+        {
+            "Makefile": "deploy:\nall:\n",
+            "README.md": '`make MSG="a \\"b\\" c" deploy` `make CFLAGS="-DX=\\"1\\"" all`\n',
+        },
+        [("README.md", 'make CFLAGS="-DX=\\"1\\"" all', "ok"), ("README.md", 'make MSG="a \\"b\\" c" deploy', "ok")],
+        id="N1-escaped-quote-inside-double-quotes",
+    ),
+    pytest.param(
+        {
+            "mise.toml": 'monorepo_root = true\n[monorepo]\nconfig_roots = ["backend", "frontend"]\n',
+            "backend/mise.toml": _task("test"),
+            "backend/sub/mise.toml": _task("subt"),
+            "frontend/mise.toml": _task("build"),
+            "libs/x/mise.toml": _task("xt"),
+            "README.md": "`cd backend && mise run backend:test` `cd backend && mise run frontend:build`\n",
+            "backend/sub/NOTES.md": "`mise run //backend/sub:subt` `mise run backend:test`\n",
+            "libs/x/NOTES.md": "`mise run //libs/x:xt`\n",
+        },
+        [
+            ("README.md", "mise run backend:test", "ok"),
+            ("README.md", "mise run frontend:build", "missing"),
+            ("backend/sub/NOTES.md", "mise run //backend/sub:subt", "ok"),
+            ("backend/sub/NOTES.md", "mise run backend:test", "ok"),
+            ("libs/x/NOTES.md", "mise run //libs/x:xt", "ok"),
+        ],
+        id="N2-N3-names-from-inside-a-project",
+    ),
+    pytest.param(
         {"Makefile": "test:\n", "README.md": "`make te\"st\"` `make 'te'st`\n"},
         [("README.md", "make 'te'st", "ok"), ("README.md", 'make te"st"', "ok")],
         id="quote-concatenation",
@@ -343,6 +371,16 @@ def test_a_mise_file_that_cannot_be_settled_says_why(tmp_path: Path, files: Mapp
             "`make nope`",
             "Makefile has variables too large to expand, so its targets are not all known",
             id="exponential-make-variables",
+        ),
+        pytest.param(
+            {
+                "Makefile": "A0 :=\n"
+                + "".join(f"A{i} = " + f"$(A{i - 1})" * 8 + "\n" for i in range(1, 13))
+                + "$(A12)y:\n",
+            },
+            "`make nope`",
+            "Makefile has variables too large to expand, so its targets are not all known",
+            id="N5-exponential-empty-make-variables",
         ),
         pytest.param(
             {"mise.toml": _task("build", "test")},

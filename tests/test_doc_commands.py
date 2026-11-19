@@ -321,7 +321,7 @@ def test_variables_a_make_command_sets(text: str, overrides: set[str], verdict: 
         ("npm run --loglevel warn build", "unchecked"),
         ("npm run --loglevel=warn build", "unchecked"),
         ("npm --silent run build", "check"),
-        ("npm run build --loglevel warn", "unchecked"),
+        ("npm run build --loglevel warn", "check"),
         ("pnpm run --reporter silent build", "unchecked"),
         ("pnpm --workspace-concurrency 2 run build", "unchecked"),
         ("pnpm run build --filter web", "unchecked"),
@@ -375,6 +375,80 @@ def test_npm_reads_C_as_prefix(text: str, directory: str) -> None:
 )
 def test_quoted_segments_join_as_the_shell_joins_them(text: str, name: str) -> None:
     assert [m.name for m in command_mentions(text)] == [name]
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        ('make MSG="a \\"b\\" c" deploy', ["deploy"]),
+        ('make CFLAGS="-DX=\\"1\\"" all', ["all"]),
+        ("make X='a\\' all", ["all"]),
+    ],
+)
+def test_a_backslash_escapes_a_quote_inside_double_quotes_only(text: str, names: list[str]) -> None:
+    assert [m.name for m in command_mentions(text)] == names
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [("make a\\", ["a"]), ("make a\\\\", ["a\\"]), ("make a\\\\\\", ["a\\"])],
+)
+def test_a_trailing_backslash_run_is_read_by_its_parity(text: str, names: list[str]) -> None:
+    assert [m.name for m in command_mentions(text)] == names
+
+
+def test_a_quoted_dash_is_still_an_option() -> None:
+    assert command_mentions("make '-bb'") == []
+    assert [m.name for m in command_mentions("make '-s' lint")] == ["lint"]
+
+
+@pytest.mark.parametrize(
+    ("text", "directory", "verdict"),
+    [
+        ("npm run build -sC web", "web", "check"),
+        ("npm -sC web run build", "web", "check"),
+        ("npm run build -Cs web", None, "unchecked"),
+    ],
+)
+def test_a_short_flag_bundle_with_C_names_the_prefix(text: str, directory: str | None, verdict: str) -> None:
+    assert [(m.directory, m.verdict) for m in command_mentions(text)] == [(directory, verdict)]
+
+
+@pytest.mark.parametrize(
+    ("text", "verdict", "reason"),
+    [
+        ("npm test --coverage", "check", None),
+        ("npm run lint --fix", "check", None),
+        (
+            "npm run x --if-pres",
+            "unchecked",
+            "--if-pres may abbreviate an npm option that changes which script runs or whether a missing one fails",
+        ),
+        (
+            "npm run x --ws",
+            "unchecked",
+            "--ws may abbreviate an npm option that changes which script runs or whether a missing one fails",
+        ),
+        (
+            "npm run x --pre",
+            "unchecked",
+            "--pre may abbreviate an npm option that changes which script runs or whether a missing one fails",
+        ),
+        (
+            "npm run --loglevel x build",
+            "unchecked",
+            "--loglevel is an option the docs check does not know, so the name after it is not certain",
+        ),
+        ("pnpm run build --foo", "check", None),
+        (
+            "pnpm --foo run build",
+            "unchecked",
+            "--foo is an option the docs check does not know, so the name after it is not certain",
+        ),
+    ],
+)
+def test_long_options_before_and_after_the_name(text: str, verdict: str, reason: str | None) -> None:
+    assert [(m.verdict, m.reason) for m in command_mentions(text)] == [(verdict, reason)]
 
 
 def test_a_backslash_at_the_end_of_the_input_is_dropped() -> None:
