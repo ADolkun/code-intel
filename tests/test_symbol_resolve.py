@@ -17,7 +17,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from fixture_repo import FULL_CONFIG, MINIMAL_CONFIG, git_init, write
+from fixture_repo import (
+    BACKEND_ONLY_CONFIG,
+    DOCS_ONLY_CONFIG,
+    FRONTEND_ONLY_CONFIG,
+    FULL_CONFIG,
+    MINIMAL_CONFIG,
+    git_init,
+    write,
+)
 
 from stack_intel import cli, code_paths, symbol_resolve, ts_bridge, ts_facts
 from stack_intel.config import parse_config
@@ -2247,3 +2255,54 @@ def test_generated_output_directly_under_frontend_is_skipped(typescript_toolchai
     index = _index(tmp_path, ts_facts.FactsCache(tmp_path, lambda: typescript_toolchain), LAYOUT)
     result = index.resolve("Built", side="both")
     assert sorted(c.file for c in result.candidates) == ["backend/coverage/__init__.py", "frontend/app/build/page.tsx"]
+
+
+# ── Partial configs ──────────────────────────────────────────────────────
+
+
+def _partial_repo(root: Path, config: str) -> Path:
+    git_init(root)
+    write(root / ".stack-intel" / "config.toml", config)
+    write(root / "backend" / "service_backend" / "items.py", "def list_items():\n    return []\n")
+    return root
+
+
+def test_a_layout_root_of_none_has_no_symbols(tmp_path: Path) -> None:
+    root = _partial_repo(tmp_path, DOCS_ONLY_CONFIG)
+    probes: list[int] = []
+
+    def toolchain() -> ts_bridge.Toolchain:
+        probes.append(1)
+        return _unavailable_toolchain()
+
+    layout = symbol_resolve.SymbolLayout.from_config(parse_config(DOCS_ONLY_CONFIG))
+    assert (layout.backend_root, layout.frontend_root, layout.secondary_prefixes) == (None, None, ())
+    index = symbol_resolve.SymbolIndex(root, ts_facts.FactsCache(root, toolchain), layout)
+    assert (index.python_symbols([]), index.typescript_decls([])) == ([], [])
+    assert probes == []
+
+
+def test_cli_both_sides_search_the_configured_one(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _partial_repo(tmp_path, BACKEND_ONLY_CONFIG)
+    assert cli.main(["dump", "symbols", "list_items", "--json", "--repo-root", str(root)]) == 0
+    body = json.loads(capsys.readouterr().out)
+    assert [c["file"] for c in body["candidates"]] == ["backend/service_backend/items.py"]
+    assert body["complete"] is True
+    assert [lim["kind"] for lim in body["analysis_limitations"]] == ["not_configured"]
+
+
+@pytest.mark.parametrize(
+    ("config", "args", "table"),
+    [
+        (BACKEND_ONLY_CONFIG, ["X", "--side", "frontend"], "[frontend] table"),
+        (BACKEND_ONLY_CONFIG, ["--dump-ts"], "[frontend] table"),
+        (FRONTEND_ONLY_CONFIG, ["--dump-py"], "[backend] table"),
+        (DOCS_ONLY_CONFIG, ["X"], "[backend] and [frontend] tables"),
+    ],
+)
+def test_cli_an_unconfigured_side_exits_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], config: str, args: list[str], table: str
+) -> None:
+    root = _partial_repo(tmp_path, config)
+    assert cli.main(["dump", "symbols", *args, "--repo-root", str(root)]) == 2
+    assert capsys.readouterr().err.startswith(f"stack-intel: dump symbols needs the {table}, ")

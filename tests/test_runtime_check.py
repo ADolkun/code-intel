@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fixture_repo import hermetic_git
+from fixture_repo import FRONTEND_ONLY_CONFIG, hermetic_git
 from test_verify import MAIN, checkout, git
 
 from stack_intel import cli, runner, runtime_check
@@ -527,3 +527,15 @@ def test_the_app_is_imported_with_a_clean_environment(repo: Path, monkeypatch: p
     code, out, _ = run_cli(repo)
     assert code == 1
     assert "2 runtime routes, 3 analyzed" in out and "  ! GET /ambient" in out
+
+
+def test_without_a_backend_table_there_is_no_app_to_compare(tmp_path: Path) -> None:
+    (tmp_path / ".stack-intel").mkdir()
+    (tmp_path / ".stack-intel" / "config.toml").write_text(FRONTEND_ONLY_CONFIG, encoding="utf-8")
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = cli.main(["runtime-check", "--repo-root", str(tmp_path), "--python", sys.executable])
+    assert (code, out.getvalue()) == (2, "")
+    assert err.getvalue() == (
+        "runtime-check: .stack-intel/config.toml has no [backend] table; there is no app to compare\n"
+    )

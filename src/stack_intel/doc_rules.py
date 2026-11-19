@@ -23,7 +23,6 @@ from stack_intel.config import (
     CONFIG_REL,
     DOC_CHECKS,
     Config,
-    ConfigError,
     DocIgnore,
     DocRule,
     Reachability,
@@ -67,7 +66,9 @@ class DocRefsConfig:
     resolve itself). ``ignore_lines``: the line of each ignore entry in it.
     ``path_roots``: the directories a doc may write a path relative to, besides
     the repository root and the doc's own directory. ``frontend_root``: where an
-    npm script named without a directory is looked up, besides the repository root.
+    npm script named without a directory is looked up, besides the repository
+    root; None without ``[frontend]``. ``backend_configured``: False without
+    ``[backend]``, so no route mention can fail on the backend's routes.
     """
 
     scope: tuple[str, ...]
@@ -78,21 +79,23 @@ class DocRefsConfig:
     path_roots: tuple[PathRoot, ...] = ()
     ignore_lines: tuple[int, ...] = ()
     path: str = CONFIG_REL
-    frontend_root: str = "."
+    frontend_root: str | None = "."
+    backend_configured: bool = True
 
     @classmethod
     def from_config(cls, config: Config, repo_root: Path) -> DocRefsConfig:
-        """The docs settings of a loaded config. Raises ``ConfigError`` without a ``[docs]`` table."""
+        """The docs settings of a loaded config. Raises ``NotConfigured`` without a ``[docs]`` table."""
         path = rel_posix(config.path, repo_root)
-        docs = config.docs
-        if docs is None:
-            raise ConfigError(path, "missing required table [docs]")
-        package = posixpath.join(config.backend.root, config.backend.package.replace(".", "/"))
-        candidates = (
-            PathRoot(_directory_prefix(config.backend.root), "backend-rel"),
-            PathRoot(_directory_prefix(config.frontend.root), "frontend-rel"),
-            PathRoot(_directory_prefix(package), "pkg-rel"),
-        )
+        docs = config.require_docs()
+        backend, frontend = config.backend, config.frontend
+        candidates: list[PathRoot] = []
+        if backend is not None:
+            candidates.append(PathRoot(_directory_prefix(backend.root), "backend-rel"))
+        if frontend is not None:
+            candidates.append(PathRoot(_directory_prefix(frontend.root), "frontend-rel"))
+        if backend is not None:
+            package = posixpath.join(backend.root, backend.package.replace(".", "/"))
+            candidates.append(PathRoot(_directory_prefix(package), "pkg-rel"))
         roots = tuple(root for index, root in enumerate(candidates) if root.prefix and root not in candidates[:index])
         try:
             text = config.path.read_text(encoding="utf-8-sig")
@@ -107,7 +110,8 @@ class DocRefsConfig:
             path_roots=roots,
             ignore_lines=tuple(text.count("\n", 0, m.start()) + 1 for m in _IGNORE_HEADER_RE.finditer(text)),
             path=path,
-            frontend_root=posixpath.normpath(config.frontend.root),
+            frontend_root=None if frontend is None else posixpath.normpath(frontend.root),
+            backend_configured=backend is not None,
         )
 
     def in_scope(self, rel: str) -> bool:
