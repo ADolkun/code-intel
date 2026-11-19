@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.metadata
 import importlib.util
 import subprocess
 import sys
@@ -81,11 +82,30 @@ def _available() -> dict[str, tuple[str, str]]:
     }
 
 
+def version_text() -> str:
+    try:
+        return f"stack-intel {importlib.metadata.version('stack-intel')}"
+    except importlib.metadata.PackageNotFoundError:
+        return "stack-intel (version unknown: the stack-intel distribution is not installed)"
+
+
+class _VersionAction(argparse.Action):
+    """``--version``, reading the installed distribution's metadata only when asked."""
+
+    def __init__(self, option_strings: Sequence[str], dest: str, **kwargs: object) -> None:
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS, help="print the version and exit")
+
+    def __call__(self, parser: argparse.ArgumentParser, namespace: object, values: object, option_string=None) -> None:
+        print(version_text())
+        parser.exit()
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--repo-root", type=Path, help="repository to analyze (default: the current git work tree)")
     common.add_argument("--config", type=Path, help="config file (default: <repo-root>/.stack-intel/config.toml)")
     parser = argparse.ArgumentParser(prog="stack-intel", description=__doc__.splitlines()[0])
+    parser.add_argument("--version", action=_VersionAction)
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("config-check", parents=[common], help="validate the config file")
     groups: dict[str, argparse._SubParsersAction] = {}

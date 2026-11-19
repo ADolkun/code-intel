@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.machinery
+import importlib.metadata
 import sys
 import types
 from collections.abc import Callable
@@ -412,6 +413,31 @@ def test_only_commands_with_a_module_are_offered(
     assert caught.value.code == 0
     out = capsys.readouterr().out
     assert "config-check" in out and "ghost" not in out
+
+
+def test_version_prints_the_distribution_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["--version"])
+    assert caught.value.code == 0
+    assert capsys.readouterr().out == f"stack-intel {importlib.metadata.version('stack-intel')}\n"
+
+
+def test_version_without_installed_metadata_says_so(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    real_version = importlib.metadata.version
+
+    def without_stack_intel(name: str) -> str:
+        if name == "stack-intel":
+            raise importlib.metadata.PackageNotFoundError(name)
+        return real_version(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", without_stack_intel)
+    assert cli.build_parser().parse_args(["config-check"]).command == "config-check"
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["--version"])
+    assert caught.value.code == 0
+    assert capsys.readouterr().out == "stack-intel (version unknown: the stack-intel distribution is not installed)\n"
 
 
 def test_a_command_module_gets_its_options_and_the_loaded_context(

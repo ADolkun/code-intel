@@ -1,0 +1,27 @@
+name: Wheel smoke
+description: Install a built stack-intel wheel alone into a clean Python 3.14 venv and run tests/wheel_smoke.py with it. Needs uv on PATH and the repository checked out.
+
+inputs:
+  wheel:
+    description: Path or glob of the wheel to install
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 26
+        package-manager-cache: false
+
+    - name: Install the wheel into a clean venv
+      shell: bash
+      env:
+        WHEEL: ${{ inputs.wheel }}
+      run: |
+        uv venv --python 3.14 "$RUNNER_TEMP/smoke"
+        uv pip install --python "$RUNNER_TEMP/smoke/bin/python" $WHEEL
+
+    - name: Smoke-test the installed wheel
+      shell: bash
+      run: '"$RUNNER_TEMP/smoke/bin/python" tests/wheel_smoke.py'

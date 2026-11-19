@@ -19,7 +19,8 @@ Contents: [Requirements](#requirements) · [Install and launch](#install-and-lau
 
 ## Requirements
 
-- **Python 3.14** and [uv](https://docs.astral.sh/uv/). The backend analysis parses the analyzed code with the running interpreter, so it must be at least the version the backend declares (`backend.python_version_file`); see [Old interpreter](#old-interpreter). The package depends on `mcp` (>=2.3, <3), `markdown-it-py` (==4.2.0) and `PyYAML`; `uv` installs them.
+- **macOS or Linux.** Windows is not supported.
+- **Python 3.14** and [uv](https://docs.astral.sh/uv/). The backend analysis parses the analyzed code with the running interpreter, so it must be at least the version the backend declares (`backend.python_version_file`); see [Old interpreter](#old-interpreter). The package depends on `mcp`, `markdown-it-py` and `PyYAML`; `uv` installs them.
 - **git** on `PATH`. Whether a path exists is decided by git (tracked, or untracked and not ignored), never by the filesystem, so a local checkout full of generated or ignored files answers like a clean CI checkout. Every walk (backend, frontend, symbols, docs) is limited to the same git-visible files. A git failure is reported by name; there is no filesystem fallback.
 - **Node.js 18 or newer** on `PATH` (or named by `STACK_INTEL_NODE`, a path or a command name) for the frontend analysis. MCP clients started from a GUI often lack the version manager's `PATH`, so set `STACK_INTEL_NODE` in the server entry's `env`. A relative `STACK_INTEL_NODE` containing a directory separator resolves against the repository root.
 - **TypeScript 7.1 or newer** for the frontend analysis, installed once per machine, on first use or by [`stack-intel setup`](#install-and-launch), into a user cache shared by every checkout and repository. The helper has its own pinned copy (`7.1.0-beta`, in the package's `ts/package.json` and lockfile) because it calls the compiler's JavaScript API, which TypeScript 7.0 does not export: 7.1 adds it at stable paths (`typescript/sync`, `typescript/ast`). When 7.1 is released, the pin becomes a version bump. `STACK_INTEL_TYPESCRIPT_DIR` names another TypeScript package directory instead (a relative value resolves against the repository root). A TypeScript older than 7.1 is refused with a `typescript_unsupported` problem that names the fix.
@@ -35,13 +36,24 @@ A config without `[frontend]` never needs Node or TypeScript: nothing probes or 
 
 ## Install and launch
 
-A repository pins the tool by commit in one file, `.stack-intel/requirements.txt`:
+The package is `stack-intel` on PyPI. To try it, or to use it across repositories:
+
+```sh
+uv tool install stack-intel             # the stack-intel command, on PATH
+uvx stack-intel@<version> <command>     # one run, nothing installed
+```
+
+A repository that uses it pins the version in one file, `.stack-intel/requirements.txt`, so every caller runs the same release:
 
 ```
-stack-intel @ git+https://github.com/ADolkun/stack-intel@<full commit sha>  # v0.2.2
+stack-intel==0.3.0
 ```
 
-A full SHA is immutable, so `uv` serves later launches from its cache without fetching. Every caller (the MCP client, CI, a git hook) uses the same launcher from the repository root:
+A commit not yet released is pinned by its full SHA instead: `stack-intel @ git+https://github.com/ADolkun/stack-intel@<full commit sha>`. A full SHA is immutable, so `uv` serves later launches from its cache without fetching.
+
+Hashes in this file would give no protection: `uv run --with-requirements` installs from it without verifying `--hash` lines (checked with uv 0.13.9).
+
+Every caller (the MCP client, CI, a git hook) uses the same launcher from the repository root:
 
 ```sh
 uv run --no-project --python 3.14 --with-requirements .stack-intel/requirements.txt stack-intel <command>
@@ -993,12 +1005,17 @@ The tests compare the analyzers with the tools they model instead of with hand-w
 
 ```sh
 uv sync
+uv run zizmor --quiet .github
 uv run ruff check && uv run ruff format --check
 uv run pyrefly check
 git ls-files '*.cjs' | xargs -n1 node --check
 uv run stack-intel setup
-STACK_INTEL_REQUIRE_TOOLCHAIN=1 uv run pytest -n auto
+STACK_INTEL_REQUIRE_TOOLCHAIN=1 uv run pytest -n auto --dist worksteal
 ```
+
+CI runs these on every pull request: `lint` (zizmor, ruff, pyrefly and the JavaScript syntax check), `test` on Ubuntu and macOS, and `wheel`, which builds the sdist and the wheel from it (`uv build --no-sources`) and runs `tests/wheel_smoke.py` against the wheel installed alone in a clean venv. `tests/wheel_smoke.py` is not a pytest file: it checks the installed package's assets, `--version`, `setup`, `config-check`, `doc-check` (clean, then failing on a renamed route) and the MCP server's tool list and `status` on a fixture repository. A weekly workflow runs the suite against the `beta`, `rc` and `next` TypeScript builds (7.1 or newer) through `STACK_INTEL_TYPESCRIPT_DIR`.
+
+Releases: `release.yml` builds once, smoke-tests the wheel on Ubuntu and macOS, and publishes with PyPI trusted publishing and attestations: to TestPyPI when dispatched by hand, to PyPI on a `v*` tag that equals the project version (`uv version --short`). Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 The dependency groups `fastapi-live` (default) and `fastapi-copy` select the FastAPI the oracle tests run against; install one at a time: `uv sync --no-default-groups --group dev --group fastapi-copy`. The tests turn the automatic install off (`STACK_INTEL_NO_AUTO_SETUP=1`), so run `stack-intel setup` first. Tests that need Node, TypeScript, git or FastAPI skip when they are missing; `STACK_INTEL_REQUIRE_TOOLCHAIN=1` (set in CI) turns those skips into failures. The code has no type-check suppressions; keep it that way.
 
