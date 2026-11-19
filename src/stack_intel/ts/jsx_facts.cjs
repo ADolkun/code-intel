@@ -36,9 +36,10 @@ function isNamableFunction(ts, node) {
   return ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node);
 }
 
-// The README parent rule: the innermost named function whose span, from its
-// parameter list to its end, holds the element. `named` is the stack of named
-// function ancestors as [name, parameter-list position].
+// The parent rule (docs/analysis.md, "Parent rule"): the innermost named
+// function whose span, from its parameter list to its end, holds the element.
+// `named` is the stack of named function ancestors as [name, parameter-list
+// position].
 function parentName(named, pos) {
   for (let i = named.length - 1; i >= 0; i -= 1) {
     if (named[i][1] <= pos) return named[i][0];

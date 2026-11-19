@@ -6,7 +6,7 @@ a ranking score for each candidate.
 - **TypeScript/JavaScript** (the configured ``frontend.root``, every TS and JS suffix): declarations
   come from the TypeScript compiler through the helper's ``facts`` mode, cached
   per file by ``ts_facts.FactsCache``. Kinds, scopes and the component rule are
-  documented in README "Symbols".
+  documented in docs/analysis.md, "Symbols".
 - **Python** (the configured ``backend.root``): module-level definitions (including bodies of
   ``if``/``try``/``with``/``for``/``while``/``match`` and module-level loop and
   walrus targets), class members, and functions and classes nested in functions.
@@ -180,7 +180,7 @@ _CONTROL_FLOW: tuple[type, ...] = (
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _INIT_METHODS = frozenset({"__init__", "__post_init__"})
 
-# Ranking (README "Symbols"): where a file lives, then how deep the definition sits.
+# Ranking (docs/analysis.md, "Symbols"): where a file lives, then how deep the definition sits.
 _SCOPE_PENALTY = {"object": 0.2, "local": 0.1, "class": 0.1}
 _TEST_PENALTY = 0.3
 _SCOPE_RANK = {scope: rank for rank, scope in enumerate(SCOPES)}

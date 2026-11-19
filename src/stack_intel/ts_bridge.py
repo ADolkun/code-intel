@@ -51,7 +51,9 @@ NODE_FIX = f"install Node.js {MIN_NODE_MAJOR} or newer and put node on PATH, or 
 NODE_ENV_FIX = f"set {NODE_ENV} to the path of a Node.js {MIN_NODE_MAJOR}+ binary, or unset it to use node from PATH"
 PROVISIONING_MESSAGE = "TypeScript is not installed yet; it is being installed in the background (one-time, first use)"
 PROVISIONING_FIX = "retry in a minute: the frontend answers once the install finishes"
-HELPER_FIX = "run the helper by hand (see README, Commands) to see the full error"
+HELPER_FIX = (
+    'run the helper by hand (see docs/commands.md, "Running the TypeScript helper by hand") to see the full error'
+)
 
 ProblemCode = Literal[
     "node_not_found",

@@ -3,13 +3,13 @@
 //
 //   node decl_oracle.cjs <typescript_dir> <frontend_root> <out.json> [repo_root]
 //
-// Applies the declaration rules of the symbol index (README "Symbols") with its
-// own tree walk, so compare_facts.py can diff the helper's `decls` against it.
-// Rows: {file, name, kind, line, end_line, column, scope, container, exported,
-// is_test, form}. Lines break only at \r\n, \r and \n, as editors and rg count
-// them. `form` names the syntactic source (function_decl, var,
-// destructure, object_property, class_method, ...) for count breakdowns and is
-// not compared. `repo_root` defaults to the parent of frontend_root.
+// Applies the declaration rules of the symbol index (docs/analysis.md,
+// "Symbols") with its own tree walk, so compare_facts.py can diff the helper's
+// `decls` against it. Rows: {file, name, kind, line, end_line, column, scope,
+// container, exported, is_test, form}. Lines break only at \r\n, \r and \n, as
+// editors and rg count them. `form` names the syntactic source (function_decl,
+// var, destructure, object_property, class_method, ...) for count breakdowns
+// and is not compared. `repo_root` defaults to the parent of frontend_root.
 
 const fs = require("fs");
 const path = require("path");

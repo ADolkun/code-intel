@@ -1,0 +1,78 @@
+[docs]
+scope = ["README.md", "CHANGELOG.md", "docs/**/*.md"]
+
+[docs.reachability]
+root = "docs/README.md"
+include = ["docs/**/*.md"]
+exclude = []
+
+[[docs.rules]]
+paths = ["docs/docs-check.md"]
+checks = ["links", "routes", "symbols", "commands"]
+reason = "The page describes the docs check on an analyzed repository: its paths are the conventional agent-file locations, example globs and sample output the check reads there, not this repository's files."
+
+[[docs.ignore]]
+file = "README.md"
+kind = "path"
+text = ".stack-intel/requirements.txt"
+reason = "Names the version pin an analyzed repository keeps; this repository does not launch stack-intel through a pin."
+
+[[docs.ignore]]
+file = "docs/install.md"
+kind = "path"
+text = ".stack-intel/requirements.txt"
+reason = "Names the version pin an analyzed repository keeps; this repository does not launch stack-intel through a pin."
+
+[[docs.ignore]]
+file = "docs/analysis.md"
+kind = "path"
+text = ".stack-intel/requirements.txt"
+reason = "Names the version pin an analyzed repository keeps; this repository does not launch stack-intel through a pin."
+
+[[docs.ignore]]
+file = "docs/analysis.md"
+kind = "path"
+text = ".stack-intel/library-capture.json"
+reason = "Names the library capture file an analyzed repository commits; this repository has no backend to capture."
+
+[[docs.ignore]]
+file = "docs/commands.md"
+kind = "path"
+text = ".stack-intel/library-capture.json"
+reason = "Names the library capture file an analyzed repository commits; this repository has no backend to capture."
+
+[[docs.ignore]]
+file = "docs/configuration.md"
+kind = "path"
+text = ".stack-intel/library-capture.json"
+reason = "Names the library capture file an analyzed repository commits; this repository has no backend to capture."
+
+[[docs.ignore]]
+file = "docs/analysis.md"
+kind = "symbol"
+text = "get_app()"
+reason = "Names a function of an installed library, as an example of a library that adds routes; it is not code of this repository."
+
+[[docs.ignore]]
+file = "docs/configuration.md"
+kind = "path"
+text = "docs/imported.md"
+reason = "The full config example names an example repository's docs."
+
+[[docs.ignore]]
+file = "docs/configuration.md"
+kind = "path"
+text = "docs/guide.md"
+reason = "The full config example names an example repository's docs."
+
+[[docs.ignore]]
+file = "docs/configuration.md"
+kind = "path"
+text = ".github/skills"
+reason = "Names a conventional Agent Skills root of an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/tools.md"
+kind = "path"
+text = "docs/items.md:5"
+reason = "Sample doc_refs output from an example repository."

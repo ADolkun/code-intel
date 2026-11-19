@@ -51,6 +51,8 @@ jobs:
 
       - run: uv run --no-sync pyrefly check
 
+      - run: uv run --no-sync stack-intel doc-check
+
       # `xargs -r` is GNU-only, which keeps this job on Linux.
       - name: Syntax-check the JavaScript
         run: git ls-files '*.cjs' | xargs -r -n1 node --check
@@ -104,6 +106,11 @@ jobs:
 
       # Builds the sdist, then the wheel from it: a complete wheel proves the sdist complete.
       - run: uv build --no-sources
+
+      # PyPI renders README.md as the long description; --strict fails on any rendering warning.
+      - name: Check the distributions' metadata
+        if: runner.os == 'Linux'
+        run: uv run --locked --only-group dev twine check --strict dist/*
 
       - uses: $/.github/actions/wheel-smoke
         with:

@@ -119,9 +119,10 @@ function wellFormed(s) {
   return s.replace(LONE_SURROGATE_RE, "\uFFFD");
 }
 
-// The README parent rule: a function declaration or expression with a name,
-// or an arrow/function expression that initializes a variable directly or as
-// a direct call argument (through transparent wrappers).
+// The parent rule (docs/analysis.md, "Parent rule"): a function declaration
+// or expression with a name, or an arrow/function expression that
+// initializes a variable directly or as a direct call argument (through
+// transparent wrappers).
 function readmeFunctionName(ts, fn) {
   if ((ts.isFunctionDeclaration(fn) || ts.isFunctionExpression(fn)) && fn.name) return fn.name.text;
   if (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) {
@@ -145,7 +146,7 @@ function readmeFunctionName(ts, fn) {
   return undefined;
 }
 
-// The README rule, then method/accessor name, property-assignment name,
+// The parent rule, then method/accessor name, property-assignment name,
 // class-field name, assignment target or "default" for `export default`.
 function callerName(ts, fn) {
   const readme = readmeFunctionName(ts, fn);
