@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.metadata
 import importlib.util
 import subprocess
 import sys
@@ -86,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--repo-root", type=Path, help="repository to analyze (default: the current git work tree)")
     common.add_argument("--config", type=Path, help="config file (default: <repo-root>/.stack-intel/config.toml)")
     parser = argparse.ArgumentParser(prog="stack-intel", description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--version", action="version", version=f"stack-intel {importlib.metadata.version('stack-intel')}"
+    )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("config-check", parents=[common], help="validate the config file")
     groups: dict[str, argparse._SubParsersAction] = {}
