@@ -26,9 +26,9 @@ from mcp_fixtures import (
     use,
 )
 
-from code_intel import doc_presenters, doc_queries, presenters, problems, queries
-from code_intel.analysis_runtime import StatusSnapshot
-from code_intel.protocol_match import ProtocolMatch
+from stack_intel import doc_presenters, doc_queries, presenters, problems, queries
+from stack_intel.analysis_runtime import StatusSnapshot
+from stack_intel.protocol_match import ProtocolMatch
 
 README = Path(__file__).resolve().parent.parent / "README.md"
 
@@ -95,7 +95,7 @@ def test_envelope_rejects_an_unknown_format() -> None:
         presenters.envelope(presenters.Body("B", {}), "xml", stale=False)
 
 
-_UNCONFIRMED = [{"file": "src/code_intel/queries.py", "reason": "modified within 2 s of the server loading it"}]
+_UNCONFIRMED = [{"file": "src/stack_intel/queries.py", "reason": "modified within 2 s of the server loading it"}]
 
 
 @pytest.mark.parametrize("body", [presenters.Body("BODY", {}), presenters.error_body("invalid_root", "BODY", root="x")])
@@ -105,7 +105,7 @@ def test_envelope_reports_unconfirmed_code_as_unknown_not_stale(body: presenters
     text = presenters.envelope(body, "text", stale=False, unconfirmed=_UNCONFIRMED)
     assert text == (
         "⚠ Cannot confirm that the analyzer code this server loaded matches the files on disk; restart the "
-        "code-intel MCP server in your client to be sure. Unconfirmed: src/code_intel/queries.py (modified within "
+        "stack-intel MCP server in your client to be sure. Unconfirmed: src/stack_intel/queries.py (modified within "
         "2 s of the server loading it).\n\nBODY"
     )
     assert presenters.STALE_CODE_WARNING not in text
@@ -124,9 +124,9 @@ def test_envelope_a_confirmed_change_outranks_unconfirmed_files() -> None:
 
 def test_stale_warning_is_client_neutral() -> None:
     """The restart advice names no client command."""
-    assert "restart the code-intel MCP server in your client" in presenters.STALE_CODE_WARNING
+    assert "restart the stack-intel MCP server in your client" in presenters.STALE_CODE_WARNING
     assert "/mcp" not in presenters.STALE_CODE_WARNING
-    assert "restart the code-intel MCP server in your client" in presenters.UNCONFIRMED_CODE_WARNING
+    assert "restart the stack-intel MCP server in your client" in presenters.UNCONFIRMED_CODE_WARNING
     assert "/mcp" not in presenters.UNCONFIRMED_CODE_WARNING
 
 
@@ -452,7 +452,7 @@ def test_symbol_text_reports_a_missing_frontend() -> None:
 def _snapshot(**overrides) -> StatusSnapshot:
     base = dict(
         repo_root="/repo",
-        tool_dir="/repo/src/code_intel",
+        tool_dir="/repo/src/stack_intel",
         git_sha="abc",
         complete=None,
         code_stale=False,
@@ -520,14 +520,14 @@ def test_status_text_toolchain_lines() -> None:
         "code": "typescript_not_found",
         "message": "ts-cache/node_modules/typescript/package.json not found",
         "missing": "ts-cache/node_modules/typescript/package.json",
-        "fix": 'run "code-intel setup" (or set CODE_INTEL_TYPESCRIPT_DIR)',
+        "fix": 'run "stack-intel setup" (or set STACK_INTEL_TYPESCRIPT_DIR)',
     }
     down = presenters.status(
         _snapshot(toolchain={**_snapshot().toolchain, "state": "unavailable", "problem": problem})
     ).text
     assert (
         "  Frontend toolchain: unavailable: ts-cache/node_modules/typescript/package.json not found. "
-        'Fix: run "code-intel setup" (or set CODE_INTEL_TYPESCRIPT_DIR). DI tools are unaffected; '
+        'Fix: run "stack-intel setup" (or set STACK_INTEL_TYPESCRIPT_DIR). DI tools are unaffected; '
         "JSX usage, frontend symbols and route matching need it."
     ) in down
 
@@ -602,7 +602,7 @@ def test_readme_documents_every_registered_problem_kind() -> None:
 
 
 def test_readme_documents_every_error_code() -> None:
-    from code_intel.result_types import ERROR_FIELDS
+    from stack_intel.result_types import ERROR_FIELDS
 
     text = README.read_text(encoding="utf-8")
     assert [code for code in ERROR_FIELDS if f"`{code}`" not in text] == []
@@ -1003,24 +1003,24 @@ def test_dependency_targets_show_the_binding_a_capture_filled_and_the_dist_of_a_
 
 def test_status_text_names_the_library_capture_its_applied_counts_and_why_it_is_stale() -> None:
     block = {
-        "file": ".code-intel/library-capture.json",
+        "file": ".stack-intel/library-capture.json",
         "present": True,
         "app": "app.main:app",
         "distributions": {"fastapi": "0.162.0", "fastapi-users": "15.0.5"},
         "entries": {"includes": 3, "routes": 8, "dependencies": 3},
-        "applied": {"file": ".code-intel/library-capture.json", "includes": 3, "routes": 8, "dependencies": 2},
+        "applied": {"file": ".stack-intel/library-capture.json", "includes": 3, "routes": 8, "dependencies": 2},
         "problems": [],
         "stale": ["fastapi-users was captured at 15.0.4"],
     }
     text = presenters.status(_snapshot(library_capture=block)).text
     assert (
-        "  Library capture: .code-intel/library-capture.json: 3 includes (8 routes), 2 dependencies applied; "
-        "fastapi 0.162.0, fastapi-users 15.0.5; stale: 1 (run code-intel capture)"
+        "  Library capture: .stack-intel/library-capture.json: 3 includes (8 routes), 2 dependencies applied; "
+        "fastapi 0.162.0, fastapi-users 15.0.5; stale: 1 (run stack-intel capture)"
     ) in text
     unbuilt = presenters.status(_snapshot(library_capture={**block, "applied": None, "stale": []})).text
     assert ": 3 includes (8 routes), 3 dependencies; fastapi 0.162.0" in unbuilt and "stale" not in unbuilt
     missing = presenters.status(_snapshot(library_capture={**block, "present": False})).text
-    assert "does not exist; run code-intel capture" in missing
+    assert "does not exist; run stack-intel capture" in missing
     payload = presenters.status(_snapshot(library_capture=block)).payload
     assert payload["library_capture"] == block
     assert "Library capture" not in presenters.status(_snapshot()).text

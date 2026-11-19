@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from code_intel import code_paths
-from code_intel import markdown_facts as mf
+from stack_intel import code_paths
+from stack_intel import markdown_facts as mf
 
 
 def facts(text: str) -> mf.DocFacts:
@@ -317,7 +317,7 @@ def test_each_thread_parses_with_its_own_parser() -> None:
 
 def test_importing_fills_the_url_lookup_lists_before_any_thread_parses() -> None:
     code = (
-        "import code_intel.markdown_facts; from mdurl import _decode, _encode; "
+        "import stack_intel.markdown_facts; from mdurl import _decode, _encode; "
         "print(sorted(map(len, [*_encode.encode_cache.values(), *_decode.decode_cache.values()])))"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)

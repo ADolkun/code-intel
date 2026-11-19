@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 from fixture_repo import FULL_CONFIG, MINIMAL_CONFIG, hermetic_git, make_repo
 
-from code_intel import cli, config
-from code_intel.result_types import ClientSpec
+from stack_intel import cli, config
+from stack_intel.result_types import ClientSpec
 
 
 def parse(text: str) -> config.Config:
@@ -154,7 +154,7 @@ def test_the_capture_table_is_optional_and_takes_its_defaults() -> None:
     assert parse(MINIMAL_CONFIG).backend.capture is None
     cfg = parse(MINIMAL_CONFIG + '\n[backend.capture]\npython = "backend/.venv/bin/python"\n')
     assert cfg.backend.capture == config.CaptureConfig(
-        "backend/.venv/bin/python", ".code-intel/library-capture.json", ()
+        "backend/.venv/bin/python", ".stack-intel/library-capture.json", ()
     )
 
 
@@ -276,7 +276,7 @@ def test_invalid_toml_names_the_file() -> None:
 def test_load_config_reads_the_default_file_and_an_explicit_one(tmp_path: Path) -> None:
     repo = make_repo(tmp_path / "repo")
     default = config.load_config(repo)
-    assert default.path == (repo / ".code-intel" / "config.toml").resolve()
+    assert default.path == (repo / ".stack-intel" / "config.toml").resolve()
     other = tmp_path / "other.toml"
     other.write_text(MINIMAL_CONFIG, encoding="utf-8")
     explicit = config.load_config(repo, other)
@@ -284,7 +284,7 @@ def test_load_config_reads_the_default_file_and_an_explicit_one(tmp_path: Path) 
 
 
 def test_load_config_names_the_file_it_cannot_read(tmp_path: Path) -> None:
-    with pytest.raises(config.ConfigError, match=r"^\.code-intel/config\.toml: cannot read the config"):
+    with pytest.raises(config.ConfigError, match=r"^\.stack-intel/config\.toml: cannot read the config"):
         config.load_config(tmp_path)
     missing = tmp_path / "nope.toml"
     with pytest.raises(config.ConfigError, match=f"^{missing}: cannot read the config"):
@@ -293,6 +293,22 @@ def test_load_config_names_the_file_it_cannot_read(tmp_path: Path) -> None:
     binary.write_bytes(b"\xff\xfe\x00")
     with pytest.raises(config.ConfigError, match="not UTF-8"):
         config.load_config(tmp_path, binary)
+
+
+def test_load_config_points_a_repository_on_the_old_layout_at_the_rename(tmp_path: Path) -> None:
+    old = tmp_path / ".code-intel" / "config.toml"
+    old.parent.mkdir()
+    old.write_text(MINIMAL_CONFIG, encoding="utf-8")
+    with pytest.raises(config.ConfigError) as caught:
+        config.load_config(tmp_path)
+    assert str(caught.value).startswith(".stack-intel/config.toml: cannot read the config (FileNotFoundError")
+    assert str(caught.value).endswith(
+        "; found .code-intel/config.toml: code-intel was renamed stack-intel in 0.3.0; rename the directory to "
+        ".stack-intel/ and the CODE_INTEL_* environment variables to STACK_INTEL_*"
+    )
+    with pytest.raises(config.ConfigError) as explicit:
+        config.load_config(tmp_path, tmp_path / "nope.toml")
+    assert "found .code-intel" not in str(explicit.value)
 
 
 def test_load_config_error_names_the_file_as_given(tmp_path: Path) -> None:
@@ -309,7 +325,7 @@ def test_load_config_error_names_the_file_as_given(tmp_path: Path) -> None:
 def test_config_check_accepts_a_valid_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     repo = make_repo(tmp_path / "repo")
     assert cli.main(["config-check", "--repo-root", str(repo)]) == 0
-    assert capsys.readouterr().out == f"ok: {(repo / '.code-intel' / 'config.toml').resolve()}\n"
+    assert capsys.readouterr().out == f"ok: {(repo / '.stack-intel' / 'config.toml').resolve()}\n"
 
 
 def test_config_check_takes_an_explicit_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -329,7 +345,7 @@ def test_config_check_rejects_a_bad_config_naming_key_and_file(
     assert cli.main(["config-check", "--repo-root", str(tmp_path), "--config", str(bad)]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == f"code-intel: {bad}: unknown key 'colour' in [frontend]\n"
+    assert captured.err == f"stack-intel: {bad}: unknown key 'colour' in [frontend]\n"
 
 
 def test_config_check_finds_the_repo_root_from_git(
@@ -342,7 +358,7 @@ def test_config_check_finds_the_repo_root_from_git(
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     monkeypatch.chdir(repo / "frontend" / "components")
     assert cli.main(["config-check"]) == 0
-    assert capsys.readouterr().out == f"ok: {(repo / '.code-intel' / 'config.toml').resolve()}\n"
+    assert capsys.readouterr().out == f"ok: {(repo / '.stack-intel' / 'config.toml').resolve()}\n"
 
 
 def test_outside_a_git_work_tree_needs_a_repo_root(
@@ -366,8 +382,8 @@ class _FakeCommand(types.ModuleType):
 
 
 def fake_command(monkeypatch: pytest.MonkeyPatch, name: str, calls: list) -> None:
-    module = _FakeCommand(f"code_intel.{name}")
-    module.__spec__ = importlib.machinery.ModuleSpec(f"code_intel.{name}", None)
+    module = _FakeCommand(f"stack_intel.{name}")
+    module.__spec__ = importlib.machinery.ModuleSpec(f"stack_intel.{name}", None)
     module.add_arguments = lambda parser: parser.add_argument("--flag")
 
     def run(args, context) -> int:
@@ -375,7 +391,7 @@ def fake_command(monkeypatch: pytest.MonkeyPatch, name: str, calls: list) -> Non
         return 7
 
     module.run = run
-    monkeypatch.setitem(sys.modules, f"code_intel.{name}", module)
+    monkeypatch.setitem(sys.modules, f"stack_intel.{name}", module)
 
 
 def test_only_commands_with_a_module_are_offered(

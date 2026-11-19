@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 15
     env:
       UV_LINK_MODE: copy
-      CODE_INTEL_REQUIRE_TOOLCHAIN: "1"
+      STACK_INTEL_REQUIRE_TOOLCHAIN: "1"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,6 +45,6 @@ jobs:
       - name: Syntax-check the JavaScript
         run: git ls-files '*.cjs' | xargs -r -n1 node --check
 
-      - run: uv run code-intel setup
+      - run: uv run stack-intel setup
 
       - run: uv run pytest -n auto

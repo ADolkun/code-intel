@@ -17,7 +17,7 @@ from library_cases import COMPLETE, GAPS, LibraryCase
 from library_fixture import checkout, lock_text
 from test_capture import CAPTURE_FILE, bind_unfilled_dependency, edit_main, run_capture
 
-from code_intel import (
+from stack_intel import (
     di_map,
     library_capture,
     library_view,
@@ -27,10 +27,10 @@ from code_intel import (
     ts_bridge,
     verify,
 )
-from code_intel.analysis_runtime import AnalysisRuntime
-from code_intel.backend_model import CapturedEndpoint
-from code_intel.config import Config, ConfigFile, load_config
-from code_intel.oracles import fastapi_oracle
+from stack_intel.analysis_runtime import AnalysisRuntime
+from stack_intel.backend_model import CapturedEndpoint
+from stack_intel.config import Config, ConfigFile, load_config
+from stack_intel.oracles import fastapi_oracle
 
 pytestmark = pytest.mark.usefixtures("ctime_follows_mtime")
 
@@ -134,8 +134,8 @@ def test_the_library_routers_are_router_nodes_with_the_include_as_their_place(ca
 def test_no_unresolved_include_is_reported_for_a_captured_router_and_the_mixed_one_stays(captured: Path) -> None:
     messages = limitations(di_of(captured), "unresolved_include")
     assert len(messages) == 1 and "make_mixed_router" in messages[0]
-    assert "(the capture could not fill it; code-intel capture prints why)" in messages[0]
-    assert "run code-intel capture" not in messages[0]
+    assert "(the capture could not fill it; stack-intel capture prints why)" in messages[0]
+    assert "run stack-intel capture" not in messages[0]
 
 
 def test_a_gap_the_capture_could_not_fill_says_so_instead_of_asking_for_a_capture(captured: Path) -> None:
@@ -144,10 +144,10 @@ def test_a_gap_the_capture_could_not_fill_says_so_instead_of_asking_for_a_captur
     di = di_of(captured)
     unresolved = limitations(di, "unresolved_dependency")
     assert any(
-        "Depends(mine)" in m and "(the capture could not fill it; code-intel capture prints why)" in m
+        "Depends(mine)" in m and "(the capture could not fill it; stack-intel capture prints why)" in m
         for m in unresolved
     )
-    assert not any("Depends(mine)" in m and "run code-intel capture" in m for m in unresolved)
+    assert not any("Depends(mine)" in m and "run stack-intel capture" in m for m in unresolved)
     assert limitations(di, "library_capture_stale") == []
 
 
@@ -164,14 +164,14 @@ def test_an_include_that_a_condition_guards_is_conditional_like_any_other(captur
 
 
 def test_without_the_capture_table_the_gap_has_no_hint_and_nothing_is_applied(captured: Path) -> None:
-    config = captured / ".code-intel" / "config.toml"
+    config = captured / ".stack-intel" / "config.toml"
     text = config.read_text(encoding="utf-8")
     config.write_text(text[: text.index("[backend.capture]")] + text[text.index("[frontend]") :], encoding="utf-8")
     stage(captured)
     di = di_of(captured)
     assert di["library"] is None
     assert len(limitations(di, "unresolved_include")) == 4
-    assert not any("run code-intel capture" in m for m in limitations(di, "unresolved_include"))
+    assert not any("run stack-intel capture" in m for m in limitations(di, "unresolved_include"))
     assert {r["path"] for r in di["routes"]} == {"/own", "/signed"}
 
 
@@ -179,9 +179,9 @@ def test_without_the_file_every_gap_names_the_missing_capture(repo: Path) -> Non
     di = di_of(repo)
     messages = limitations(di, "unresolved_include")
     assert len(messages) == 4
-    assert all("(not in .code-intel/library-capture.json; run code-intel capture)" in m for m in messages)
+    assert all("(not in .stack-intel/library-capture.json; run stack-intel capture)" in m for m in messages)
     unresolved = limitations(di, "unresolved_dependency")
-    assert unresolved and all("run code-intel capture" in m for m in unresolved)
+    assert unresolved and all("run stack-intel capture" in m for m in unresolved)
     assert limitations(di, "library_capture_stale") == []
 
 
@@ -297,7 +297,7 @@ def test_a_distribution_whose_version_differs_from_the_lock_is_applied_with_a_st
     di = di_of(captured)
     [message] = limitations(di, "library_capture_stale")
     assert "distribution extlib was captured at 1.2.3 but backend/uv.lock locks 1.2.4" in message
-    assert "code-intel capture" in message
+    assert "stack-intel capture" in message
     assert route(di, "GET", "/users/me")["library"] is not None
     assert limitations(di, "unresolved_include") == [m for m in limitations(di, "unresolved_include") if "mixed" in m]
 
@@ -332,7 +332,8 @@ def test_an_include_entry_that_matches_no_unresolved_include_is_reported_and_the
     assert "no unresolved include_router call matches it" in message
     assert not [r for r in di["routes"] if r["path"].startswith("/status")]
     assert any(
-        "make_status_router(None)" in m and "run code-intel capture" in m for m in limitations(di, "unresolved_include")
+        "make_status_router(None)" in m and "run stack-intel capture" in m
+        for m in limitations(di, "unresolved_include")
     )
 
 
@@ -345,7 +346,7 @@ def test_an_include_entry_that_names_a_callable_the_package_lacks_is_not_applied
     assert "it names pkg.deps:get_manager, which the analysis cannot find in the package" in message
     assert not [r for r in di["routes"] if r["path"].startswith("/users")]
     gap = [m for m in limitations(di, "unresolved_include") if "users.get_router" in m]
-    assert gap and "run code-intel capture" not in gap[0]
+    assert gap and "run stack-intel capture" not in gap[0]
 
 
 def test_a_dependency_entry_naming_a_callable_the_package_lacks_is_not_applied(captured: Path) -> None:
@@ -355,10 +356,10 @@ def test_a_dependency_entry_naming_a_callable_the_package_lacks_is_not_applied(c
     di = di_of(captured)
     messages = limitations(di, "library_capture_stale")
     assert any(
-        m.startswith(".code-intel/library-capture.json: dependency pkg.main:current is not applied") for m in messages
+        m.startswith(".stack-intel/library-capture.json: dependency pkg.main:current is not applied") for m in messages
     )
     assert any(
-        "Depends(current)" in m and "run code-intel capture" not in m for m in limitations(di, "unresolved_dependency")
+        "Depends(current)" in m and "run stack-intel capture" not in m for m in limitations(di, "unresolved_dependency")
     )
     assert di["dependency_functions"]["pkg.main:current"]["kind"] == "external"
     assert "runtime_id" not in di["dependency_functions"]["pkg.main:current"]
@@ -409,7 +410,7 @@ def test_a_malformed_file_is_a_parse_failed_diagnostic_on_the_file(captured: Pat
         "read library capture",
         CAPTURE_FILE,
     )
-    assert "is 2; this code-intel reads format 1" in found["message"] and "run code-intel capture" in found["message"]
+    assert "is 2; this stack-intel reads format 1" in found["message"] and "run stack-intel capture" in found["message"]
     assert di["complete"] is False
 
 
@@ -443,7 +444,7 @@ def test_the_view_reads_what_static_checks_can_and_applies_nothing_it_cannot(cap
 
 
 def test_every_stale_limitation_is_registered_with_the_routes_changed_effect() -> None:
-    from code_intel import problems, queries
+    from stack_intel import problems, queries
 
     assert "library_capture_stale" in problems.LIMITATION_KINDS
     assert queries.BACKEND_ROUTE_GAPS["library_capture_stale"] == frozenset({queries.ROUTES_CHANGED})
@@ -658,7 +659,7 @@ def test_status_lists_the_stale_findings_of_the_loaded_analysis(verified: Path) 
 
 
 def test_status_has_no_capture_block_without_the_table(verified: Path) -> None:
-    config = verified / ".code-intel" / "config.toml"
+    config = verified / ".stack-intel" / "config.toml"
     text = config.read_text(encoding="utf-8")
     config.write_text(text[: text.index("[backend.capture]")] + text[text.index("[frontend]") :], encoding="utf-8")
     stage(verified)

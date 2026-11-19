@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from code_intel import ts_bridge
+from stack_intel import ts_bridge
 
 
 def _write(path: Path, text: str = "x\n") -> Path:
@@ -28,7 +28,7 @@ def _env(tmp_path: Path, extra: Mapping[str, str] | None = None) -> dict[str, st
 
 
 def _cached_typescript(tmp_path: Path) -> Path:
-    """Where ``code-intel setup`` would have put the helper's TypeScript."""
+    """Where ``stack-intel setup`` would have put the helper's TypeScript."""
     return ts_bridge.install_dir(_env(tmp_path)) / "node_modules" / "typescript"
 
 
@@ -165,9 +165,9 @@ def test_typescript_7_1_and_newer_is_supported(tmp_path: Path, version: str) -> 
 def test_a_missing_typescript_install_says_to_run_setup(tmp_path: Path) -> None:
     repo = _fake_repo(tmp_path, ts_version=None)
     problem = ts_bridge.find_toolchain(repo, env=_env(tmp_path), which=_which(), run=_fake_run()).problem
-    assert problem is not None and problem.fix.startswith('run "code-intel setup"')
+    assert problem is not None and problem.fix.startswith('run "stack-intel setup"')
     incomplete = ts_bridge.Toolchain("/usr/bin/node", "v24.0.0", None, None, None, None, None, ())
-    assert 'run "code-intel setup"' in ts_bridge.incomplete_toolchain_problem(incomplete).fix
+    assert 'run "stack-intel setup"' in ts_bridge.incomplete_toolchain_problem(incomplete).fix
 
 
 def test_the_frontend_root_problem_names_the_configured_directory(tmp_path: Path) -> None:
@@ -704,7 +704,7 @@ def test_common_helpers(typescript_toolchain, tmp_path: Path) -> None:
 
 
 def test_typescript_dir_env_override_runs_the_helper(typescript_toolchain, tmp_path: Path) -> None:
-    """CODE_INTEL_TYPESCRIPT_DIR pointing at a TypeScript package is enough to run the helper."""
+    """STACK_INTEL_TYPESCRIPT_DIR pointing at a TypeScript package is enough to run the helper."""
     assert typescript_toolchain.typescript_dir is not None
     repo = _fake_repo(tmp_path, ts_version=None)
     tc = ts_bridge.find_toolchain(

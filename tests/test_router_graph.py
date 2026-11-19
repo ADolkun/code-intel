@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from code_intel import include_model, router_bases, router_graph
-from code_intel.backend_model import Located, Unknown
-from code_intel.oracles.fastapi_cases import CASES
-from code_intel.router_graph import BackendBuilder, build_backend_model
+from stack_intel import include_model, router_bases, router_graph
+from stack_intel.backend_model import Located, Unknown
+from stack_intel.oracles.fastapi_cases import CASES
+from stack_intel.router_graph import BackendBuilder, build_backend_model
 
 MAIN = "pkg.main:app"
 
@@ -1380,7 +1380,7 @@ def test_calls_past_the_budget_cost_no_more_than_the_ones_within_it(tmp_path: Pa
 
 
 def test_a_deferred_route_reached_by_several_chains_is_listed_once(tmp_path: Path) -> None:
-    from code_intel.oracles.fastapi_cases import _chain
+    from stack_intel.oracles.fastapi_cases import _chain
 
     model = build(tmp_path, {"pkg/main.py": _chain(20)})
     assert [(r.path, r.mount) for r in model.routes] == [("/leaf", "deferred")]

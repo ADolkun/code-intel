@@ -1,0 +1,444 @@
+"""FastAPI dependency map: every live route with its dependencies in FastAPI order.
+
+Routes, routers and their ``dependencies=`` layers come from the shared router
+graph (``router_graph.build_backend_model``); dependency targets, parameter
+semantics and closures come from ``dependency_resolver``. Dependencies are
+identified by ``module:qualname`` and displayed by their short name.
+
+Usage:
+    stack-intel dump di           # human-readable report
+    stack-intel dump di --json    # DI JSON (schema v2)
+
+Exit status: 0 complete, 1 the analysis could not run, 2 the result is
+incomplete (diagnostics are printed to stderr).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from stack_intel import include_model as include_models
+from stack_intel import problems
+from stack_intel.backend_model import BackendModel, DepTarget, DepUse, LiveRoute, NameResolver, Unknown
+from stack_intel.config import BackendConfig
+from stack_intel.dependency_resolver import STAGE, DependencyResolver
+from stack_intel.result_types import (
+    SCHEMA_VERSION,
+    DiDependencyFunction,
+    DiDepRow,
+    DiLibrary,
+    DiResult,
+    DiRoute,
+    DiRouter,
+    library_row,
+    library_text,
+    route_where,
+)
+
+if TYPE_CHECKING:
+    from stack_intel.cli import Context
+
+# ── DI JSON v2 ───────────────────────────────────────────────────────────
+
+
+def _dep_row(use: DepUse) -> DiDepRow:
+    return {
+        "id": use.target.id,
+        "display": use.display,
+        "via": use.via,
+        "param": use.param,
+        "alias": use.alias,
+        "marker": use.marker,
+        "file": use.file,
+        "line": use.line,
+    }
+
+
+def _route_row(route: LiveRoute, uses: list[DepUse], closure: list[DepTarget]) -> DiRoute:
+    def displays(via: str) -> list[str]:
+        return [u.display for u in uses if u.via == via]
+
+    return {
+        "method": route.method,
+        "path": route.path,
+        "kind": route.kind,
+        "handler": route.handler,
+        "handler_id": route.handler_id,
+        "file": route.file,
+        "line": route.line,
+        "mount": route.mount,
+        "order": route.order,
+        "library": library_row(route.library),
+        "chain": list(route.chain),
+        "app_deps": displays("app"),
+        "router_deps": displays("router"),
+        "decorator_deps": displays("route decorator"),
+        "direct_deps": displays("direct"),
+        "deps": [_dep_row(u) for u in uses],
+        "all_deps": [t.id for t in closure],
+    }
+
+
+def _unique_ids(uses: Iterable[DepUse]) -> list[str]:
+    out: list[str] = []
+    for use in uses:
+        if use.target.id not in out:
+            out.append(use.target.id)
+    return out
+
+
+def _mounted_routers(model: BackendModel) -> set[str]:
+    """Router ids reachable from the app through include edges or live route chains."""
+    children: dict[str, list[str]] = {}
+    for edge in model.edges:
+        children.setdefault(edge.parent, []).append(edge.child)
+    mounted = {node for route in model.routes for node in route.chain}
+    reached = {model.app_id}
+    stack = [model.app_id]
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            if child not in reached:
+                reached.add(child)
+                stack.append(child)
+    return mounted | reached
+
+
+_FORMS = {
+    "function": "the function",
+    "class": "the class",
+    "instance": "an instance",
+    "method": "the method",
+    "lambda": "a lambda",
+    "factory_result": "a factory's result",
+    "external": "an external object",
+    "library": "a callable of installed code",
+    "unresolved": "an unresolved target",
+}
+
+
+def _form(target: DepTarget) -> str:
+    form = _FORMS.get(target.kind, target.kind)
+    return f"{form} through functools.partial at {target.variant}" if target.variant else form
+
+
+def _registry(
+    dep: DependencyResolver, targets: Iterable[DepTarget], uses: Iterable[DepUse]
+) -> tuple[dict[str, DiDependencyFunction], list[problems.Problem]]:
+    """The registry entries, and a ``shared_dependency_id`` limitation for each id
+    whose forms have different sub-dependencies (the runtime gives a partial,
+    a closure and its factory, the same id), as one entry lists only one form."""
+    aliases: dict[str, set[str]] = {}
+    forms: dict[str, list[DepTarget]] = {}
+    pending = list(uses)
+    for target in targets:
+        seen = forms.setdefault(target.id, [])
+        if target not in seen:
+            seen.append(target)
+    # A form used directly lists its own dependencies; a partial of it, only if nothing uses it directly.
+    ordered = {i: next((t for t in found if not t.variant), found[0]) for i, found in forms.items()}
+    for target in list(ordered.values()):
+        pending.extend(dep.sub_deps(target))
+    for use in pending:
+        if use.alias:
+            aliases.setdefault(use.target.id, set()).add(use.alias)
+    out: dict[str, DiDependencyFunction] = {}
+    shared: list[problems.Problem] = []
+    for target_id in sorted(ordered, key=lambda i: (ordered[i].name, ordered[i].module, i)):
+        target = ordered[target_id]
+        subs = dep.sub_deps(target)
+        listed = _unique_ids(subs)
+        for other in forms[target_id]:
+            other_subs = _unique_ids(dep.sub_deps(other))
+            if other is target or other_subs == listed:
+                continue
+            where = f"{target.file}:{target.line}" if target.file and target.line else (target.file or target.module)
+            shared.append(
+                problems.limitation(
+                    "shared_dependency_id",
+                    stage=STAGE,
+                    file=target.file,
+                    line=target.line,
+                    message=(
+                        f"{where}: dependency {target_id}: {_form(other)} has sub-dependencies "
+                        f"[{', '.join(other_subs)}] and {_form(target)} [{', '.join(listed)}], which FastAPI "
+                        f"identifies by the same id; its entry lists {_form(target)}'s; each route's closure uses the form it declares"
+                    ),
+                )
+            )
+        transitive = [t.id for t in dep.closure(subs) if t.id != target_id]
+        out[target_id] = {
+            "id": target_id,
+            "name": target.name,
+            "module": target.module,
+            "qualname": target.qualname,
+            "kind": target.kind,
+            "file": target.file,
+            "line": target.line,
+            "sub_deps": listed,
+            "transitive_deps": transitive,
+            "aliases": sorted(aliases.get(target_id, ())),
+        }
+        if target.bound_to:
+            out[target_id]["bound_to"] = target.bound_to
+        if target.runtime_id:
+            out[target_id]["runtime_id"] = target.runtime_id
+        if target.external:
+            out[target_id]["external"] = target.external
+        if (installed := library_row(target.library)) is not None:
+            out[target_id]["library"] = installed
+    return out, shared
+
+
+def _dedupe[Row: Mapping[str, object]](
+    found: Iterable[problems.Problem], as_row: Callable[[problems.Problem], Row]
+) -> list[Row]:
+    out: list[Row] = []
+    seen: set[tuple] = set()
+    for problem in found:
+        row = as_row(problem)
+        key = tuple(sorted((k, str(v)) for k, v in row.items()))
+        if key not in seen:
+            seen.add(key)
+            out.append(row)
+    return out
+
+
+def build_di(model: BackendModel, resolver: DependencyResolver | NameResolver | None = None) -> DiResult:
+    """DI JSON v2 for a backend model.
+
+    ``resolver`` is the ``DependencyResolver`` to use, or the name resolver to
+    build one over (default: the model's own ``DependencyResolver``).
+    """
+    if resolver is None:
+        dep = model.dependencies
+    elif isinstance(resolver, DependencyResolver):
+        dep = resolver
+    else:
+        dep = DependencyResolver(resolver, model.sources, library=model.library)
+    targets: list[DepTarget] = []
+    all_uses: list[DepUse] = []
+    reverse: dict[str, set[str]] = {}
+
+    def rows(routes: Sequence[LiveRoute], *, live: bool) -> list[DiRoute]:
+        out = []
+        for route in sorted(routes, key=lambda r: r.order):
+            uses = dep.route_deps(route)
+            closure = dep.closure(uses)
+            all_uses.extend(uses)
+            targets.extend(dep.forms(uses))
+            if live:
+                for target in closure:
+                    reverse.setdefault(target.id, set()).add(f"{route.method} {route.path}")
+            out.append(_route_row(route, uses, closure))
+        return out
+
+    route_rows = rows(model.routes, live=True)
+    unmounted_rows = rows(model.unmounted_routes, live=False)
+
+    mounted = _mounted_routers(model)
+    routers: list[DiRouter] = []
+    for node in model.routers:
+        own: list[DepUse] = []
+        if not isinstance(node.dependencies, Unknown):
+            own = dep.layer_uses(node.dependencies, "app" if node.kind == "FastAPI" else "router")
+        all_uses.extend(own)
+        targets.extend(dep.forms(own))
+        prefix_resolved = not isinstance(node.prefix, Unknown)
+        routers.append(
+            {
+                "id": node.id,
+                "file": node.file,
+                "line": node.line,
+                "kind": node.kind,
+                "prefix": node.prefix if isinstance(node.prefix, str) else None,
+                "prefix_resolved": prefix_resolved,
+                "deps": [u.display for u in own],
+                "mounted": node.id in mounted,
+            }
+        )
+
+    registry, shared = _registry(dep, targets, all_uses)
+    dep.stale_entries()
+    diagnostics = _dedupe(model.diagnostics, problems.Problem.as_diagnostic)
+    limitations = _dedupe([*model.limitations, *dep.problems, *shared], problems.Problem.as_limitation)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "complete": not diagnostics,
+        "diagnostics": diagnostics,
+        "analysis_limitations": limitations,
+        "app": include_models.app_block(model),
+        "library": _library_block(model, dep),
+        "dependency_functions": registry,
+        "routes": route_rows,
+        "unmounted_routes": unmounted_rows,
+        "routers": routers,
+        "reverse_index": {k: sorted(v) for k, v in sorted(reverse.items())},
+        "summary": {
+            "routes": len(route_rows),
+            "http": sum(1 for r in route_rows if r["kind"] == "http"),
+            "websocket": sum(1 for r in route_rows if r["kind"] == "websocket"),
+            "dependency_functions": len(registry),
+            "files_scanned": model.files_scanned,
+        },
+    }
+
+
+def _library_block(model: BackendModel, dep: DependencyResolver) -> DiLibrary | None:
+    if model.library is None:
+        return None
+    return {
+        "file": model.library.file,
+        "includes": sum(1 for node in model.routers if node.id.startswith("library:")),
+        "routes": sum(1 for route in model.routes if route.library is not None),
+        "dependencies": dep.applied_entries,
+    }
+
+
+# ── Text report ──────────────────────────────────────────────────────────
+
+
+def dep_label(row: DiDepRow) -> str:
+    """``display`` plus ``[as alias]`` when the dependency is reached through an alias."""
+    return f"{row['display']} [as {row['alias']}]" if row["alias"] else row["display"]
+
+
+def format_text(result: DiResult) -> str:
+    lines: list[str] = []
+    if result["diagnostics"]:
+        lines.append(problems.incomplete_banner(result["diagnostics"]))
+    if result["analysis_limitations"]:
+        lines.append(problems.limitations_banner(result["analysis_limitations"]))
+    funcs = result["dependency_functions"]
+    names: dict[str, int] = {}
+    for entry in funcs.values():
+        names[entry["name"]] = names.get(entry["name"], 0) + 1
+
+    def label(target_id: str) -> str:
+        entry = funcs.get(target_id)
+        if entry is None:
+            return target_id
+        return target_id if names[entry["name"]] > 1 else entry["name"]
+
+    lines.append(f"\nDependency targets ({len(funcs)})")
+    lines.append("─" * 72)
+    for target_id, entry in funcs.items():
+        where = (
+            f"{entry['file']}:{entry['line']}"
+            if entry["file"]
+            else library_text(entry["library"])
+            if "library" in entry
+            else "?"
+        )
+        subs = ", ".join(label(s) for s in entry["sub_deps"]) or "(leaf)"
+        aliases = f"  [aliases: {', '.join(entry['aliases'])}]" if entry["aliases"] else ""
+        bound = f"  = {entry['bound_to']}" if "bound_to" in entry else ""
+        lines.append(f"  {label(target_id):<40} {entry['kind']:<14} {where}  → {subs}{aliases}{bound}")
+
+    lines.append(f"\nRoutes ({len(result['routes'])})")
+    lines.append("─" * 72)
+    for route in result["routes"]:
+        lines.extend(_route_lines(route, funcs, names, label))
+    if result["unmounted_routes"]:
+        lines.append(f"\nUnmounted routes ({len(result['unmounted_routes'])}), not live")
+        lines.append("─" * 72)
+        for route in result["unmounted_routes"]:
+            lines.append(f"  {route['method']:<6} {route['path']}  [{route_where(route)}]")
+    lines.extend(_summary_lines(result))
+    return "\n".join(lines)
+
+
+def _route_lines(
+    route: DiRoute, funcs: dict[str, DiDependencyFunction], names: dict[str, int], label: Callable[[str], str]
+) -> list[str]:
+    """One route: its handler, then its dependencies by where they are declared."""
+    lines = [
+        f"\n  {route['method']:<6} {route['path']}",
+        f"    Handler: {route['handler']}  [{route_where(route)}]",
+    ]
+    for via, title in (("app", "App"), ("router", "Router"), ("route decorator", "Route"), ("direct", "Direct")):
+        labels = [
+            f"{dep_label(d)} ({d['id']})" if d["id"] in funcs and names[funcs[d["id"]]["name"]] > 1 else dep_label(d)
+            for d in route["deps"]
+            if d["via"] == via
+        ]
+        if labels:
+            lines.append(f"    {title + ':':<9}{', '.join(labels)}")
+    first = {d["id"] for d in route["deps"]}
+    inherited = [label(i) for i in route["all_deps"] if i not in first]
+    if inherited:
+        lines.append(f"    Inherited: {', '.join(inherited)}")
+    return lines
+
+
+def _summary_lines(result: DiResult) -> list[str]:
+    summary = result["summary"]
+    lines = [
+        "\nSummary",
+        f"  {summary['routes']} routes ({summary['http']} HTTP, {summary['websocket']} WebSocket), "
+        f"{summary['dependency_functions']} dependency targets, {summary['files_scanned']} files scanned",
+    ]
+    if result["complete"]:
+        lines.append("  Status: COMPLETE, 0 diagnostics")
+    else:
+        lines.append(f"  Status: INCOMPLETE, {len(result['diagnostics'])} diagnostic(s)")
+    return lines
+
+
+# ── Entry point ──────────────────────────────────────────────────────────
+
+
+def compute(repo_root: Path, backend: BackendConfig) -> DiResult:
+    """Build the backend model for ``repo_root`` from its git-visible files and
+    return its DI JSON. Raises ``RepoFilesError`` when git cannot list them."""
+    # Imported here so consumers that bring their own model do not load the graph builder.
+    from stack_intel import router_graph
+    from stack_intel.repo_files import list_repo_files
+
+    model = router_graph.build_backend_model(
+        repo_root / backend.root,
+        backend.package,
+        backend.app,
+        repo_root,
+        lock=backend.lock,
+        library=backend.capture.file if backend.capture is not None else None,
+        visible=list_repo_files(repo_root).files,
+    )
+    return build_di(model)
+
+
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true", help="print DI JSON instead of the text report")
+
+
+def run(args: argparse.Namespace, context: Context) -> int:
+    repo_root, backend = context.repo_root, context.config.backend
+    if (refusal := problems.runtime_refusal(repo_root, backend.python_version_file)) is not None:
+        print(refusal, file=sys.stderr)
+        return 1
+    package_dir = repo_root / backend.root / backend.package
+    if not package_dir.is_dir():
+        print(f"Error: {package_dir}: backend package directory not found", file=sys.stderr)
+        return 1
+
+    from stack_intel.repo_files import RepoFilesError
+
+    try:
+        result = compute(repo_root, backend)
+    except RepoFilesError as exc:
+        print(f"stack-intel: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(format_text(result))
+    if result["diagnostics"]:
+        print(problems.incomplete_banner(result["diagnostics"]), file=sys.stderr)
+        for diagnostic in result["diagnostics"]:
+            print(f"  [{diagnostic['kind']}] {diagnostic['message']}", file=sys.stderr)
+        return 2
+    return 0

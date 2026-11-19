@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from mcp_fixtures import FakeAnalyzers, config_toml, make_repo, make_runtime, write, write_config
 
-from code_intel import agent_files
-from code_intel.config import AgentsConfig, InstructionMap
+from stack_intel import agent_files
+from stack_intel.config import AgentsConfig, InstructionMap
 
 MAP_FILE = "AGENTS.md"
 AGENTS = AgentsConfig(".claude/rules", ".claude/skills", InstructionMap(MAP_FILE, "Scoped instruction map"))

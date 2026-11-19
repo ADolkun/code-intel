@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from code_intel import library_capture
-from code_intel.library_capture import CaptureFormatError
+from stack_intel import library_capture
+from stack_intel.library_capture import CaptureFormatError
 
 
 def location(line: int = 10) -> dict[str, Any]:

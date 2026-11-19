@@ -15,9 +15,9 @@ import pytest
 from doc_config import doc_config
 from fake_repo_files import FakeRepoFiles
 
-from code_intel.code_words import CodeWords
-from code_intel.doc_report import route_rows, symbol_rows
-from code_intel.doc_resolvers import (
+from stack_intel.code_words import CodeWords
+from stack_intel.doc_report import route_rows, symbol_rows
+from stack_intel.doc_resolvers import (
     Draft,
     LinkResolver,
     PathResolver,
@@ -26,8 +26,8 @@ from code_intel.doc_resolvers import (
     ScriptResolver,
     SymbolResolver,
 )
-from code_intel.doc_rules import DocRefsConfig, NextAppPages, PageSet, RouteMention, ScriptMention, SymbolMention
-from code_intel.markdown_facts import DocFacts, Link
+from stack_intel.doc_rules import DocRefsConfig, NextAppPages, PageSet, RouteMention, ScriptMention, SymbolMention
+from stack_intel.markdown_facts import DocFacts, Link
 
 CONFIG = doc_config({"scope": ["docs/**/*.md"], "route_prefixes": []})
 
@@ -79,7 +79,7 @@ def _facts(anchors: set[str]) -> DocFacts:
 def test_the_context_drops_untracked_and_config_file_rows_and_is_immutable(tmp_path: Path) -> None:
     ctx = _context(
         tmp_path,
-        ["backend/scratch.py", ".code-intel/config.toml", "frontend/app/articles/page.tsx"],
+        ["backend/scratch.py", ".stack-intel/config.toml", "frontend/app/articles/page.tsx"],
         routes=[_route("GET", "/items/{id}", 1), _route("GET", "/scratch", 1, file="backend/scratch.py")],
         symbols=[
             {"name": "Kept", "kind": "class", "container": None, "file": "backend/app.py", "line": 1},
@@ -88,7 +88,7 @@ def test_the_context_drops_untracked_and_config_file_rows_and_is_immutable(tmp_p
                 "name": "Fixture",
                 "kind": "class",
                 "container": None,
-                "file": ".code-intel/config.toml",
+                "file": ".stack-intel/config.toml",
                 "line": 1,
             },
         ],

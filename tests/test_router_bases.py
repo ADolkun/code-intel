@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 import scaling_check
 
-from code_intel.backend_model import (
+from stack_intel.backend_model import (
     DepLayer,
     IncludeCall,
     Located,
@@ -27,10 +27,10 @@ from code_intel.backend_model import (
     RouterEscape,
     Unknown,
 )
-from code_intel.code_paths import FileStamp
-from code_intel.py_sources import PySources
-from code_intel.router_bases import RouterBases, analyze, module_may_touch_routers, prefilter_facts
-from code_intel.router_graph import build_backend_model
+from stack_intel.code_paths import FileStamp
+from stack_intel.py_sources import PySources
+from stack_intel.router_bases import RouterBases, analyze, module_may_touch_routers, prefilter_facts
+from stack_intel.router_graph import build_backend_model
 
 APP = "from fastapi import FastAPI\napp = FastAPI()\n"
 

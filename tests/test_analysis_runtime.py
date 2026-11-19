@@ -43,10 +43,10 @@ from mcp_fixtures import (
     write_doc_config,
 )
 
-from code_intel import analysis_runtime, problems, ts_bridge
-from code_intel.analysis_runtime import AnalysisFailed, InvalidRoot
-from code_intel.config import BackendConfig, ConfigFile, load_config
-from code_intel.result_types import LimitationDict
+from stack_intel import analysis_runtime, problems, ts_bridge
+from stack_intel.analysis_runtime import AnalysisFailed, InvalidRoot
+from stack_intel.config import BackendConfig, ConfigFile, load_config
+from stack_intel.result_types import LimitationDict
 
 # The runtime's timeline is fixture mtimes and an injected Clock; the kernel's
 # ctime would put every file in the clock's future.
@@ -128,7 +128,7 @@ def test_the_library_capture_file_is_part_of_the_backend_fingerprint_only_when_c
     )
     rt = make_runtime(configured, fakes)
     rt.get_di()
-    write(configured / ".code-intel" / "library-capture.json", "{}\n", 3000)
+    write(configured / ".stack-intel" / "library-capture.json", "{}\n", 3000)
     rt.get_di()
     assert fakes.calls["build_backend_model"] == 2
 
@@ -136,7 +136,7 @@ def test_the_library_capture_file_is_part_of_the_backend_fingerprint_only_when_c
     plain = make_repo(tmp_path / "plain")
     other = make_runtime(plain, fakes)
     other.get_di()
-    write(plain / ".code-intel" / "library-capture.json", "{}\n", 3000)
+    write(plain / ".stack-intel" / "library-capture.json", "{}\n", 3000)
     other.get_di()
     assert fakes.calls["build_backend_model"] == 1
 
@@ -726,7 +726,7 @@ def test_status_counts_without_toolchain_keep_di(repo: Path, fakes: FakeAnalyzer
     error = snapshot.counts_errors["routes"]
     assert error["error"] == "frontend_unavailable"
     assert error["missing"] == "ts-cache/node_modules/typescript/package.json"
-    assert error["fix"].startswith('run "code-intel setup"')
+    assert error["fix"].startswith('run "stack-intel setup"')
 
 
 def test_status_names_the_locked_fastapi_and_its_include_model(repo: Path, fakes: FakeAnalyzers) -> None:
@@ -1108,8 +1108,8 @@ def test_the_toolchain_probe_never_waits_on_the_runtime_lock(repo: Path, fakes: 
 _SEARCH_BOTH_SIDES = """
 import json, sys
 from pathlib import Path
-from code_intel import analysis_runtime
-from code_intel.config import ConfigFile
+from stack_intel import analysis_runtime
+from stack_intel.config import ConfigFile
 repo = Path(sys.argv[1])
 rt = analysis_runtime.AnalysisRuntime(repo, ConfigFile.locate(repo), [])
 result = rt.resolve_symbol("list_items", side="both", kind=None, file_hint=None)
@@ -1149,7 +1149,7 @@ def test_symbol_search_on_both_sides_runs_with_the_real_index(tmp_path: Path, ty
 def test_backend_rebuilds_reanalyze_only_changed_modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The real backend analyzer keeps its per-module router facts between
     builds; a reset (no previous sources) or another backend config starts afresh."""
-    from code_intel import router_bases
+    from stack_intel import router_bases
 
     repo = _e2e_repo(tmp_path / "repo")
     write(
@@ -1457,7 +1457,7 @@ def test_the_di_cache_is_shared_with_the_di_tools(docs: Path) -> None:
 
 
 def test_docs_are_parsed_once_until_one_is_edited(docs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from code_intel import doc_refs
+    from stack_intel import doc_refs
 
     parsed = count_calls(monkeypatch, doc_refs, "read_doc_facts")
     rt = make_runtime(docs, doc_fakes())
@@ -1471,7 +1471,7 @@ def test_docs_are_parsed_once_until_one_is_edited(docs: Path, monkeypatch: pytes
 
 
 def test_code_words_are_read_once_until_a_code_file_is_edited(docs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from code_intel import doc_refs
+    from stack_intel import doc_refs
 
     write(docs / "docs" / "a.md", "# A\n\nUses `_private_helper()`.\n")
     read = count_calls(monkeypatch, doc_refs, "code_words_from_bytes")
@@ -1490,7 +1490,7 @@ def test_code_words_are_read_once_until_a_code_file_is_edited(docs: Path, monkey
 
 
 def test_a_doc_edited_inside_the_racy_window_is_checked_by_content(docs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from code_intel import doc_refs
+    from stack_intel import doc_refs
 
     parsed = count_calls(monkeypatch, doc_refs, "read_doc_facts")
     # The clock sits on the fixture mtime, so every stamp is racy.
@@ -1506,7 +1506,7 @@ def test_a_doc_edited_inside_the_racy_window_is_checked_by_content(docs: Path, m
 
 
 def test_read_failures_are_never_cached(docs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from code_intel import code_paths
+    from stack_intel import code_paths
 
     real = code_paths.read_file_bytes
     failing = {"docs/a.md"}
@@ -1525,7 +1525,7 @@ def test_read_failures_are_never_cached(docs: Path, monkeypatch: pytest.MonkeyPa
 
 
 def test_reset_drops_the_doc_caches(docs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from code_intel import doc_refs
+    from stack_intel import doc_refs
 
     parsed = count_calls(monkeypatch, doc_refs, "read_doc_facts")
     words = count_calls(monkeypatch, doc_refs, "code_words_from_bytes")
@@ -1541,7 +1541,7 @@ def test_reset_drops_the_doc_caches(docs: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_a_git_failure_is_an_analysis_failure_naming_the_step(docs: Path) -> None:
-    from code_intel.repo_files import RepoFilesError
+    from stack_intel.repo_files import RepoFilesError
 
     fakes = doc_fakes()
     fakes.raise_in["list_repo_files"] = RepoFilesError(("git", "ls-files", "-z"), "fatal: not a git repository", 128)
@@ -1561,15 +1561,15 @@ def test_an_invalid_config_names_its_file_and_key(docs: Path) -> None:
         rt.get_doc_report()
     exc = caught.value
     assert (exc.analyzer, exc.step, exc.missing) == ("doc_refs", "read config", None)
-    assert ".code-intel/config.toml" in exc.message and "bogus" in exc.message
+    assert ".stack-intel/config.toml" in exc.message and "bogus" in exc.message
 
 
 def test_a_missing_config_names_the_missing_file(docs: Path) -> None:
-    (docs / ".code-intel" / "config.toml").unlink()
+    (docs / ".stack-intel" / "config.toml").unlink()
     rt = make_runtime(docs, doc_fakes())
     with pytest.raises(AnalysisFailed) as caught:
         rt.get_doc_report()
-    assert (caught.value.step, caught.value.missing) == ("read config", ".code-intel/config.toml")
+    assert (caught.value.step, caught.value.missing) == ("read config", ".stack-intel/config.toml")
 
 
 def test_a_config_without_docs_is_an_analysis_failure_of_the_docs_only(docs: Path) -> None:
@@ -1587,11 +1587,11 @@ def test_a_config_without_docs_is_an_analysis_failure_of_the_docs_only(docs: Pat
 
 
 def test_a_missing_toolchain_is_a_limitation_of_the_report_only(docs: Path) -> None:
-    from code_intel.ts_bridge import ToolchainProblem
+    from stack_intel.ts_bridge import ToolchainProblem
 
     fakes = doc_fakes()
     fakes.ts_error = ToolchainProblem(
-        "typescript_not_found", "typescript not found", "ts-cache/node_modules", "code-intel setup"
+        "typescript_not_found", "typescript not found", "ts-cache/node_modules", "stack-intel setup"
     )
     rt = make_runtime(docs, fakes)
     found = rt.get_doc_report()
@@ -1599,7 +1599,7 @@ def test_a_missing_toolchain_is_a_limitation_of_the_report_only(docs: Path) -> N
     assert report.complete
     assert [p.kind for p in report.limitations] == ["frontend_definitions_unavailable"]
     assert [(p.kind, p.problem, p.fix) for p in found.frontend_problems] == [
-        ("frontend_unavailable", "typescript_not_found", "code-intel setup")
+        ("frontend_unavailable", "typescript_not_found", "stack-intel setup")
     ]
     assert "facts" not in rt._helper_failures, "a missing toolchain is not a helper crash"
 
@@ -1734,7 +1734,7 @@ def test_a_config_edit_changes_the_next_answer_without_a_restart(repo: Path, fak
     rt.get_routes()
     assert [b.app for b in fakes.backends] == ["service_backend.main:app"]
 
-    same = (repo / ".code-intel" / "config.toml").read_text(encoding="utf-8")
+    same = (repo / ".stack-intel" / "config.toml").read_text(encoding="utf-8")
     write_config(repo, same, 5000)
     rt.get_di()
     rt.get_routes()
@@ -1755,7 +1755,7 @@ def test_a_config_edit_reaches_the_frontend_and_the_symbol_layout(repo: Path, fa
     rt.resolve_symbol("X", side="backend", kind=None, file_hint=None)
     assert fakes.scan_files == ["frontend/components/Page.tsx", "frontend/lib/api.ts"]
 
-    text = (repo / ".code-intel" / "config.toml").read_text(encoding="utf-8")
+    text = (repo / ".stack-intel" / "config.toml").read_text(encoding="utf-8")
     write_config(repo, text.replace('root = "frontend"', 'root = "web"'), 6000)
     rt.get_routes()
     rt.resolve_symbol("X", side="backend", kind=None, file_hint=None)
@@ -1772,8 +1772,8 @@ def test_a_broken_config_is_reported_by_status_and_refused_by_the_analyzers(repo
         rt.get_di()
     assert (caught.value.analyzer, caught.value.step) == ("di_map", "read config")
     snapshot = rt.status()
-    assert snapshot.config["path"] == ".code-intel/config.toml"
-    assert ".code-intel/config.toml" in snapshot.config["error"]
+    assert snapshot.config["path"] == ".stack-intel/config.toml"
+    assert ".stack-intel/config.toml" in snapshot.config["error"]
     assert snapshot.runtime_compatible is None and snapshot.python_required is None
     assert snapshot.cache["di"] == {"loaded": False, "fresh": False}, "nothing can be compared without a config"
 
@@ -1789,25 +1789,25 @@ def test_the_backend_floor_follows_the_version_file(repo: Path, fakes: FakeAnaly
 def test_a_pin_bump_after_start_marks_the_code_stale(tmp_path: Path) -> None:
     """The pin file is never loaded as code: its content at start is the
     reference, and only a content change (or its appearing) is stale."""
-    pin = write(tmp_path / ".code-intel" / "requirements.txt", "code-intel @ git+https://example.invalid/x@aaa\n")
+    pin = write(tmp_path / ".stack-intel" / "requirements.txt", "stack-intel @ git+https://example.invalid/x@aaa\n")
     missing = tmp_path / "other" / "requirements.txt"
     watch = analysis_runtime.CodeWatch([], pins=[pin, missing], clock=Clock(), imported={})
     assert watch.state() == analysis_runtime.CodeState()
     os.utime(pin, (2000, 2000))
     assert watch.stale() is False, "a touch is not a bump"
-    write(pin, "code-intel @ git+https://example.invalid/x@bbb\n", 3000)
+    write(pin, "stack-intel @ git+https://example.invalid/x@bbb\n", 3000)
     assert watch.state().changed == (pin,)
-    write(pin, "code-intel @ git+https://example.invalid/x@aaa\n", 4000)
+    write(pin, "stack-intel @ git+https://example.invalid/x@aaa\n", 4000)
     assert watch.stale() is False, "back to the pinned bytes"
     write(missing, "x\n", 5000)
     assert watch.state().changed == (missing,)
 
 
 def test_the_runtime_watches_the_pin_file(repo: Path, fakes: FakeAnalyzers) -> None:
-    pin = write(repo / ".code-intel" / "requirements.txt", "code-intel @ git+https://example.invalid/x@aaa\n")
+    pin = write(repo / ".stack-intel" / "requirements.txt", "stack-intel @ git+https://example.invalid/x@aaa\n")
     rt = make_runtime(repo, fakes, pin_files=[pin])
     assert rt.code_state().stale is False
-    write(pin, "code-intel @ git+https://example.invalid/x@bbb\n", 3000)
+    write(pin, "stack-intel @ git+https://example.invalid/x@bbb\n", 3000)
     assert rt.code_state().changed == (pin,)
     assert rt.status().code_stale is True
 
