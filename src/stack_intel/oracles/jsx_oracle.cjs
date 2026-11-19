@@ -9,9 +9,9 @@
 // code points. `parent` applies the parent rule (docs/analysis.md, "Parent
 // rule") by walking up from each element, a formulation of its own: the nearest
 // enclosing function that holds the element in its parameters or body and has a
-// name. Every TS/JS suffix is
-// parsed, so a `.ts` file holding an element would show up here even though the
-// tool skips `.ts`. compare_facts.py diffs this against `stack-intel dump jsx --all --json`.
+// name. Every TS/JS suffix is parsed, so a `.ts` file holding an element would
+// show up here even though the tool skips `.ts`. compare_facts.py diffs this
+// against `stack-intel dump jsx --all --json`.
 // `frontend_root` is relative to repo_root or absolute.
 
 const fs = require("fs");
@@ -147,10 +147,10 @@ async function main() {
 
   // The name the parent rule (docs/analysis.md) gives a function node, or null.
   // A function declaration or function expression with its own name is named by
-  // it. An arrow or
-  // anonymous function expression is named by the variable it initializes, seen
-  // through value wrappers and through any calls it is an argument of
-  // (`const X = memo(forwardRef((p, r) => ...))`, `const X = withA(B)(() => ...)`).
+  // it. An arrow or anonymous function expression is named by the variable it
+  // initializes, seen through value wrappers and through any calls it is an
+  // argument of (`const X = memo(forwardRef((p, r) => ...))`,
+  // `const X = withA(B)(() => ...)`).
   function readmeParentName(fn) {
     const k = fn.kind;
     const named = k === ts.SyntaxKind.FunctionDeclaration || k === ts.SyntaxKind.FunctionExpression;
