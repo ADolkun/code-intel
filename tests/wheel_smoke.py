@@ -110,7 +110,7 @@ FILES = {
     "docs/guide.md": GUIDE,
 }
 
-CLEAN_SUMMARY = "doc-check: 0 findings in 2 docs (5 references, 5 checked)"
+CLEAN_SUMMARY = "doc-check: 0 findings in 2 docs (5 references, 5 checked); 0 agent files"
 ROUTE_NOT_FOUND = "docs/guide.md:3: route not found: GET /api/items (not in the analyzed backend routes)"
 
 
