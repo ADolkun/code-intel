@@ -71,13 +71,16 @@ def check(runtime: AnalysisRuntime, out: TextIO, err: TextIO, *, as_json: bool =
                 file=err,
             )
             return EXIT_CANNOT_RUN
+        config_path: str | None = None
         try:
             report = runtime.get_doc_report().report
         except NotConfigured as exc:
+            if exc.tables != ("docs",):
+                raise
             if runtime.config(PROG).agents is None:
                 print(f"{PROG}: {exc.config} has no [docs] table and there are no agent files to check", file=err)
                 return EXIT_CANNOT_RUN
-            report = None
+            report, config_path = None, exc.config
         agent_findings = runtime.get_agent_findings()
     except analysis_runtime.AnalysisFailed as exc:
         print(f"{PROG}: {exc.message}", file=err)
@@ -89,7 +92,7 @@ def check(runtime: AnalysisRuntime, out: TextIO, err: TextIO, *, as_json: bool =
         traceback.print_exception(exc, file=err)
         return EXIT_CANNOT_RUN
 
-    result = doc_queries.doc_check(report, agent_findings)
+    result = doc_queries.doc_check(report, agent_findings, config_path=config_path)
     if as_json:
         body = doc_presenters.doc_check(result)
         print(presenters.envelope(body, "json", stale=False, analysis=result.analysis), file=out)

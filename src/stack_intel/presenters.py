@@ -970,7 +970,7 @@ def status(s: Any) -> Body:
         f"  Config:         {s.config.get('path')}",
         f"  Git SHA:        {s.git_sha or '(unknown)'}",
         f"  Python:         {s.python}",
-        f"  Complete:       {_tri(s.complete)}",
+        f"  Complete:       {_complete_text(s)}",
         f"  DI cache:       {_cache_text(s.cache['di'])}",
         f"  Routes cache:   {_cache_text(s.cache['routes'])}",
         f"  {_toolchain_text(s.toolchain)}",
@@ -1062,8 +1062,17 @@ def _status_counts_lines(s: Any) -> list[str]:
             f"{routes['matched_routes']} matched routes, {routes['matched_calls']} matched calls, "
             f"{routes['backend_only']} backend-only, {routes['frontend_only']} frontend-only"
         )
-    lines += [f"    {name}: failed: {error['message']}" for name, error in (s.counts_errors or {}).items()]
+    lines += [
+        f"    {name}: {'not configured' if error['error'] == 'not_configured' else 'failed'}: {error['message']}"
+        for name, error in (s.counts_errors or {}).items()
+    ]
     return lines
+
+
+def _complete_text(s: Any) -> str:
+    if s.complete is None and all(info["state"] == "not_configured" for info in s.analyzers.values()):
+        return "n/a (no analyzer configured)"
+    return _tri(s.complete)
 
 
 def _tri(value: bool | None) -> str:

@@ -402,14 +402,14 @@ def run(args: argparse.Namespace, context: Context) -> int:
         print(f"capture: {context.config.display} has no [backend] table; {reason}", file=sys.stderr)
         return 0 if args.if_stale else 2
     if args.if_stale and backend.capture is None:
-        print(f"capture: {context.config.path} has no [backend.capture] table; nothing to refresh", file=sys.stderr)
+        print(f"capture: {context.config.display} has no [backend.capture] table; nothing to refresh", file=sys.stderr)
         return 0
     if (refusal := problems.runtime_refusal(repo_root, backend.python_version_file)) is not None:
         print(refusal, file=sys.stderr)
         return 2
     capture_config = backend.capture
     if capture_config is None:
-        print(f"capture: {context.config.path}: needs a [backend.capture] table with python = ...", file=sys.stderr)
+        print(f"capture: {context.config.display}: needs a [backend.capture] table with python = ...", file=sys.stderr)
         return 2
     try:
         if args.if_stale:

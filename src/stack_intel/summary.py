@@ -262,7 +262,7 @@ def summarize(runtime: AnalysisRuntime) -> tuple[str, bool]:
     parts = ["## Stack-intel analysis\n"]
     failed = False
     for title, analyzer, section, needs_backend_floor in SECTIONS:
-        if missing := config.missing(*SECTION_TABLES.get(analyzer, ())):
+        if missing := config.missing(*SECTION_TABLES[analyzer]):
             rows: Rows = _skipped(missing)
         elif needs_backend_floor and not runtime.runtime_compatible():
             rows = [("Skipped", f"Python {running} is older than the backend's {required}")]

@@ -2400,3 +2400,48 @@ def test_the_server_never_provisions_typescript_without_a_frontend(
     assert j(mcp_server.status(output_format="json"))["toolchain"]["state"] == "not_configured"
     assert "error" not in j(mcp_server.doc_refs(doc="docs/a.md", output_format="json"))
     assert probes == []
+
+
+def test_doc_refs_a_route_query_without_a_backend_claims_no_missing_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _partial_server(tmp_path, monkeypatch, "frontend-only")
+    payload = j(mcp_server.doc_refs(route="GET /api/x", output_format="json"))
+    assert (payload["definitions"], payload["definition_count"]) == (None, None)
+    assert payload["mention_count"] == 1
+    text = mcp_server.doc_refs(route="GET /api/x")
+    assert "Routes not analyzed: no [backend] table in .stack-intel/config.toml." in text.splitlines()
+    assert "No live route matches" not in text
+
+
+def test_doc_refs_a_symbol_query_without_either_side_says_there_is_no_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _partial_server(tmp_path, monkeypatch, "docs-only")
+    payload = j(mcp_server.doc_refs(symbol="Page", output_format="json"))
+    assert (payload["definitions"], payload["ambiguous"]) == (None, None)
+    text = mcp_server.doc_refs(symbol="Page")
+    assert "Symbol index not built: no [backend] or [frontend] table in .stack-intel/config.toml." in text
+    assert "in the symbol index" not in text
+
+
+def test_status_text_says_not_configured_rather_than_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _partial_server(tmp_path, monkeypatch, "backend-only")
+    lines = mcp_server.status(load_counts=True).splitlines()
+    assert any(line.startswith("    routes: not configured: route_map needs the [frontend] table") for line in lines)
+    assert not any(": failed:" in line for line in lines)
+
+
+def test_status_with_no_analyzer_configured_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _partial_server(tmp_path, monkeypatch, "docs-only")
+    assert "  Complete:       n/a (no analyzer configured)" in mcp_server.status().splitlines()
+    assert j(mcp_server.refresh(output_format="json"))["complete"] is None
+
+
+def test_symbol_resolve_names_the_config_read_on_a_broken_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _partial_server(tmp_path, monkeypatch, "backend-only")
+    write_config(s.repo, "[backend\n", 3000)
+    payload = j(mcp_server.symbol_resolve("X", output_format="json"))
+    assert (payload["error"], payload["analyzer"], payload["step"]) == ("analysis_failed", "config", "read config")

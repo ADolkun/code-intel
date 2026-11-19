@@ -183,3 +183,7 @@ def test_a_section_that_meets_a_missing_table_is_skipped(runtime: AnalysisRuntim
         raise NotConfigured(("docs",), ".stack-intel/config.toml")
 
     assert summary.section_rows(runtime, "doc_refs", needs_docs) == [("Skipped", "the config has no [docs] table")]
+
+
+def test_every_section_names_the_tables_it_needs() -> None:
+    assert {analyzer for _, analyzer, *_ in summary.SECTIONS} == set(summary.SECTION_TABLES)

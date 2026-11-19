@@ -1917,6 +1917,8 @@ def test_each_analysis_names_the_tables_it_lacks(
         assert not_configured(lambda: rt.get_jsx_usage("W", rt.repo_root / "frontend")) == jsx
     assert "scan_frontend" not in fakes.calls and "build_routes" not in fakes.calls
     assert "failed" not in rt.last_state.values(), "a missing table is not a failed analysis"
+    if di is not None:
+        assert "list_repo_files" not in fakes.calls, "the table is checked before git is asked"
     if jsx is not None:
         assert rt.toolchain_state["probes"] == 0
 
@@ -2057,6 +2059,7 @@ def test_refresh_without_a_backend_rebuilds_nothing(
     result = rt.refresh()
     assert (result.dependency_function_count, result.di_route_count, result.routes_summary) == (None, None, None)
     assert result.not_configured is not None and result.not_configured.tables == tables
+    assert result.complete is None, "nothing was rebuilt, so nothing is known to be complete"
     assert "build_backend_model" not in fakes.calls
 
 

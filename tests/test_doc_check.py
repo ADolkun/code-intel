@@ -640,3 +640,31 @@ def test_end_to_end_a_docs_only_checkout_needs_no_toolchain(tmp_path: Path) -> N
     write(root / "docs" / "guide.md", "# Guide\n\n[gone](gone.md)\n")
     code, out, _ = run_cli(root)
     assert code == 1 and out.startswith("docs/guide.md:3: ")
+
+
+def test_an_agents_only_json_report_says_the_docs_were_not_checked(tmp_path: Path) -> None:
+    root = agent_repo(tmp_path / "repo")
+    write(root / CONFIG_FILE, AGENTS_TABLE)
+    code, out, _ = check(root, FakeAnalyzers(), as_json=True)
+    body = json.loads(out)
+    assert code == 0
+    assert [(lim["kind"], lim["file"], lim["message"]) for lim in body["analysis_limitations"]] == [
+        (
+            "not_configured",
+            ".stack-intel/config.toml",
+            "no [docs] table in .stack-intel/config.toml: no docs were checked, only the agent files",
+        )
+    ]
+
+
+def test_a_missing_table_other_than_docs_is_not_taken_for_one(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from stack_intel.analysis_runtime import AnalysisRuntime
+    from stack_intel.config import NotConfigured
+
+    def needs_backend(self: AnalysisRuntime) -> None:
+        raise NotConfigured(("backend",), ".stack-intel/config.toml")
+
+    monkeypatch.setattr(AnalysisRuntime, "get_doc_report", needs_backend)
+    code, out, err = check(repo, fixture_fakes())
+    assert (code, out) == (2, "")
+    assert "internal error: NotConfigured: .stack-intel/config.toml has no [backend] table" in err

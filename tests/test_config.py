@@ -490,7 +490,9 @@ def test_each_accessor_names_the_table_it_lacks() -> None:
 
 def test_require_names_every_missing_table_in_order() -> None:
     cfg = parse(DOCS_ONLY_CONFIG)
-    assert cfg.missing("backend", "docs", "frontend", "backend.capture") == ("backend", "frontend", "backend.capture")
+    assert cfg.missing("backend", "docs", "frontend", "backend.capture") == ("backend", "frontend")
+    assert cfg.missing("backend.capture") == ("backend",)
+    assert parse(BACKEND_ONLY_CONFIG).missing("backend.capture") == ("backend.capture",)
     with pytest.raises(config.NotConfigured) as caught:
         cfg.require("backend", "frontend")
     exc = caught.value

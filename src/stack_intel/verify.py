@@ -52,7 +52,7 @@ from urllib.parse import quote
 
 from stack_intel import code_paths, problems
 from stack_intel.analysis_runtime import AnalysisFailed, AnalysisRuntime, FrontendFailed, InvalidRoot
-from stack_intel.config import Config, ConfigFile, table_names
+from stack_intel.config import Config, ConfigFile, NotConfigured, table_names
 from stack_intel.oracles import compare_facts
 from stack_intel.ts_bridge import HelperError, Toolchain, ToolchainUnavailable, incomplete_toolchain_problem
 
@@ -753,6 +753,8 @@ def run_check(check: Check, subject: Subject) -> Outcome:
         if missing := subject.config.missing(*check.needs):
             return Outcome(check.name, "skipped", f"the config has no {table_names(missing, 'or')} table")
         verdict = check.run(subject)
+    except NotConfigured as exc:
+        return Outcome(check.name, "skipped", f"the config has no {table_names(exc.tables, 'or')} table")
     except CannotRun as exc:
         return Outcome(check.name, "error", str(exc))
     except FrontendFailed as exc:

@@ -578,7 +578,7 @@ NEEDS = {
     "di-matches-routes": "[backend] or [frontend]",
     "call-sites": "[backend] or [frontend]",
     "matched-backends-are-live": "[backend] or [frontend]",
-    "library-capture": "[backend.capture]",
+    "library-capture": "[backend]",
     "jsx-oracle": "[frontend]",
     "declaration-oracle": "[frontend]",
     "docs-routes-are-live": "[backend]",
@@ -620,3 +620,22 @@ def test_the_command_says_when_no_check_applies(tmp_path: Path, capsys: pytest.C
     out, err = capsys.readouterr()
     assert out.splitlines()[-1] == "verify: 2 checks, 0 passed, 0 failed, 0 could not run, 2 skipped"
     assert err == "verify: no check applies to this config\n"
+
+
+def test_a_check_that_meets_a_missing_table_is_skipped(tmp_path: Path) -> None:
+    from stack_intel.config import NotConfigured
+
+    def needs_backend(subject: verify.Subject) -> verify.Verdict:
+        raise NotConfigured(("backend",), ".stack-intel/config.toml")
+
+    result = verify.run_check(verify.Check("late", needs_backend), subject_for(tmp_path, docs=True))
+    assert (result.status, result.detail) == ("skipped", "the config has no [backend] table")
+
+
+def test_library_capture_names_the_capture_table_when_the_backend_is_there(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo")
+    write_config(repo, BACKEND_ONLY_CONFIG)
+    [result] = verify.verify(
+        make_runtime(repo, FakeAnalyzers()), [c for c in verify.CHECKS if c.name == "library-capture"]
+    )
+    assert result.detail == "the config has no [backend.capture] table"

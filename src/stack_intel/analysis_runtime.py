@@ -537,7 +537,7 @@ class RefreshResult:
     dependency_function_count: int | None
     di_route_count: int | None
     routes_summary: dict | None
-    complete: bool
+    complete: bool | None  # None when nothing was rebuilt
     diagnostics: list[dict]
     limitations: list[dict]
     # Why routes have no frontend; its counts are then meaningless.
@@ -1103,6 +1103,7 @@ class AnalysisRuntime:
         started = time.perf_counter()
         try:
             config = self.config("di_map")
+            config.require(*ANALYZER_TABLES["di_map"])
             if visible is None:
                 visible = self._repo_files("di_map").files
             key = self._backend_fingerprint("di_map", config, visible)
@@ -1289,7 +1290,7 @@ class AnalysisRuntime:
         (`symbol_resolve.configured_side`). Raises `NotConfigured`."""
         from stack_intel import symbol_resolve
 
-        return symbol_resolve.configured_side(self.config("symbol_resolve"), side)[0]
+        return symbol_resolve.configured_side(self.config(), side)[0]
 
     def resolve_symbol(self, name: str, *, side: str, kind: str | None, file_hint: str | None) -> Any:
         """`SymbolIndex.resolve`; ``side="frontend"`` raises `ToolchainUnavailable`
@@ -1506,7 +1507,7 @@ class AnalysisRuntime:
                 dependency_function_count=None if di is None else len(di["dependency_functions"]),
                 di_route_count=None if di is None else len(di["routes"]),
                 routes_summary=None if routes is None else dict(routes["summary"]),
-                complete=all(bool(result["complete"]) for result in built),
+                complete=all(bool(result["complete"]) for result in built) if built else None,
                 diagnostics=_dedupe(d for result in built for d in result["diagnostics"]),
                 limitations=_dedupe(lim for result in built for lim in result["analysis_limitations"]),
                 frontend_problem=self._routes_frontend,

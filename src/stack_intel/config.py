@@ -186,10 +186,14 @@ class Config:
         return tuple(name for name, table in present if table is not None)
 
     def missing(self, *tables: str) -> tuple[str, ...]:
-        """Those of ``tables`` (``backend.capture`` included) the config lacks, in the order given."""
+        """Those of ``tables`` (``backend.capture`` included) the config lacks, in the order given.
+        ``backend.capture`` without ``[backend]`` is named as ``backend``, the table to add first."""
         capture = self.backend.capture if self.backend is not None else None
         present = {*self.tables, *(("backend.capture",) if capture is not None else ())}
-        return tuple(table for table in tables if table not in present)
+        missing = (
+            "backend" if t == "backend.capture" and self.backend is None else t for t in tables if t not in present
+        )
+        return tuple(dict.fromkeys(missing))
 
     def require(self, *tables: str) -> None:
         """Raise ``NotConfigured`` naming each of ``tables`` the config lacks."""
