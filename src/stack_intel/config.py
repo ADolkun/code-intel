@@ -22,8 +22,8 @@ _RENAME_HINT = (
     ".stack-intel/ and the CODE_INTEL_* environment variables to STACK_INTEL_*"
 )
 
-DOC_CHECKS: tuple[str, ...] = ("links", "paths", "routes", "symbols", "scripts")
-REFERENCE_KINDS: tuple[str, ...] = ("link", "path", "route", "symbol", "script")
+DOC_CHECKS: tuple[str, ...] = ("links", "paths", "routes", "symbols", "commands")
+REFERENCE_KINDS: tuple[str, ...] = ("link", "path", "route", "symbol", "command")
 PageKind = Literal["next-app", "react-router", "none"]
 PAGE_KINDS: tuple[PageKind, ...] = ("next-app", "react-router", "none")
 HTTP_METHODS: tuple[str, ...] = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
@@ -208,6 +208,10 @@ class _Table:
             raise self._bad(key, "true or false")
         return value
 
+    def peek(self, key: str) -> object:
+        """The raw value of ``key``, left for a later read."""
+        return self._data.get(key)
+
     def choice(self, key: str, allowed: tuple[str, ...]) -> str:
         return self._choice(key, allowed, self._required(key))
 
@@ -380,6 +384,8 @@ def _parse_reachability(table: _Table) -> Reachability:
 def _parse_rule(table: _Table) -> DocRule:
     paths = table.strings("paths", required=True, relative=True)
     checks = table.strings("checks", required=True)
+    if "scripts" in checks:
+        raise table.fail(f"'scripts' in {table.where} was renamed to 'commands' in 0.3")
     if bad := [check for check in checks if check not in DOC_CHECKS]:
         raise table.fail(
             f"invalid value for 'checks' in {table.where}: {bad[0]!r} is not one of {', '.join(DOC_CHECKS)}"
@@ -390,6 +396,8 @@ def _parse_rule(table: _Table) -> DocRule:
 
 
 def _parse_ignore(table: _Table) -> DocIgnore:
+    if table.peek("kind") == "script":
+        raise table.fail(f"'script' in {table.where} was renamed to 'command' in 0.3")
     entry = DocIgnore(
         file=table.relpath("file"),
         kind=table.choice("kind", REFERENCE_KINDS),

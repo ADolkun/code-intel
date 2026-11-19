@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,18 +16,21 @@ from doc_config import doc_config
 from fake_repo_files import FakeRepoFiles
 
 from stack_intel.code_words import CodeWords
+from stack_intel.doc_commands import CommandMention
 from stack_intel.doc_report import route_rows, symbol_rows
 from stack_intel.doc_resolvers import (
+    CommandResolver,
     Draft,
     LinkResolver,
     PathResolver,
     ResolutionContext,
     RouteResolver,
-    ScriptResolver,
     SymbolResolver,
 )
-from stack_intel.doc_rules import DocRefsConfig, NextAppPages, PageSet, RouteMention, ScriptMention, SymbolMention
+from stack_intel.doc_rules import DocRefsConfig, NextAppPages, PageSet, RouteMention, SymbolMention
+from stack_intel.make_targets import MakeTargets
 from stack_intel.markdown_facts import DocFacts, Link
+from stack_intel.mise_tasks import MiseFile
 
 CONFIG = doc_config({"scope": ["docs/**/*.md"], "route_prefixes": []})
 
@@ -129,7 +132,7 @@ def test_a_directory_lands_on_its_readme_before_its_index(tmp_path: Path) -> Non
     )
 
 
-# ── npm scripts ──────────────────────────────────────────────────────────
+# ── Commands ─────────────────────────────────────────────────────────────
 
 
 def test_the_context_lists_tracked_package_json_directories_outside_vendored_code(tmp_path: Path) -> None:
@@ -138,35 +141,179 @@ def test_the_context_lists_tracked_package_json_directories_outside_vendored_cod
     assert ctx.manifest_dirs == frozenset({"", "web"})
 
 
-def test_a_script_is_looked_up_only_in_the_package_jsons_that_can_define_it(tmp_path: Path) -> None:
+def test_the_context_indexes_makefiles_and_mise_files(tmp_path: Path) -> None:
+    files = [
+        "Makefile",
+        "GNUmakefile",
+        "tools/makefile",
+        "tools/Makefile",
+        "node_modules/x/Makefile",
+        "mise.toml",
+        "mise.local.toml",
+        "backend/.config/mise/config.toml",
+        "mise-tasks/build.sh",
+        "backend/.mise/tasks/db/migrate",
+        "docs/mise.md",
+    ]
+    ctx = _context(tmp_path, files)
+    assert dict(ctx.makefiles) == {"": "GNUmakefile", "tools": "tools/makefile"}
+    assert dict(ctx.mise_configs) == {
+        "": ("mise.local.toml", "mise.toml"),
+        "backend": ("backend/.config/mise/config.toml",),
+    }
+    assert dict(ctx.mise_task_files) == {"": ("mise-tasks/build.sh",), "backend": ("backend/.mise/tasks/db/migrate",)}
+
+
+def _resolver(
+    ctx: ResolutionContext,
+    scripts: Mapping[str, frozenset[str] | None] | None = None,
+    make: Mapping[str, MakeTargets | None] | None = None,
+    mise: Mapping[str, MiseFile | None] | None = None,
+    read: list[str] | None = None,
+) -> CommandResolver:
+    def reader[T](table: Mapping[str, T] | None, default: T) -> Callable[[str], T]:
+        def read_one(key: str) -> T:
+            if read is not None:
+                read.append(key)
+            return (table or {}).get(key, default)
+
+        return read_one
+
+    return CommandResolver(ctx, reader(scripts, frozenset()), reader(make, None), reader(mise, None))
+
+
+def _command(resolver: CommandResolver, mention: CommandMention, doc: str = "docs/a.md") -> Draft:
+    draft = resolver.command(doc, mention, 1, "code")
+    assert draft is not None
+    return draft
+
+
+def test_a_script_is_ok_near_the_doc_and_not_checked_when_only_another_package_json_defines_it(
+    tmp_path: Path,
+) -> None:
     ctx = _context(
         tmp_path, ["package.json", "frontend/package.json", "frontend/ui/package.json", "tools/package.json"]
     )
     read: list[str] = []
-
-    def scripts(directory: str) -> frozenset[str] | None:
-        read.append(directory)
-        return frozenset({"ui"}) if directory == "frontend/ui" else frozenset()
-
-    resolver = ScriptResolver(ctx, scripts)
-    draft = resolver.script("docs/a.md", ScriptMention("ui", None, "npm run ui"), 1, "code")
-    assert draft is not None
+    scripts = {"frontend/ui": frozenset({"ui"}), "tools": frozenset({"tool"})}
+    resolver = _resolver(ctx, scripts=scripts, read=read)
+    draft = _command(resolver, CommandMention("npm", "ui", None, "npm run ui"))
     assert (draft.status, draft.target, draft.checked) == ("ok", "frontend/ui/package.json", True)
-    assert read == ["", "frontend", "frontend/ui"]
+    draft = _command(resolver, CommandMention("npm", "tool", None, "npm run tool"))
+    assert (draft.status, draft.target, draft.checked) == ("not_checked", "tools/package.json", False)
+    assert draft.detail == "defined only in tools/package.json; the doc names no directory"
     read.clear()
-    draft = resolver.script("docs/a.md", ScriptMention("ui", "tools", "npm run ui --prefix tools"), 1, "code")
-    assert draft is not None
+    draft = _command(resolver, CommandMention("npm", "ui", "tools", "npm run ui --prefix tools"))
     assert (draft.status, draft.detail) == ("missing", "tools/package.json defines no script 'ui'")
     assert read == ["tools"]
 
 
 def test_a_package_json_that_cannot_be_read_leaves_the_script_unchecked(tmp_path: Path) -> None:
     ctx = _context(tmp_path, ["frontend/package.json"])
-    draft = ScriptResolver(ctx, lambda directory: None).script(
-        "docs/a.md", ScriptMention("build", None, "npm run build"), 1, "code"
-    )
-    assert draft is not None
+    draft = _command(_resolver(ctx, scripts={"frontend": None}), CommandMention("npm", "build", None, "npm run build"))
     assert (draft.status, draft.checked) == ("skipped", False)
+
+
+def test_an_unproven_form_is_ok_when_defined_and_not_checked_otherwise(tmp_path: Path) -> None:
+    ctx = _context(tmp_path, ["package.json"])
+    resolver = _resolver(ctx, scripts={"": frozenset({"build"})})
+    ok = _command(resolver, CommandMention("yarn", "build", None, "yarn build", "unproven", "why"))
+    missing = _command(resolver, CommandMention("yarn", "deploy", None, "yarn deploy", "unproven", "why"))
+    assert (ok.status, missing.status, missing.detail, missing.checked) == ("ok", "not_checked", "why", False)
+
+
+def test_unchecked_and_skipped_forms_are_not_looked_up(tmp_path: Path) -> None:
+    ctx = _context(tmp_path, ["package.json", "Makefile"])
+    read: list[str] = []
+    resolver = _resolver(ctx, read=read)
+    unchecked = _command(resolver, CommandMention("make", "lint", None, "make -f x lint", "unchecked", "-f"))
+    skipped = _command(resolver, CommandMention("npm", "<x>", None, "npm run <x>", "skipped", "a placeholder"))
+    assert [(d.status, d.detail, d.checked) for d in (unchecked, skipped)] == [
+        ("not_checked", "-f", False),
+        ("skipped", "a placeholder", False),
+    ]
+    assert read == []
+
+
+def test_a_runner_without_definition_files_gives_no_reference(tmp_path: Path) -> None:
+    resolver = _resolver(_context(tmp_path, ["package.json"]))
+    assert resolver.command("docs/a.md", CommandMention("make", "lint", None, "make lint"), 1, "code") is None
+    assert resolver.command("docs/a.md", CommandMention("mise", "lint", None, "mise run lint"), 1, "code") is None
+
+
+def test_a_make_target_absent_from_every_provable_makefile_is_missing(tmp_path: Path) -> None:
+    ctx = _context(tmp_path, ["Makefile", "tools/Makefile"])
+    make = {"Makefile": MakeTargets(frozenset({"lint"})), "tools/Makefile": MakeTargets(frozenset({"build"}))}
+    resolver = _resolver(ctx, make=make)
+    found = {
+        name: _command(resolver, CommandMention("make", name, None, f"make {name}"))
+        for name in ("lint", "build", "nope")
+    }
+    assert [(d.status, d.target, d.detail) for d in found.values()] == [
+        ("ok", "Makefile", "defined in Makefile"),
+        ("not_checked", "tools/Makefile", "defined only in tools/Makefile; the doc names no directory"),
+        ("missing", None, "Makefile or tools/Makefile defines no target 'nope'"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("targets", "mention", "detail"),
+    [
+        (
+            MakeTargets(frozenset({"lint"}), opaque="has include (line 1)"),
+            CommandMention("make", "nope", None, "make nope"),
+            "Makefile has include (line 1), so its targets are not all known",
+        ),
+        (
+            MakeTargets(frozenset({"web/out"}), variables=frozenset({"OUT"})),
+            CommandMention("make", "nope", None, "make nope OUT=x", overrides=frozenset({"OUT"})),
+            "the command sets OUT, which names targets in Makefile",
+        ),
+    ],
+)
+def test_an_unprovable_makefile_leaves_a_target_unchecked(
+    tmp_path: Path, targets: MakeTargets, mention: CommandMention, detail: str
+) -> None:
+    draft = _command(_resolver(_context(tmp_path, ["Makefile"]), make={"Makefile": targets}), mention)
+    assert (draft.status, draft.detail, draft.checked) == ("not_checked", detail, False)
+
+
+@pytest.mark.parametrize(
+    ("files", "name", "detail"),
+    [
+        (["dist/app.js"], "dist", "dist exists, so make has nothing to do for it"),
+        (["README"], "README", "README exists, so make has nothing to do for it"),
+        (["prog.c"], "prog", "prog.c exists, and a built-in make rule may build prog from it"),
+        (["prog.c"], "prog.o", "prog.c exists, and a built-in make rule may build prog.o from it"),
+        (["RCS/notes,v"], "notes", "RCS/notes,v exists, and a built-in make rule may build notes from it"),
+        (["SCCS/s.notes"], "notes", "SCCS/s.notes exists, and a built-in make rule may build notes from it"),
+    ],
+)
+def test_a_file_make_can_find_or_build_leaves_a_target_unchecked(
+    tmp_path: Path, files: list[str], name: str, detail: str
+) -> None:
+    ctx = _context(tmp_path, ["Makefile", *files])
+    draft = _command(
+        _resolver(ctx, make={"Makefile": MakeTargets(frozenset({"lint"}))}),
+        CommandMention("make", name, None, f"make {name}"),
+    )
+    assert (draft.status, draft.detail) == ("not_checked", detail)
+
+
+def test_mise_reads_only_the_directories_from_the_root_down_to_the_named_one(tmp_path: Path) -> None:
+    ctx = _context(tmp_path, ["mise.toml", "backend/mise.toml", "frontend/mise.toml"])
+    read: list[str] = []
+    mise = {
+        "mise.toml": MiseFile(frozenset({"release"})),
+        "backend/mise.toml": MiseFile(frozenset({"test"})),
+        "frontend/mise.toml": MiseFile(frozenset({"build"})),
+    }
+    resolver = _resolver(ctx, mise=mise, read=read)
+    draft = _command(resolver, CommandMention("mise", "release", "backend", "mise -C backend run release"))
+    assert (draft.status, draft.target) == ("ok", "mise.toml")
+    draft = _command(resolver, CommandMention("mise", "test", "backend", "mise -C backend run test"))
+    assert (draft.status, draft.target) == ("ok", "backend/mise.toml")
+    assert set(read) == {"mise.toml", "backend/mise.toml"}
 
 
 # ── Routes ───────────────────────────────────────────────────────────────

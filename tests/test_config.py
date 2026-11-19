@@ -249,7 +249,7 @@ def test_missing_required_keys_are_named() -> None:
         (
             MINIMAL_CONFIG
             + '\n[docs]\nscope = ["a.md"]\n[[docs.rules]]\npaths = ["a.md"]\nchecks = ["spelling"]\nreason = "r"\n',
-            "invalid value for 'checks' in [[docs.rules]] #1: 'spelling' is not one of links, paths, routes, symbols, scripts",
+            "invalid value for 'checks' in [[docs.rules]] #1: 'spelling' is not one of links, paths, routes, symbols, commands",
         ),
         (
             MINIMAL_CONFIG
@@ -428,3 +428,35 @@ def test_a_command_with_a_bad_config_exits_2(
     assert cli.main(["fake", "--repo-root", str(tmp_path)]) == 2
     assert calls == []
     assert "cannot read the config" in capsys.readouterr().err
+
+
+# ── Docs commands check (0.3 rename) ─────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("docs", "expected"),
+    [
+        (
+            '[[docs.rules]]\npaths = ["a.md"]\nchecks = ["links", "scripts"]\nreason = "r"\n',
+            "cfg.toml: 'scripts' in [[docs.rules]] #1 was renamed to 'commands' in 0.3",
+        ),
+        (
+            '[[docs.ignore]]\nfile = "a.md"\nkind = "route"\ntext = "t"\nreason = "r"\n'
+            '[[docs.ignore]]\nfile = "a.md"\nkind = "script"\ntext = "npm run x"\nreason = "r"\n',
+            "cfg.toml: 'script' in [[docs.ignore]] #2 was renamed to 'command' in 0.3",
+        ),
+    ],
+)
+def test_the_old_scripts_names_fail_with_the_rename(docs: str, expected: str) -> None:
+    assert error_of(MINIMAL_CONFIG + '\n[docs]\nscope = ["a.md"]\n' + docs) == expected
+
+
+def test_the_commands_check_and_kind_are_accepted() -> None:
+    text = (
+        MINIMAL_CONFIG
+        + '\n[docs]\nscope = ["a.md"]\n[[docs.rules]]\npaths = ["a.md"]\nchecks = ["commands"]\nreason = "r"\n'
+        + '[[docs.ignore]]\nfile = "a.md"\nkind = "command"\ntext = "make deploy"\nreason = "r"\n'
+    )
+    docs = config.parse_config(text, "cfg.toml", Path("/repo/cfg.toml")).docs
+    assert docs is not None
+    assert (docs.rules[0].checks, docs.ignore[0].kind) == (("commands",), "command")

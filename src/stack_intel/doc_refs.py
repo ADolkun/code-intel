@@ -1,17 +1,19 @@
 """Docs-vs-code references: what the scope docs name, and whether it still exists.
 
 For each Markdown file in the config's scope this extracts the links and
-anchors, repository paths, backend routes and code symbols it names and has
-``doc_resolvers`` resolve each against **injected** inputs: the git-visible
-files (``repo_files.RepoFiles``), the analyzed routes (DI rows), a symbol table
-(``SymbolIndex`` rows) and identifier words read from tracked code files. Here
+anchors, repository paths, backend routes and code symbols it names and the
+scripts, make targets and mise tasks it runs, and has ``doc_resolvers`` resolve
+each against **injected** inputs: the git-visible files
+(``repo_files.RepoFiles``), the analyzed routes (DI rows), a symbol table
+(``SymbolIndex`` rows), identifier words read from tracked code files and the
+definition files of the commands (package.json, makefiles, mise files). Here
 the report settles git-ignored paths in one batch, applies the ignore entries
 and walks links from the reachability root to find orphaned docs. Text rules
 (what counts as a path, a route or a symbol) live in ``doc_rules``; Markdown
 structure comes from ``markdown_facts``.
 
-``DocIndex`` keeps per-file Markdown facts, code words and the names each
-package's ``__init__.py`` binds between reports,
+``DocIndex`` keeps per-file Markdown facts, code words, the names each
+package's ``__init__.py`` binds and the parsed definition files between reports,
 keyed by the file stamp and checked by content inside the racy window, the
 way ``symbol_resolve.SymbolIndex`` caches its Python index. Resolution itself
 runs on every report.
@@ -32,6 +34,7 @@ from typing import Any
 
 from stack_intel.code_paths import FileStamp, content_digest, is_racy, read_bytes_with_digest
 from stack_intel.code_words import EMPTY, CodeWords, code_words_from_bytes, is_code_file, package_bindings_from_bytes
+from stack_intel.doc_commands import PACKAGE_MANIFEST, command_mentions
 from stack_intel.doc_report import (
     ConfigFinding,
     DocEntry,
@@ -45,18 +48,17 @@ from stack_intel.doc_report import (
     symbol_rows,
 )
 from stack_intel.doc_resolvers import (
+    CommandResolver,
     Draft,
     LinkResolver,
     PathResolver,
     ResolutionContext,
     RouteResolver,
-    ScriptResolver,
     SymbolResolver,
     untracked_path,
 )
 from stack_intel.doc_rules import (
     BROKEN_STATUSES,
-    PACKAGE_MANIFEST,
     STAGE,
     DocRefsConfig,
     NoPages,
@@ -68,10 +70,11 @@ from stack_intel.doc_rules import (
     is_markdown,
     is_shell_fence,
     method_route_mentions,
-    script_mentions,
     symbol_mention,
 )
+from stack_intel.make_targets import MakeTargets, make_targets_from_bytes
 from stack_intel.markdown_facts import DocFacts, read_doc_facts
+from stack_intel.mise_tasks import MiseFile, mise_file_from_bytes
 from stack_intel.package_manifest import package_scripts_from_bytes
 from stack_intel.problems import Problem, diagnostic
 from stack_intel.repo_files import RepoFiles
@@ -130,6 +133,22 @@ def _load_scripts(path: Path, rel: str) -> tuple[Any, str | None, list[Problem],
     return scripts, digest, problems, False
 
 
+def _load_make_targets(path: Path, rel: str) -> tuple[Any, str | None, list[Problem], bool]:
+    data, digest, problem = read_bytes_with_digest(path, rel, stage=STAGE)
+    if data is None:
+        return None, None, [problem] if problem is not None else [], True
+    targets, problems = make_targets_from_bytes(rel, data, stage=STAGE)
+    return targets, digest, problems, False
+
+
+def _load_mise_file(path: Path, rel: str) -> tuple[Any, str | None, list[Problem], bool]:
+    data, digest, problem = read_bytes_with_digest(path, rel, stage=STAGE)
+    if data is None:
+        return None, None, [problem] if problem is not None else [], True
+    parsed, problems = mise_file_from_bytes(rel, data, stage=STAGE)
+    return parsed, digest, problems, False
+
+
 def _try_digest(path: Path) -> str | None:
     try:
         return content_digest(path)
@@ -138,8 +157,8 @@ def _try_digest(path: Path) -> str | None:
 
 
 class DocIndex:
-    """Per-file Markdown facts, code words, package bindings and package.json
-    scripts, cached by file stamp.
+    """Per-file Markdown facts, code words, package bindings, package.json
+    scripts, makefile targets and mise tasks, cached by file stamp.
 
     An entry stored inside git's racy window also keeps the SHA-256 of the
     bytes it came from, and is reused only while the file still hashes the
@@ -155,6 +174,8 @@ class DocIndex:
         self._words: dict[str, _Entry] = {}
         self._bindings: dict[str, _Entry] = {}
         self._scripts: dict[str, _Entry] = {}
+        self._make_targets: dict[str, _Entry] = {}
+        self._mise_files: dict[str, _Entry] = {}
 
     def clear(self) -> None:
         with self._lock:
@@ -162,6 +183,8 @@ class DocIndex:
             self._words.clear()
             self._bindings.clear()
             self._scripts.clear()
+            self._make_targets.clear()
+            self._mise_files.clear()
 
     def doc_facts(self, rel: str, problems: list[Problem]) -> DocFacts | None:
         with self._lock:
@@ -179,15 +202,29 @@ class DocIndex:
         with self._lock:
             return self._cached(self._scripts, rel, _load_scripts, problems, None)
 
+    def make_targets(self, rel: str, problems: list[Problem]) -> MakeTargets | None:
+        with self._lock:
+            return self._cached(self._make_targets, rel, _load_make_targets, problems, None)
+
+    def mise_file(self, rel: str, problems: list[Problem]) -> MiseFile | None:
+        with self._lock:
+            return self._cached(self._mise_files, rel, _load_mise_file, problems, None)
+
     def prune(
-        self, docs: Iterable[str], words: Iterable[str] | None, inits: Iterable[str], manifests: Iterable[str]
+        self,
+        docs: Iterable[str],
+        words: Iterable[str] | None,
+        inits: Iterable[str],
+        definitions: Iterable[str],
     ) -> None:
         """Drop entries for files a report no longer read. ``words`` is None
-        when the report needed no words, which says nothing about the files."""
+        when the report needed no words, which says nothing about the files.
+        ``definitions``: the package.json, makefile and mise files it read."""
         with self._lock:
-            keep_manifests = set(manifests)
-            for key in [k for k in self._scripts if k not in keep_manifests]:
-                del self._scripts[key]
+            keep_definitions = set(definitions)
+            for cache in (self._scripts, self._make_targets, self._mise_files):
+                for key in [k for k in cache if k not in keep_definitions]:
+                    del cache[key]
             keep_docs = set(docs)
             for key in [k for k in self._docs if k not in keep_docs]:
                 del self._docs[key]
@@ -267,7 +304,7 @@ class DocIndex:
             )
             self._prefetch(run.scope, run.code_files() if run.checks_symbols else ())
             report = run.build(tuple(route_limitations), frontend_available, [*extra_problems, *page_set.problems])
-            self.prune(run.facts_read, run.words_read if run.words_used else None, run.inits_read, run.manifests_read)
+            self.prune(run.facts_read, run.words_read if run.words_used else None, run.inits_read, run.definitions_read)
             return report
 
 
@@ -325,14 +362,14 @@ class _Run:
         self.checks_symbols = any("symbols" in config.checks_for(doc) for doc in self.scope)
         self.facts_read: set[str] = set()
         self.words_read: set[str] = set()
-        self.manifests_read: set[str] = set()
+        self.definitions_read: set[str] = set()
         self._facts: dict[str, DocFacts | None] = {}
         self._words: CodeWords | None = None
-        self._scripts: dict[str, frozenset[str] | None] = {}
+        self._definitions: dict[str, Any] = {}
         self.links = LinkResolver(self.ctx, self.facts)
         self.paths = PathResolver(self.ctx)
         self.symbols = SymbolResolver(self.ctx, self.words)
-        self.scripts = ScriptResolver(self.ctx, self.package_scripts)
+        self.commands = CommandResolver(self.ctx, self.package_scripts, self.make_targets, self.mise_file)
 
     # Inputs ----------------------------------------------------------------
 
@@ -346,12 +383,21 @@ class _Run:
     def words_used(self) -> bool:
         return self._words is not None
 
+    def _definition[T](self, rel: str, read: Callable[[str, list[Problem]], T]) -> T:
+        """A definition file read once per report, its problems collected once."""
+        if rel not in self._definitions:
+            self.definitions_read.add(rel)
+            self._definitions[rel] = read(rel, self.problems)
+        return self._definitions[rel]
+
     def package_scripts(self, directory: str) -> frozenset[str] | None:
-        rel = posixpath.join(directory, PACKAGE_MANIFEST)
-        if rel not in self._scripts:
-            self.manifests_read.add(rel)
-            self._scripts[rel] = self.index.package_scripts(rel, self.problems)
-        return self._scripts[rel]
+        return self._definition(posixpath.join(directory, PACKAGE_MANIFEST), self.index.package_scripts)
+
+    def make_targets(self, rel: str) -> MakeTargets | None:
+        return self._definition(rel, self.index.make_targets)
+
+    def mise_file(self, rel: str) -> MiseFile | None:
+        return self._definition(rel, self.index.mise_file)
 
     def code_files(self) -> list[str]:
         """Every tracked code file except the consumer's config
@@ -467,17 +513,17 @@ class _Run:
                 mention = symbol_mention(span.text)
                 if mention is not None:
                     out.append(self.symbols.symbol(doc, mention, span.line, span.context))
-        if "scripts" in checks:
+        if "commands" in checks:
             for span in facts.code_spans:
-                out.extend(self._script_drafts(doc, span.text, span.line, span.context))
+                out.extend(self._command_drafts(doc, span.text, span.line, span.context))
             for fence in facts.fences:
                 if is_shell_fence(fence.info):
                     for offset, text in enumerate(fence.lines):
-                        out.extend(self._script_drafts(doc, text, fence.content_line + offset, "fence"))
+                        out.extend(self._command_drafts(doc, text, fence.content_line + offset, "fence"))
         return out
 
-    def _script_drafts(self, doc: str, text: str, line: int, context: str) -> list[Draft]:
-        drafts = (self.scripts.script(doc, mention, line, context) for mention in script_mentions(text))
+    def _command_drafts(self, doc: str, text: str, line: int, context: str) -> list[Draft]:
+        drafts = (self.commands.command(doc, mention, line, context) for mention in command_mentions(text))
         return [draft for draft in drafts if draft is not None]
 
     def _declared_roots(self, scope: Sequence[str]) -> frozenset[str]:
