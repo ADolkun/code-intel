@@ -237,6 +237,7 @@ def one(report: doc_refs.DocReport, kind: str, doc: str = "docs/a.md") -> Refere
         ("[x](sub/#anything)", "not_checked", "no README.md or index.md to check the anchor against"),
         ("[x](/)", "ok", None),  # the repository root is a directory
         ("[x](../)", "ok", None),
+        ("[x](..)", "ok", None),
         ("[x](sub/x.md)", "ok", None),
         ("[x](../backend/app.py)", "ok", None),
         ("[x](/backend/app.py)", "ok", None),
@@ -388,6 +389,37 @@ def test_missing_path_messages_name_the_roots_tried(tmp_path: Path) -> None:
         "stale path: api/routes/users.py (not found under backend/service_backend/ or docs/)",
         "stale path: backend/gone.py (not found under the repository root)",
         "stale path: ./nope.md (docs/nope.md does not exist)",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("doc", "markdown", "expected"),
+    [
+        ("docs/a.md", "`../`", [("../", "ok")]),
+        ("docs/a.md", "`..`", []),
+        ("docs/a.md", "`../backend/app.py` and `../docs/`", [("../backend/app.py", "ok"), ("../docs/", "ok")]),
+        ("docs/sub/a.md", "`../../`", [("../../", "ok")]),
+        ("docs/sub/a.md", "`../../../`", [("../../../", "missing")]),
+        ("docs/a.md", "`../../`", [("../../", "missing")]),
+        ("docs/a.md", "`../nope/`", [("../nope/", "missing")]),
+        ("AGENTS.md", "`./`", []),
+        ("AGENTS.md", "`.`", []),
+        ("AGENTS.md", "`./docs/../`", [("./docs/../", "ok")]),
+        ("AGENTS.md", "`./../`", [("./../", "missing")]),
+    ],
+)
+def test_paths_naming_the_repository_root(
+    tmp_path: Path, doc: str, markdown: str, expected: list[tuple[str, str]]
+) -> None:
+    report = build(tmp_path, {"docs/sub/b.md": "# B\n", doc: f"{markdown}\n"})
+    assert [(r.text, r.status) for r in refs(report, doc, "path")] == expected
+
+
+def test_a_missing_path_past_the_root_is_still_reported_stale(tmp_path: Path) -> None:
+    report = build(tmp_path, {"docs/a.md": "`../nope/` and `../../`\n"})
+    assert [f.message for f in ref_findings(report)] == [
+        "stale path: ../../ (not found under docs/)",
+        "stale path: ../nope/ (nope does not exist)",
     ]
 
 
