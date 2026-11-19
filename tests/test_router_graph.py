@@ -1374,8 +1374,7 @@ def test_calls_past_the_budget_cost_no_more_than_the_ones_within_it(tmp_path: Pa
     def run(root: Path) -> None:
         build_backend_model(root, "pkg", MAIN, root)
 
-    # best_time pauses the collector around each measurement.
-    ratio = scaling_check.best_time(run, large, repeats=2) / scaling_check.best_time(run, small, repeats=2)
+    ratio = scaling_check.best_ratio(run, large, small, repeats=2)
     assert ratio < 6, f"three times the calls took {ratio:.2f}x as long"
 
 
