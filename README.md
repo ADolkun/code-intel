@@ -205,8 +205,8 @@ text = "/api/external"
 reason = "Served by another service."
 
 [agents]
-rules_dir = ".claude/rules"
-skills_dir = ".claude/skills"
+skill_dirs = ["skills"]
+strict = true
 instruction_map = { file = "AGENTS.md", heading = "Scoped instruction map" }
 ```
 
@@ -281,7 +281,15 @@ URL builders are found in the modules of the configured clients: exported functi
 
 ### `[agents]`
 
-`rules_dir` and `skills_dir` are required; `instruction_map` (`file` and `heading`) is optional. See [Agent instruction files](#agent-instruction-files).
+Optional. The agent instruction files at their conventional locations are checked without it; the table only adds to that. See [Agent instruction files](#agent-instruction-files).
+
+| Key | Meaning |
+| --- | --- |
+| `skill_dirs` | More Agent Skills roots, each holding `<name>/SKILL.md`, checked like `.agents/skills`. Repository-relative; a conventional root (`.claude/skills`, `.github/skills`, `.agents/skills`) is an error, since it is checked already. |
+| `strict` | `true` adds this repository's policy to the checks: every `.claude/rules` file is scoped (frontmatter with `paths`, no `applyTo`), `.claude/skills` follows the Agent Skills rules too, and every directory under a skill root holds a `SKILL.md`. Default `false`. |
+| `instruction_map` | `file` and `heading`: a section whose ``- `label`: `glob`, …`` lines must equal the `.claude/rules` files' stems and their `paths` exactly. |
+
+`rules_dir` and `skills_dir` were removed in 0.3; `config-check` says what replaces them.
 
 ## Tools
 
@@ -807,14 +815,27 @@ doc-check: 1 finding in 2 docs (7 references, 6 checked)
 
 ### Agent instruction files
 
-With an `[agents]` table the docs check also validates the instruction files coding agents load, and prints their findings as `path:line: message` beside the docs findings:
+The docs check also validates the instruction files Claude Code and GitHub Copilot load, with or without an `[agents]` table, and prints their findings as `path:line: message` beside the docs findings; the summary line ends with the number of agent files read (`; A agent files`). Only git-visible files at the repository root's conventional locations count; a nested `.claude/` directory (a sub-project launched on its own) is not read. A check fires only where a documented reader of that location fails to load the file or breaks a documented rule, so a finding is never wrong for any of them, and each message names the reader:
 
-- every rule file under `rules_dir` opens with YAML frontmatter holding a non-empty `paths` list of non-blank strings, and has no `applyTo` key;
-- every `paths` glob matches at least one git-visible file, so a renamed directory cannot silently stop a rule from loading;
-- every skill's `SKILL.md` under `skills_dir` has a `name` equal to its directory, unique among skills, and a non-empty `description`, and every directory under `skills_dir` holds a `SKILL.md` (itself or in a nested skill directory);
-- no frontmatter key repeats;
-- the `instruction_map` section (the `heading` in `file`) lists ``- `label`: `glob`, …`` lines that equal the rule files' stems and their `paths` exactly;
-- a `.mcp.json` at the repository root, when git sees one, parses as JSON, is an object with an `mcpServers` object, and every server is an object with a non-blank string `command` or `url`.
+| Location | Read by | Checked |
+| --- | --- | --- |
+| `.claude/rules/**/*.md` | Claude Code, Copilot CLI | Frontmatter, when line 1 is `---`, closes and parses as a mapping with no repeated key (Claude Code drops unparseable frontmatter and loads the rule for every file). `paths`, when present, is a non-blank string (comma-separated) or a list of non-blank strings. Each glob has closed brackets and matches at least one git-visible file. |
+| `.claude/agents/**/*.md` | Claude Code, Copilot CLI | Frontmatter parses. With a `name`: a non-blank `description`, a name of at most 256 characters that does not start with `-` and has no `:`, unique in the tree. A file without `name` is documentation and is not checked. |
+| `.claude/skills/<dir>/SKILL.md` | Claude Code, Copilot CLI | Frontmatter, when present, parses with no repeated key. The directory is not `synced` and the name is not `anthropic-skills` or `anthropic-skills:*` and has no `<`, control, zero-width, bidi or private-use character, which Claude Code does not load. |
+| `.agents/skills/<dir>/SKILL.md`, `.github/skills/<dir>/SKILL.md`, each `skill_dirs` entry | Agent Skills, Copilot (VS Code) | Frontmatter is present and parses. `name` is 1-64 lowercase letters, digits and hyphens, with no leading, trailing or double hyphen, and equals the directory. `description` is a non-blank string of at most 1024 characters. |
+| `.github/instructions/**/*.instructions.md` | Copilot | When the frontmatter parses: no repeated key, `applyTo` is a string (comma-separated) or a list of non-blank strings whose globs each match a file, `excludeAgent` is `code-review` or `cloud-agent`. |
+| `.github/agents/**/*.md` | Copilot | The base name uses only ASCII letters, digits, `.`, `-` and `_`. Parsed frontmatter has a non-blank `description` and a `target` of `vscode` or `github-copilot`. |
+| `.github/hooks/*.json` | Copilot CLI and cloud agent | JSON object, `version` 1, `hooks` an object whose every value is an array (otherwise Copilot rejects the whole file). |
+| `.mcp.json`, `.github/mcp.json`, `.vscode/mcp.json` | Claude Code and Copilot CLI; Copilot CLI; VS Code | The JSON (JSONC for VS Code) parses. `.mcp.json` has an `mcpServers` object; `.github/mcp.json` has one or is a bare map of servers; `.vscode/mcp.json` keeps them under `servers`, gives every server a `type` and declares every `${input:ID}` in `inputs`. Every server is an object; a server with no type (or `stdio`, `local`) has a `command`, and one with only a `url` and no type is a finding (it is read as a stdio server and skipped); `http`, `streamable-http`, `sse` and `ws` servers have a `url`; `args` is a list of strings; `env` and `headers` are objects of strings. |
+| `CLAUDE.md` and `AGENTS.md` at any depth, `.claude/CLAUDE.md`, `.github/copilot-instructions.md` | Claude Code, Copilot CLI | Every `@path` import resolves, relative to the file or to the repository root. Only `@` at the start of text or after a space or `(`, outside code, followed by a path ending in `.md` or starting with `./` or `../`, counts; quoted, absolute and `~` paths, a target git ignores and `@word` mentions are not checked. |
+
+**Globs.** `paths` globs match as Claude Code matches them: relative to the repository root, a leading `/` anchors, a pattern without another `/` matches at any depth, `*` stays within a directory, `**` crosses directories, `{a,b}` expands and `[...]` is a character class. `applyTo` globs match as Copilot matches them: `*.py` is only the root directory. A glob is reported only when it matches no git-visible file under every reading (a `[` is tried as a class and as a literal, for directories such as `[id]`). Negation, extglobs, backslash escapes and braces inside a comma-separated string are not checked.
+
+**Never reported:** unknown frontmatter keys, a missing `paths` or `applyTo`, `applyTo` in `.claude/rules`, instruction files without frontmatter, `.mcp.json` servers without `tools`, a string where a list is also accepted, a Claude Code skill whose name differs from its directory, subdirectories under `instructions/`, `rules/` and `agents/`, YAML that does not parse in `.github/instructions` and `.github/agents` (Copilot CLI recovers the keys), an unquoted glob such as `paths: **/*.ts` (whether the agents' own parsers accept it is not documented), one skill name in two roots, and `.github/prompts`, `.claude/commands` and settings files.
+
+**`strict = true`** adds: every `.claude/rules` file has frontmatter with at least one `paths` glob and no `applyTo`; `.claude/skills` follows the Agent Skills rules; every directory directly under a skill root holds a `SKILL.md`.
+
+**Instruction map.** With `instruction_map`, the section under `heading` in `file` lists ``- `label`: `glob`, …`` lines that must equal the `.claude/rules` files' stems (`web/forms` for `.claude/rules/web/forms.md`) and their `paths` exactly; a comma-separated `paths` string counts as its globs.
 
 ## Freshness and the restart rule
 
