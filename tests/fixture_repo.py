@@ -99,8 +99,8 @@ text = "/api/external"
 reason = "Served by another service."
 
 [agents]
-rules_dir = ".claude/rules"
-skills_dir = ".claude/skills"
+skill_dirs = ["skills"]
+strict = true
 instruction_map = { file = "AGENTS.md", heading = "Scoped instruction map" }
 """
 

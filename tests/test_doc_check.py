@@ -96,7 +96,7 @@ def repo(tmp_path: Path) -> Path:
 def test_a_clean_checkout_exits_0_with_nothing_on_stdout(repo: Path) -> None:
     code, out, err = check(repo, fixture_fakes())
     assert (code, out) == (0, "")
-    assert err.splitlines()[-1] == "doc-check: 0 findings in 3 docs (5 references, 5 checked)"
+    assert err.splitlines()[-1] == "doc-check: 0 findings in 3 docs (5 references, 5 checked); 0 agent files"
 
 
 def append(path: Path, text: str) -> None:
@@ -256,8 +256,7 @@ def test_an_internal_error_exits_2_and_names_the_crash(repo: Path, monkeypatch: 
 
 AGENTS_TABLE = """\
 [agents]
-rules_dir = ".claude/rules"
-skills_dir = ".claude/skills"
+strict = true
 instruction_map = { file = "AGENTS.md", heading = "Scoped instruction map" }
 """
 
@@ -297,6 +296,30 @@ def test_agent_findings_print_with_the_docs_findings_in_file_order(tmp_path: Pat
             "docs/orphan.md:1: orphaned doc: not reachable from docs/README.md",
         ],
     )
+
+
+def test_the_summary_counts_the_agent_files(tmp_path: Path) -> None:
+    root = agent_repo(tmp_path / "repo")
+    write(root / ".claude" / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\ndescription: Ship.\n---\n")
+    code, _, err = check(root, fixture_fakes())
+    assert code == 0
+    assert err.splitlines()[-1].endswith("; 3 agent files")
+    write(root / ".claude" / "skills" / "deploy" / "SKILL.md", "# Deploy\n")
+    write(root / ".claude" / "rules" / "api.md", "# API\n")
+    assert check(root, fixture_fakes())[2].splitlines()[-1].endswith("; 3 agent files")
+
+
+def test_agent_files_are_checked_without_an_agents_table(repo: Path) -> None:
+    write(repo / ".mcp.json", '{\n  "mcpServers": {\n    "docs": {"url": "https://example.com/mcp"}\n  }\n}\n')
+    code, out, err = check(repo, fixture_fakes())
+    assert (code, out.splitlines()) == (
+        1,
+        [
+            ".mcp.json:3: MCP server 'docs' has a url but no type; Claude Code reads it as a stdio server and skips "
+            'it (add "type": "http")'
+        ],
+    )
+    assert err.splitlines()[-1] == "doc-check: 1 finding in 3 docs (5 references, 5 checked); 1 agent file"
 
 
 def test_agent_findings_are_in_the_json_findings_and_counts(tmp_path: Path) -> None:

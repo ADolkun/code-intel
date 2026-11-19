@@ -62,7 +62,7 @@ def test_full_config_is_read() -> None:
         config.DocIgnore("docs/guide.md", "route", "/api/external", "Served by another service."),
     )
     assert cfg.agents == config.AgentsConfig(
-        ".claude/rules", ".claude/skills", config.InstructionMap("AGENTS.md", "Scoped instruction map")
+        ("skills",), True, config.InstructionMap("AGENTS.md", "Scoped instruction map")
     )
 
 
@@ -428,3 +428,79 @@ def test_a_command_with_a_bad_config_exits_2(
     assert cli.main(["fake", "--repo-root", str(tmp_path)]) == 2
     assert calls == []
     assert "cannot read the config" in capsys.readouterr().err
+
+
+# ── [agents] ─────────────────────────────────────────────────────────────
+
+
+def test_an_empty_agents_table_takes_the_defaults() -> None:
+    assert parse(MINIMAL_CONFIG + "\n[agents]\n").agents == config.AgentsConfig((), False, None)
+
+
+def test_agents_skill_dirs_are_normalized() -> None:
+    cfg = parse(MINIMAL_CONFIG + '\n[agents]\nskill_dirs = ["skills/", "./more/skills"]\n')
+    assert cfg.agents == config.AgentsConfig(("skills", "more/skills"))
+
+
+@pytest.mark.parametrize(
+    ("table", "expected"),
+    [
+        (
+            'rules_dir = ".claude/rules"',
+            "cfg.toml: 'rules_dir' in [agents] was removed in 0.3: .claude/rules is checked automatically. "
+            "Delete the key; add strict = true to keep requiring 'paths' in every rule.",
+        ),
+        (
+            'rules_dir = ".claude/rules"\nskills_dir = "skills"',
+            "cfg.toml: 'rules_dir' in [agents] was removed in 0.3: .claude/rules is checked automatically. "
+            "Delete the key; add strict = true to keep requiring 'paths' in every rule.",
+        ),
+        (
+            'skills_dir = ".claude/skills"',
+            "cfg.toml: 'skills_dir' in [agents] was removed in 0.3: .claude/skills is checked automatically. "
+            "Delete the key; add strict = true to keep requiring a SKILL.md with a matching name in every "
+            "skill directory.",
+        ),
+        (
+            'skills_dir = ".github/skills/"',
+            "cfg.toml: 'skills_dir' in [agents] was removed in 0.3: .github/skills is checked automatically. "
+            "Delete the key; add strict = true to keep requiring a SKILL.md with a matching name in every "
+            "skill directory.",
+        ),
+        (
+            'skills_dir = ".agents/skills"',
+            "cfg.toml: 'skills_dir' in [agents] was removed in 0.3: .agents/skills is checked automatically. "
+            "Delete the key; add strict = true to keep requiring a SKILL.md with a matching name in every "
+            "skill directory.",
+        ),
+        (
+            'skills_dir = "skills"',
+            "cfg.toml: 'skills_dir' in [agents] was removed in 0.3: use skill_dirs = [\"skills\"].",
+        ),
+    ],
+    ids=["rules-dir", "rules-dir-first", "claude-skills", "github-skills", "agents-skills", "other"],
+)
+def test_the_removed_agents_keys_say_what_to_do(table: str, expected: str) -> None:
+    assert error_of(f"{MINIMAL_CONFIG}\n[agents]\n{table}\n") == expected
+
+
+@pytest.mark.parametrize(
+    ("table", "expected"),
+    [
+        (
+            'skill_dirs = [".claude/skills"]',
+            "cfg.toml: 'skill_dirs' in [agents]: .claude/skills is checked automatically; remove it from the list",
+        ),
+        (
+            'skill_dirs = ["skills", ".agents/skills/"]',
+            "cfg.toml: 'skill_dirs' in [agents]: .agents/skills is checked automatically; remove it from the list",
+        ),
+        ('skill_dirs = "skills"', "cfg.toml: 'skill_dirs' in [agents] must be a list of non-empty strings"),
+        ('skill_dirs = ["../skills"]', "cfg.toml: 'skill_dirs' in [agents] must be a repository-relative path"),
+        ('strict = "yes"', "cfg.toml: 'strict' in [agents] must be true or false"),
+        ("colour = 1", "cfg.toml: unknown key 'colour' in [agents]"),
+    ],
+    ids=["conventional-root", "conventional-root-with-slash", "string", "outside", "strict-type", "unknown-key"],
+)
+def test_invalid_agents_values_name_the_key_and_the_file(table: str, expected: str) -> None:
+    assert error_of(f"{MINIMAL_CONFIG}\n[agents]\n{table}\n").startswith(expected)

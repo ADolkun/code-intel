@@ -1,18 +1,23 @@
-"""The agent-file checks: rule frontmatter and globs, skills, duplicate keys and
-the instruction map, each failure with its exact ``path:line: message`` line."""
+"""The agent-file checks: discovery at every Claude Code and Copilot location,
+rules, subagents, Copilot instructions and agents, ``strict`` and the
+instruction map, each failure with its exact ``path:line: message`` line."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
+from fake_repo_files import repo_files_on_disk
 from mcp_fixtures import FakeAnalyzers, config_toml, make_repo, make_runtime, write, write_config
 
 from stack_intel import agent_files
 from stack_intel.config import AgentsConfig, InstructionMap
 
 MAP_FILE = "AGENTS.md"
-AGENTS = AgentsConfig(".claude/rules", ".claude/skills", InstructionMap(MAP_FILE, "Scoped instruction map"))
+INSTRUCTION_MAP = InstructionMap(MAP_FILE, "Scoped instruction map")
+DEFAULT = AgentsConfig()
+MAPPED = AgentsConfig(instruction_map=INSTRUCTION_MAP)
+STRICT = AgentsConfig(strict=True, instruction_map=INSTRUCTION_MAP)
 
 API_RULE = """\
 ---
@@ -76,9 +81,9 @@ def repo(tmp_path: Path) -> Path:
     return layout(tmp_path / "repo")
 
 
-def lines(root: Path, agents: AgentsConfig = AGENTS) -> list[str]:
-    visible = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
-    return [f"{f.file}:{f.line}: {f.message}" for f in agent_files.check(root, agents, visible)]
+def lines(root: Path, agents: AgentsConfig = STRICT) -> list[str]:
+    report = agent_files.check(root, agents, repo_files_on_disk(root))
+    return [f"{f.file}:{f.line}: {f.message}" for f in report.findings]
 
 
 def put(root: Path, rel: str, text: str) -> None:
@@ -87,223 +92,407 @@ def put(root: Path, rel: str, text: str) -> None:
 
 def test_a_consistent_set_of_agent_files_has_no_findings(repo: Path) -> None:
     assert lines(repo) == []
+    assert lines(repo, DEFAULT) == []
 
 
-def test_a_missing_rules_and_skills_directory_is_not_a_finding(tmp_path: Path) -> None:
+def test_a_checkout_without_agent_files_has_no_findings_and_no_files(tmp_path: Path) -> None:
     write(tmp_path / "x.txt", "x")
-    assert lines(tmp_path, AgentsConfig(".claude/rules", ".claude/skills", None)) == []
+    report = agent_files.check(tmp_path, DEFAULT, repo_files_on_disk(tmp_path))
+    assert (report.findings, report.files) == ([], ())
 
 
-# ── Rule frontmatter ─────────────────────────────────────────────────────
+# ── Discovery ────────────────────────────────────────────────────────────
+
+
+def test_every_conventional_location_is_found_without_configuration(tmp_path: Path) -> None:
+    files = {
+        ".claude/rules/a.md": "# A\n",
+        ".claude/rules/web/b.md": "# B\n",
+        ".claude/agents/review.md": "---\nname: review\ndescription: Reviews.\n---\n",
+        ".claude/skills/one/SKILL.md": "# One\n",
+        ".agents/skills/two/SKILL.md": "---\nname: two\ndescription: Two.\n---\n",
+        ".github/skills/three/SKILL.md": "---\nname: three\ndescription: Three.\n---\n",
+        ".github/instructions/py.instructions.md": "# Py\n",
+        ".github/agents/helper.agent.md": "---\ndescription: Helps.\n---\n",
+        ".github/hooks/hooks.json": '{"version": 1, "hooks": {}}',
+        ".mcp.json": '{"mcpServers": {}}',
+        ".github/mcp.json": '{"mcpServers": {}}',
+        ".vscode/mcp.json": '{"servers": {}}',
+        "CLAUDE.md": "@AGENTS.md\n",
+        "AGENTS.md": "# Agents\n",
+        ".claude/CLAUDE.md": "# Claude\n",
+        ".github/copilot-instructions.md": "# Copilot\n",
+        "web/AGENTS.md": "# Web\n",
+    }
+    for rel, text in files.items():
+        put(tmp_path, rel, text)
+    report = agent_files.check(tmp_path, DEFAULT, repo_files_on_disk(tmp_path))
+    assert report.findings == []
+    assert report.files == tuple(sorted(files))
+
+
+def test_other_files_at_the_locations_are_not_agent_files(tmp_path: Path) -> None:
+    put(tmp_path, ".github/instructions/notes.md", "---\napplyTo: 3\n---\n")
+    put(tmp_path, ".github/hooks/nested/x.json", "{")
+    put(tmp_path, ".claude/skills/deploy/references/SKILL.md", "---\nname: Not A Skill\n---\n")
+    put(tmp_path, ".agents/skills/deploy/references/SKILL.md", "no frontmatter\n")
+    put(tmp_path, ".claude/rules/notes.txt", "x")
+    put(tmp_path, ".github/prompts/x.prompt.md", "---\nagent: [\n---\n")
+    put(tmp_path, ".claude/commands/x.md", "---\nname: [\n---\n")
+    put(tmp_path, ".claude/settings.json", "{")
+    put(tmp_path, ".github/copilot/settings.json", "{")
+    report = agent_files.check(tmp_path, DEFAULT, repo_files_on_disk(tmp_path))
+    assert (report.findings, report.files) == ([], ())
+
+
+def test_nested_claude_directories_are_not_read(tmp_path: Path) -> None:
+    put(tmp_path, "sub/.claude/rules/a.md", "---\npaths: [\n---\n")
+    put(tmp_path, "sub/.claude/agents/a.md", "---\nname: a\n---\n")
+    put(tmp_path, "sub/.mcp.json", "{")
+    assert lines(tmp_path, DEFAULT) == []
+
+
+def test_a_file_git_does_not_see_is_not_checked(repo: Path) -> None:
+    put(repo, ".mcp.json", "{")
+    files = repo_files_on_disk(repo)
+    visible = files.__class__(
+        repo_root=repo, files=files.files - {".mcp.json"}, tracked=files.tracked - {".mcp.json"}, dirs=files.dirs
+    )
+    assert agent_files.check(repo, STRICT, visible).findings == []
+
+
+# ── Rules: default checks ────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("# API\n", ".claude/rules/api.md:1: missing YAML frontmatter: the file must open with a --- line"),
-        ("---\npaths:\n  - src/api/**\n", ".claude/rules/api.md:1: YAML frontmatter is not closed by a --- line"),
-        ("---\n---\n", ".claude/rules/api.md:1: YAML frontmatter must be a mapping"),
-        ("---\n- a\n---\n", ".claude/rules/api.md:1: YAML frontmatter must be a mapping"),
+        (
+            "---\npaths:\n  - src/api/**\n",
+            ".claude/rules/api.md:1: YAML frontmatter is not closed by a --- line; "
+            "Claude Code ignores it and loads the rule for every file",
+        ),
+        (
+            "---\n- a\n---\n",
+            ".claude/rules/api.md:1: YAML frontmatter must be a mapping; "
+            "Claude Code ignores it and loads the rule for every file",
+        ),
         (
             "---\npaths: [src/api/**\n---\n",
-            ".claude/rules/api.md:2: invalid YAML frontmatter: expected ',' or ']', but got '<stream end>'",
+            ".claude/rules/api.md:2: invalid YAML frontmatter: expected ',' or ']', but got '<stream end>'; "
+            "Claude Code ignores it and loads the rule for every file",
         ),
         (
-            "---\ndescription: x\n---\n",
-            ".claude/rules/api.md:1: frontmatter 'paths' must be a non-empty list of non-blank strings",
-        ),
-        (
-            "---\npaths: []\n---\n",
-            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-empty list of non-blank strings",
-        ),
-        (
-            "---\npaths: src/api/**\n---\n",
-            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-empty list of non-blank strings",
+            '---\npaths: ""\n---\n',
+            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings",
         ),
         (
             '---\npaths:\n  - "src/api/**"\n  - " "\n---\n',
-            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-empty list of non-blank strings",
+            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings",
         ),
         (
             "---\npaths:\n  - 3\n---\n",
-            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-empty list of non-blank strings",
+            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings",
+        ),
+        (
+            "---\npaths: {a: b}\n---\n",
+            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings",
+        ),
+        (
+            '---\npaths:\n  - "src/api/**"\npaths:\n  - "src/ui/**"\n---\n',
+            ".claude/rules/api.md:4: frontmatter key 'paths' is repeated (first at line 2)",
+        ),
+        (
+            '---\npaths:\n  - "src/api/**"\n  - "src/renamed/**"\n---\n',
+            ".claude/rules/api.md:4: paths glob 'src/renamed/**' matches no git-visible file",
+        ),
+        (
+            '---\npaths: "src/api/**, src/renamed/**"\n---\n',
+            ".claude/rules/api.md:2: paths glob 'src/renamed/**' matches no git-visible file",
+        ),
+        (
+            '---\npaths:\n  - "src/api/[id"\n---\n',
+            ".claude/rules/api.md:3: paths glob 'src/api/[id' has a '[' that no ']' closes; "
+            "Claude Code matches no file with it",
         ),
     ],
     ids=[
-        "no-frontmatter",
         "unclosed",
-        "empty",
         "not-a-mapping",
         "invalid-yaml",
-        "no-paths",
-        "empty-paths",
-        "paths-is-a-string",
-        "blank-path",
-        "non-string-path",
+        "blank-string",
+        "blank-item",
+        "non-string-item",
+        "mapping",
+        "repeated-key",
+        "no-match-item",
+        "no-match-comma-string",
+        "unclosed-bracket",
     ],
 )
-def test_a_rule_without_valid_paths_is_reported(repo: Path, text: str, expected: str) -> None:
+def test_a_broken_rule_is_reported_by_default(repo: Path, text: str, expected: str) -> None:
     put(repo, ".claude/rules/api.md", text)
-    assert lines(repo)[0] == expected
-
-
-def test_apply_to_is_rejected_beside_valid_paths(repo: Path) -> None:
-    put(repo, ".claude/rules/api.md", '---\napplyTo: "src/**"\npaths:\n  - "src/api/**"\n---\n')
-    assert lines(repo) == [".claude/rules/api.md:2: frontmatter key 'applyTo' is not allowed; use 'paths'"]
-
-
-def test_a_repeated_frontmatter_key_is_reported_at_the_repeat(repo: Path) -> None:
-    put(repo, ".claude/rules/api.md", '---\npaths:\n  - "src/api/**"\npaths:\n  - "src/ui/**"\n---\n')
-    assert lines(repo)[0] == ".claude/rules/api.md:4: frontmatter key 'paths' is repeated (first at line 2)"
-
-
-def test_a_glob_matching_no_file_is_reported_at_its_item(repo: Path) -> None:
-    put(repo, ".claude/rules/api.md", '---\npaths:\n  - "src/api/**"\n  - "src/renamed/**"\n---\n')
-    assert lines(repo)[0] == ".claude/rules/api.md:4: paths glob 'src/renamed/**' matches no git-visible file"
-
-
-def test_a_glob_is_matched_against_git_visible_files_only(repo: Path) -> None:
-    visible = {"src/ui/view.tsx", ".claude/rules/api.md", ".claude/rules/ui.md", MAP_FILE}
-    found = [f"{f.file}:{f.line}: {f.message}" for f in agent_files.check(repo, AGENTS, visible)]
-    assert ".claude/rules/api.md:3: paths glob 'src/api/**' matches no git-visible file" in found
+    assert lines(repo, DEFAULT) == [expected]
 
 
 @pytest.mark.parametrize(
-    ("glob", "matches"),
+    "text",
     [
-        ("src/ui-tests/*.{ts,tsx}", True),
-        ("src/ui-tests/*.{ts,js}", False),
-        ("src/**/view.tsx", True),
-        ("src/*", False),
-        ("src/api/handler.py", True),
-        ("**/*.py", True),
+        "# API, loaded for every file\n",
+        "---\ndescription: x\n---\n",
+        "---\n---\n",
+        "---\npaths:\n---\n",
+        "---\npaths: []\n---\n",
+        '---\npaths: "src/api/**, src/ui/**"\n---\n',
+        '---\napplyTo: "src/**"\npaths:\n  - "src/api/**"\n---\n',
+        '---\napplyTo: "src/**"\n---\n',
+        "---\npaths: **/*.py\n---\n",
+        "---\npaths:\n  - *.tsx\n---\n",
+        '---\npaths: ["*.py"]\nunknown: 1\nalwaysApply: true\n---\n',
+        '---\npaths: ["!src/**", "src/@(a|b)/**", "src/\\\\[x\\\\]", "src/{1..3}/**"]\n---\n',
+        '---\npaths: "src/**/*.{ts,js}, src/api/**"\n---\n',
+        '---\npaths: ["/src/api/handler.py", "view.tsx", "src/ui/[vw]iew.tsx"]\n---\n',
+    ],
+    ids=[
+        "no-frontmatter",
+        "no-paths",
+        "empty-frontmatter",
+        "null-paths",
+        "empty-list",
+        "comma-string",
+        "apply-to-beside-paths",
+        "apply-to-alone",
+        "unquoted-glob",
+        "unquoted-glob-item",
+        "unknown-keys",
+        "unmodelled-globs",
+        "braces-in-a-comma-string",
+        "anchored-any-depth-and-class",
     ],
 )
-def test_globs_expand_braces_and_stars(repo: Path, glob: str, matches: bool) -> None:
-    put(repo, ".claude/rules/api.md", f'---\npaths:\n  - "{glob}"\n---\n')
-    found = [m for m in lines(repo) if "matches no git-visible file" in m]
-    assert (found == []) is matches
+def test_a_rule_the_readers_accept_is_not_reported_by_default(repo: Path, text: str) -> None:
+    put(repo, ".claude/rules/api.md", text)
+    assert lines(repo, DEFAULT) == []
 
 
-# ── Skills ───────────────────────────────────────────────────────────────
+def test_a_glob_is_matched_against_git_visible_files_only(repo: Path) -> None:
+    files = repo_files_on_disk(repo)
+    hidden = files.__class__(
+        repo_root=repo,
+        files=files.files - {"src/api/handler.py"},
+        tracked=files.tracked - {"src/api/handler.py"},
+        dirs=files.dirs - {"src/api"},
+    )
+    found = [f"{f.file}:{f.line}: {f.message}" for f in agent_files.check(repo, STRICT, hidden).findings]
+    assert ".claude/rules/api.md:3: paths glob 'src/api/**' matches no git-visible file" in found
 
 
-def test_a_skill_name_must_equal_its_directory(repo: Path) -> None:
-    put(repo, ".claude/skills/deploy/SKILL.md", SKILL.replace("name: deploy", "name: release"))
-    assert lines(repo) == [
-        ".claude/skills/deploy/SKILL.md:2: skill name 'release' does not match its directory 'deploy'"
-    ]
-
-
-def test_a_skill_name_must_be_present(repo: Path) -> None:
-    put(repo, ".claude/skills/deploy/SKILL.md", "---\ndescription: Ship.\n---\n")
-    assert lines(repo) == [".claude/skills/deploy/SKILL.md:1: frontmatter 'name' must be a non-blank string"]
-
-
-@pytest.mark.parametrize("description", ["description:", "description: ' '", "description: [a]"])
-def test_a_skill_needs_a_description(repo: Path, description: str) -> None:
-    put(repo, ".claude/skills/deploy/SKILL.md", f"---\nname: deploy\n{description}\n---\n")
-    assert lines(repo) == [".claude/skills/deploy/SKILL.md:3: frontmatter 'description' must be a non-blank string"]
-
-
-def test_a_skill_without_a_description_key_is_reported_at_line_1(repo: Path) -> None:
-    put(repo, ".claude/skills/deploy/SKILL.md", "---\nname: deploy\n---\n")
-    assert lines(repo) == [".claude/skills/deploy/SKILL.md:1: frontmatter 'description' must be a non-blank string"]
-
-
-def test_two_skills_with_one_name_are_reported_once_at_the_second(repo: Path) -> None:
-    put(repo, ".claude/skills/a/deeper/SKILL.md", SKILL.replace("name: deploy", "name: deeper"))
-    put(repo, ".claude/skills/deeper/SKILL.md", SKILL.replace("name: deploy", "name: deeper"))
-    assert lines(repo) == [
-        ".claude/skills/deeper/SKILL.md:2: duplicate skill name 'deeper' (also in .claude/skills/a/deeper/SKILL.md)"
-    ]
-
-
-def test_a_repeated_skill_key_is_reported(repo: Path) -> None:
-    put(repo, ".claude/skills/deploy/SKILL.md", "---\nname: deploy\ndescription: a\nname: deploy\n---\n")
-    assert lines(repo) == [".claude/skills/deploy/SKILL.md:4: frontmatter key 'name' is repeated (first at line 2)"]
-
-
-def test_a_skill_directory_without_a_skill_md_is_reported(repo: Path) -> None:
-    put(repo, ".claude/skills/notes/README.md", "# Notes\n")
-    assert lines(repo) == [".claude/skills/notes:1: skill directory 'notes' has no SKILL.md"]
-
-
-def test_a_skill_md_in_the_wrong_case_is_not_a_skill(repo: Path) -> None:
-    put(repo, ".claude/skills/notes/skill.md", SKILL.replace("name: deploy", "name: notes"))
-    assert lines(repo) == [".claude/skills/notes:1: skill directory 'notes' has no SKILL.md"]
-
-
-def test_a_directory_grouping_skills_and_loose_files_are_not_reported(repo: Path) -> None:
-    put(repo, ".claude/skills/group/inner/SKILL.md", SKILL.replace("name: deploy", "name: inner"))
-    put(repo, ".claude/skills/README.md", "# Skills\n")
-    assert lines(repo) == []
-
-
-# ── MCP servers ──────────────────────────────────────────────────────────
-
-MCP_JSON = """\
-{
-  "mcpServers": {
-    "local": {"command": "uv", "args": ["run", "server"]},
-    "remote": {"url": "https://example.com/mcp"}
-  }
-}
-"""
-
-
-def test_a_valid_mcp_json_has_no_findings(repo: Path) -> None:
-    put(repo, ".mcp.json", MCP_JSON)
-    assert lines(repo) == []
+# ── Rules: strict ────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("{", ".mcp.json:1: invalid JSON: Expecting property name enclosed in double quotes"),
+        ("# API\n", ".claude/rules/api.md:1: missing YAML frontmatter: the file must open with a --- line (strict)"),
+        ("---\ndescription: x\n---\n", ".claude/rules/api.md:1: frontmatter 'paths' must name a glob (strict)"),
+        ("---\n---\n", ".claude/rules/api.md:1: frontmatter 'paths' must name a glob (strict)"),
+        ("---\npaths: []\n---\n", ".claude/rules/api.md:2: frontmatter 'paths' must name a glob (strict)"),
         (
-            '{\n  "mcpServers": {\n    "a": 1,\n  }\n}\n',
-            ".mcp.json:3: invalid JSON: Illegal trailing comma before end of object",
+            '---\napplyTo: "src/**"\npaths:\n  - "src/api/**"\n---\n',
+            ".claude/rules/api.md:2: frontmatter key 'applyTo' is not allowed; use 'paths' (strict)",
         ),
-        ("[]", ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
-        ("{}", ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
-        ('{"mcpServers": []}', ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
-        ('{"servers": {}}', ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
     ],
-    ids=["unclosed", "trailing-comma", "array", "no-servers-key", "servers-not-an-object", "wrong-key"],
+    ids=["no-frontmatter", "no-paths", "empty-frontmatter", "empty-paths", "apply-to"],
 )
-def test_an_mcp_json_that_is_not_an_object_with_servers_is_reported(repo: Path, text: str, expected: str) -> None:
-    put(repo, ".mcp.json", text)
-    assert lines(repo) == [expected]
+def test_strict_requires_scoped_rules(repo: Path, text: str, expected: str) -> None:
+    put(repo, ".claude/rules/api.md", text)
+    assert lines(repo, AgentsConfig(strict=True))[0] == expected
 
 
-@pytest.mark.parametrize(
-    "server",
-    [
-        '"uv"',
-        "null",
-        "{}",
-        '{"args": ["x"]}',
-        '{"command": ""}',
-        '{"command": "  "}',
-        '{"command": 3}',
-        '{"url": ["x"]}',
-    ],
-)
-def test_a_server_needs_a_string_command_or_url(repo: Path, server: str) -> None:
-    put(repo, ".mcp.json", f'{{\n  "mcpServers": {{\n    "ok": {{"command": "uv"}},\n    "bad": {server}\n  }}\n}}\n')
-    assert lines(repo) == [".mcp.json:4: MCP server 'bad' must be an object with a string 'command' or 'url'"]
-
-
-def test_an_empty_mcp_servers_object_is_valid(repo: Path) -> None:
-    put(repo, ".mcp.json", '{"mcpServers": {}}')
+def test_strict_accepts_a_comma_string(repo: Path) -> None:
+    put(repo, ".claude/rules/api.md", '---\npaths: "src/api/**"\n---\n')
     assert lines(repo) == []
 
 
-def test_an_mcp_json_git_does_not_see_is_not_checked(repo: Path) -> None:
-    put(repo, ".mcp.json", "{")
-    visible = {p.relative_to(repo).as_posix() for p in repo.rglob("*") if p.is_file()} - {".mcp.json"}
-    assert agent_files.check(repo, AGENTS, visible) == []
+# ── Subagents ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "---\nname: review\n---\n",
+            ".claude/agents/review.md:1: subagent 'review' has no description; Claude Code skips it",
+        ),
+        (
+            "---\nname: review\ndescription: ' '\n---\n",
+            ".claude/agents/review.md:3: subagent 'review' has no description; Claude Code skips it",
+        ),
+        (
+            "---\nname: -review\ndescription: x\n---\n",
+            ".claude/agents/review.md:2: subagent name '-review' must not start with '-' (Claude Code)",
+        ),
+        (
+            "---\nname: team:review\ndescription: x\n---\n",
+            ".claude/agents/review.md:2: subagent name 'team:review' must not contain ':' (Claude Code)",
+        ),
+        (
+            f"---\nname: {'r' * 257}\ndescription: x\n---\n",
+            f".claude/agents/review.md:2: subagent name {'r' * 40!r}... is longer than 256 characters (Claude Code)",
+        ),
+        (
+            "---\nname: [review\n---\n",
+            ".claude/agents/review.md:2: invalid YAML frontmatter: expected ',' or ']', but got '<stream end>'; "
+            "Claude Code skips the subagent",
+        ),
+        (
+            "---\nname: review\n",
+            ".claude/agents/review.md:1: YAML frontmatter is not closed by a --- line; Claude Code skips the subagent",
+        ),
+    ],
+    ids=["no-description", "blank-description", "leading-dash", "colon", "too-long", "invalid-yaml", "unclosed"],
+)
+def test_a_broken_subagent_is_reported(tmp_path: Path, text: str, expected: str) -> None:
+    put(tmp_path, ".claude/agents/review.md", text)
+    assert lines(tmp_path, DEFAULT) == [expected]
+
+
+def test_a_subagent_name_used_twice_is_reported_at_the_second(tmp_path: Path) -> None:
+    put(tmp_path, ".claude/agents/a/review.md", "---\nname: review\ndescription: x\n---\n")
+    put(tmp_path, ".claude/agents/review.md", "---\nname: review\ndescription: y\n---\n")
+    assert lines(tmp_path, DEFAULT) == [
+        ".claude/agents/review.md:2: subagent name 'review' is also used by .claude/agents/a/review.md; "
+        "Claude Code loads only one of them"
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "# Agents in this folder\n",
+        "---\ndescription: no name, so documentation\n---\n",
+        "---\nname: r\ndescription: x\ntools: Read, Grep\nmodel: sonnet\ncustomKey: 1\n---\n",
+        f"---\nname: {'r' * 256}\ndescription: x\n---\n",
+    ],
+    ids=["readme", "no-name", "unknown-keys", "256-characters"],
+)
+def test_a_valid_subagent_or_a_readme_is_not_reported(tmp_path: Path, text: str) -> None:
+    put(tmp_path, ".claude/agents/sub/dir/review.md", text)
+    assert lines(tmp_path, DEFAULT) == []
+
+
+# ── Copilot instructions ─────────────────────────────────────────────────
+
+INSTRUCTIONS = ".github/instructions/py.instructions.md"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "---\napplyTo: 3\n---\n",
+            f"{INSTRUCTIONS}:2: frontmatter 'applyTo' must be a string or a list of non-blank strings",
+        ),
+        (
+            '---\napplyTo: ["src/**", ""]\n---\n',
+            f"{INSTRUCTIONS}:2: frontmatter 'applyTo' must be a string or a list of non-blank strings",
+        ),
+        (
+            '---\napplyTo: "src/**, lib/**"\n---\n',
+            f"{INSTRUCTIONS}:2: applyTo glob 'lib/**' matches no git-visible file",
+        ),
+        ('---\napplyTo:\n  - "*.py"\n---\n', f"{INSTRUCTIONS}:3: applyTo glob '*.py' matches no git-visible file"),
+        (
+            '---\napplyTo: "**"\nexcludeAgent: coding-agent\n---\n',
+            f"{INSTRUCTIONS}:3: excludeAgent 'coding-agent' must be 'code-review' or 'cloud-agent'",
+        ),
+        (
+            '---\napplyTo: "**"\napplyTo: "src/**"\n---\n',
+            f"{INSTRUCTIONS}:3: frontmatter key 'applyTo' is repeated (first at line 2)",
+        ),
+    ],
+    ids=["number", "blank-item", "comma-string", "star-is-the-root-only", "exclude-agent", "repeated-key"],
+)
+def test_broken_copilot_instructions_are_reported(repo: Path, text: str, expected: str) -> None:
+    put(repo, INSTRUCTIONS, text)
+    assert lines(repo, DEFAULT) == [expected]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "# No frontmatter\n",
+        "---\ndescription: manual only\n---\n",
+        "---\napplyTo: [src/**\n---\n",
+        "---\napplyTo: **/*.py\n---\n",
+        '---\napplyTo: ["src/**/*.py", "**/*.tsx"]\nexcludeAgent: "code-review"\nname: x\n---\n',
+        '---\napplyTo: "src/**/*.{ts,tsx}, src/api/**"\n---\n',
+        '---\napplyTo: ""\n---\n',
+        '---\napplyTo: "  "\n---\n',
+        "---\napplyTo:\nexcludeAgent:\n---\n",
+        '---\nexcludeAgent: ["code-review"]\n---\n',
+    ],
+    ids=[
+        "no-frontmatter",
+        "no-apply-to",
+        "invalid-yaml",
+        "unquoted-glob",
+        "valid",
+        "braces-in-string",
+        "empty",
+        "blank",
+        "null-keys",
+        "exclude-agent-list",
+    ],
+)
+def test_copilot_instructions_the_readers_accept_are_not_reported(repo: Path, text: str) -> None:
+    put(repo, INSTRUCTIONS, text)
+    put(repo, ".github/instructions/sub/dir/x.instructions.md", "# Nested\n")
+    assert lines(repo, DEFAULT) == []
+
+
+# ── Copilot custom agents ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("rel", "text", "expected"),
+    [
+        (
+            ".github/agents/my agent.agent.md",
+            "---\ndescription: x\n---\n",
+            ".github/agents/my agent.agent.md:1: custom agent file name 'my agent.agent.md' may use only "
+            "ASCII letters, digits, '.', '-' and '_' (Copilot)",
+        ),
+        (
+            ".github/agents/helper.agent.md",
+            "---\nname: helper\n---\n",
+            ".github/agents/helper.agent.md:1: custom agent 'helper' has no description; Copilot requires one",
+        ),
+        (
+            ".github/agents/helper.md",
+            "---\ndescription: x\ntarget: claude\n---\n",
+            ".github/agents/helper.md:3: custom agent target 'claude' must be 'vscode' or 'github-copilot'",
+        ),
+    ],
+    ids=["file-name", "no-description", "target"],
+)
+def test_broken_copilot_agents_are_reported(tmp_path: Path, rel: str, text: str, expected: str) -> None:
+    put(tmp_path, rel, text)
+    assert lines(tmp_path, DEFAULT) == [expected]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "# Agents\n",
+        "---\ndescription: [x\n---\n",
+        "---\ndescription: x\ntarget: vscode\ntools: [read, edit]\nunknown: 1\n---\n",
+    ],
+    ids=["readme", "invalid-yaml", "valid"],
+)
+def test_copilot_agents_the_readers_accept_are_not_reported(tmp_path: Path, text: str) -> None:
+    put(tmp_path, ".github/agents/team/helper.agent.md", text)
+    assert lines(tmp_path, DEFAULT) == []
 
 
 # ── Instruction map ──────────────────────────────────────────────────────
@@ -332,6 +521,11 @@ def test_the_map_must_list_a_rules_paths_exactly(repo: Path) -> None:
     ]
 
 
+def test_a_comma_string_is_compared_with_the_map_as_its_split_set(repo: Path) -> None:
+    put(repo, ".claude/rules/ui.md", '---\npaths: "src/ui/**,  src/ui-tests/*.{ts,tsx}"\n---\n')
+    assert lines(repo) == []
+
+
 def test_the_order_of_globs_in_the_map_does_not_matter(repo: Path) -> None:
     put(repo, MAP_FILE, MAP.replace("`src/ui-tests/*.{ts,tsx}`, `src/ui/**`", "`src/ui/**`, `src/ui-tests/*.{ts,tsx}`"))
     assert lines(repo) == []
@@ -349,7 +543,7 @@ def test_the_map_section_ends_at_the_next_heading_of_its_level_or_above(repo: Pa
 
 def test_a_missing_map_heading_is_reported(repo: Path) -> None:
     put(repo, MAP_FILE, "# Agents\n")
-    assert lines(repo) == ["AGENTS.md:1: no heading 'Scoped instruction map'"]
+    assert lines(repo, MAPPED) == ["AGENTS.md:1: no heading 'Scoped instruction map'"]
 
 
 def test_a_missing_map_file_is_reported(repo: Path) -> None:
@@ -359,9 +553,11 @@ def test_a_missing_map_file_is_reported(repo: Path) -> None:
     assert found[0].startswith("AGENTS.md:1: cannot read the file (FileNotFoundError")
 
 
-def test_a_rule_with_invalid_paths_is_reported_once_not_also_as_a_map_mismatch(repo: Path) -> None:
-    put(repo, ".claude/rules/api.md", "---\npaths: []\n---\n")
-    assert lines(repo) == [".claude/rules/api.md:2: frontmatter 'paths' must be a non-empty list of non-blank strings"]
+def test_a_rule_with_unreadable_paths_is_reported_once_not_also_as_a_map_mismatch(repo: Path) -> None:
+    put(repo, ".claude/rules/api.md", "---\npaths: 3\n---\n")
+    assert lines(repo) == [
+        ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings"
+    ]
 
 
 def test_nested_rule_files_are_labelled_by_their_path_below_the_rules_directory(repo: Path) -> None:
@@ -372,15 +568,14 @@ def test_nested_rule_files_are_labelled_by_their_path_below_the_rules_directory(
 
 def test_without_an_instruction_map_only_the_files_are_checked(repo: Path) -> None:
     put(repo, MAP_FILE, "# Agents\n")
-    assert lines(repo, AgentsConfig(".claude/rules", ".claude/skills", None)) == []
+    assert lines(repo, AgentsConfig(strict=True)) == []
 
 
 # ── Through the runtime ──────────────────────────────────────────────────
 
 AGENTS_TABLE = """\
 [agents]
-rules_dir = ".claude/rules"
-skills_dir = ".claude/skills"
+strict = true
 instruction_map = { file = "AGENTS.md", heading = "Scoped instruction map" }
 """
 
@@ -389,13 +584,18 @@ def test_the_runtime_reads_the_agents_table_and_lists_the_findings(tmp_path: Pat
     root = layout(make_repo(tmp_path / "repo"))
     write_config(root, config_toml() + AGENTS_TABLE)
     rt = make_runtime(root, FakeAnalyzers())
-    assert rt.get_agent_findings() == []
+    assert rt.get_agent_report().findings == []
     put(root, ".claude/rules/api.md", "# API\n")
-    (finding,) = rt.get_agent_findings()
+    (finding,) = rt.get_agent_report().findings
     assert (finding.file, finding.line, finding.kind, finding.status) == (".claude/rules/api.md", 1, "agent", "invalid")
 
 
-def test_the_runtime_has_no_agent_findings_without_the_agents_table(tmp_path: Path) -> None:
+def test_the_runtime_checks_the_conventional_locations_without_the_agents_table(tmp_path: Path) -> None:
     root = layout(make_repo(tmp_path / "repo"))
     put(root, ".claude/rules/api.md", "# API\n")
-    assert make_runtime(root, FakeAnalyzers()).get_agent_findings() == []
+    rt = make_runtime(root, FakeAnalyzers())
+    assert rt.get_agent_report().findings == []
+    put(root, ".mcp.json", '{"mcpServers": {"docs": {"url": "https://example.com/mcp"}}}')
+    (finding,) = rt.get_agent_report().findings
+    assert (finding.file, finding.kind, finding.status) == (".mcp.json", "agent", "invalid")
+    assert ".claude/rules/api.md" in rt.get_agent_report().files
