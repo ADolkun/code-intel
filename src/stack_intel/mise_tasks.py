@@ -37,7 +37,9 @@ _CONFIG_RE = re.compile(
 TASK_DIRS: tuple[str, ...] = ("mise-tasks", ".mise-tasks", "mise/tasks", ".mise/tasks", ".config/mise/tasks")
 _TASK_DIR_RE = re.compile(r"(?:^|/)(" + "|".join(re.escape(d) for d in TASK_DIRS) + r")/(.+)$")
 _REMOTE_PREFIXES = ("git::", "oci::", "zip::", "http://", "https://")
-_HEADER_RE = re.compile(r"^\s*(?:#|//|::)\s*(?:MISE|\[MISE\])(?:\s+(.*))?$")
+_HEADER_RE = re.compile(r"^\s*(?:#|//|::|--)\s*(?:MISE|\[MISE\])(?:\s+(.*))?$")
+# Anything shaped like a header line under another comment marker.
+_HEADER_LIKE_RE = re.compile(r"^\s*[^\s\w]{1,3}\s*\[?MISE\]?(?:\s|$)")
 _NO_ALIASES: Mapping[str, str] = MappingProxyType({})
 
 
@@ -145,7 +147,12 @@ def read_mise_file(data: Mapping[str, object], rel: str, *, task_file: bool) -> 
 def file_task_header(rel: str, text: str) -> MiseFile:
     """The aliases a file task's ``#MISE`` header lines declare. A header that
     is not TOML, or one that ``extends`` another task, leaves them unknown."""
-    lines = [match.group(1) or "" for line in text.splitlines() if (match := _HEADER_RE.match(line))]
+    lines: list[str] = []
+    for line in text.splitlines():
+        if (match := _HEADER_RE.match(line)) is not None:
+            lines.append(match.group(1) or "")
+        elif _HEADER_LIKE_RE.match(line):
+            return MiseFile(frozenset(), opaque=f"{rel} has a MISE header line the docs check cannot read")
     if not lines:
         return MiseFile(frozenset())
     try:

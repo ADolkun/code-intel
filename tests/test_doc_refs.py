@@ -1392,9 +1392,11 @@ def test_without_any_package_json_the_rule_does_nothing(tmp_path: Path) -> None:
     assert ref_findings(report) == []
 
 
-def test_a_script_no_package_json_defines_is_missing_wherever_the_doc_runs_it(tmp_path: Path) -> None:
+def test_without_a_package_json_where_the_doc_runs_it_a_script_is_not_checked(tmp_path: Path) -> None:
     report = _scripts(tmp_path, "`npm run dev`", {"tools/web/package.json": _manifest("start")})
-    assert _script_results(report) == [("npm run dev", "missing")]
+    assert [(r.status, r.detail) for r in refs(report, kind="command")] == [
+        ("not_checked", "no package.json where the doc runs it")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1472,8 +1474,6 @@ def test_the_lookup_of_a_package_json_finds_the_docs_running_its_scripts(tmp_pat
     assert [(row["file"], row["text"]) for row in found.mentions.items] == [("docs/a.md", "npm run build")]
 
 
-# ── Commands: make targets and mise tasks ────────────────────────────────
-
 MAKEFILE = ".PHONY: lint check\nlint:\n\truff check .\ntest: lint\n\tpytest\ncheck: lint test\n"
 
 
@@ -1524,6 +1524,299 @@ def test_make_targets_are_checked_against_the_makefile(
     tmp_path: Path, markdown: str, files: Mapping[str, str], expected: list[tuple[str, str]]
 ) -> None:
     assert _script_results(_commands(tmp_path, markdown, files)) == expected
+
+
+# Inputs from the first review of the commands check, each once a false
+# `missing` against real make 3.81 or mise 2026.11.10 (or a check that a fix
+# kept a true one). Every surviving `missing` here is one the runner gives too.
+REVIEWED_CASES = [
+    pytest.param(
+        "`make -C ../other build`",
+        {"Makefile": "lint:\n\techo\n"},
+        [("make -C ../other build", "not_checked")],
+        id="make -C ..",
+    ),
+    pytest.param(
+        "`cd ~/proj && make build`", {"Makefile": "lint:\n\techo\n"}, [("make build", "not_checked")], id="cd ~ make"
+    ),
+    pytest.param(
+        "`cd $APP && make build`", {"Makefile": "lint:\n\techo\n"}, [("make build", "not_checked")], id="cd $APP make"
+    ),
+    pytest.param(
+        "`cd .. && mise run deploy`",
+        {"mise.toml": "[tasks.lint]\nrun='x'\n"},
+        [("mise run deploy", "not_checked")],
+        id="cd .. mise",
+    ),
+    pytest.param(
+        "`mise -C /opt/x run deploy`",
+        {"mise.toml": "[tasks.lint]\nrun='x'\n"},
+        [("mise -C /opt/x run deploy", "not_checked")],
+        id="mise -C abs",
+    ),
+    pytest.param(
+        "`cd .. && npm run deploy`",
+        {"package.json": '{"scripts":{"lint":"x"}}'},
+        [("npm run deploy", "not_checked")],
+        id="npm cd ..",
+    ),
+    pytest.param(
+        "`make deploy`",
+        {
+            "Makefile": "ifndef NOPE\n\tinclude extra.mk\nendif\n\nlint:\n\t@echo lint\n",
+            "extra.mk": "deploy:\n\t@echo deploying\n",
+        },
+        [("make deploy", "not_checked")],
+        id="tab include",
+    ),
+    pytest.param(
+        "`make deploy`",
+        {"Makefile": "lint:\n\t@echo lint\nX = 1\n\tinclude extra.mk\n", "extra.mk": "deploy:\n\t@echo deploying\n"},
+        [("make deploy", "not_checked")],
+        id="tab include after assign",
+    ),
+    pytest.param(
+        "`make deploy`",
+        {"Makefile": "X = 1\n\t$(eval deploy: ; @echo d)\nlint:\n\t@echo lint\n"},
+        [("make deploy", "not_checked")],
+        id="tab eval",
+    ),
+    pytest.param(
+        "`PREFIX=x make x-build`",
+        {"Makefile": "PREFIX ?= app\n$(PREFIX)-build:\n\t@echo b\n"},
+        [("make x-build", "not_checked")],
+        id="env prefix ?=",
+    ),
+    pytest.param(
+        "`make PREFIX=x x-build`",
+        {"Makefile": "PREFIX ?= app\n$(PREFIX)-build:\n\t@echo b\n"},
+        [("make PREFIX=x x-build", "not_checked")],
+        id="cmdline",
+    ),
+    pytest.param(
+        "`PREFIX=x make -e x-build`",
+        {"Makefile": "PREFIX = app\n$(PREFIX)-build:\n\t@echo b\n"},
+        [("make -e x-build", "not_checked")],
+        id="env -e plain",
+    ),
+    pytest.param(
+        "`env PREFIX=x make x-build`",
+        {"Makefile": "PREFIX ?= app\n$(PREFIX)-build:\n\t@echo b\n"},
+        [("make x-build", "not_checked")],
+        id="env wrapper",
+    ),
+    pytest.param(
+        "```sh\nexport PREFIX=x\nmake x-build\n```",
+        {"Makefile": "PREFIX ?= app\n$(PREFIX)-build:\n\t@echo b\n"},
+        [("make x-build", "not_checked")],
+        id="export line",
+    ),
+    pytest.param(
+        "`make x-build`",
+        {"Makefile": "ifdef CI\nPREFIX = ci\nendif\nPREFIX ?= app\n$(PREFIX)-build:\n\t@echo b\n"},
+        [("make x-build", "not_checked")],
+        id="ifdef env",
+    ),
+    pytest.param(
+        "`make mac-build`",
+        {
+            "Makefile": "PREFIX = app\nifeq ($(shell uname),Darwin)\n\tPREFIX = mac\nendif\n$(PREFIX)-build:\n\t@echo b\n"
+        },
+        [("make mac-build", "not_checked")],
+        id="tab assign in cond",
+    ),
+    pytest.param(
+        "`make mac-build`",
+        {
+            "Makefile": "PREFIX = app\nifeq ($(shell uname),Darwin)\n  PREFIX = mac\nendif\n$(PREFIX)-build:\n\t@echo b\n"
+        },
+        [("make mac-build", "not_checked")],
+        id="tab assign in cond nontab",
+    ),
+    pytest.param(
+        "```sh\n./configure\nmake\nmake install\n```",
+        {"configure.ac": "AC_INIT\n", "Makefile.am": "bin_PROGRAMS = x\n", "tools/Makefile": "build:\n\techo\n"},
+        [("make install", "not_checked")],
+        id="autotools root",
+    ),
+    pytest.param(
+        "```sh\nperl Makefile.PL\nmake test\n```",
+        {"Makefile.PL": "use ExtUtils::MakeMaker;\n", "t/Makefile": "x:\n\techo\n"},
+        [("make test", "not_checked")],
+        id="perl Makefile.PL",
+    ),
+    pytest.param(
+        "```sh\ngit clone https://github.com/x/tool && cd tool\nmake install\n```",
+        {"Makefile": "lint:\n\techo\n"},
+        [("make install", "not_checked")],
+        id="clone then cd next line",
+    ),
+    pytest.param(
+        "```sh\ncd ~/src/other\nmise run deploy\n```",
+        {"mise.toml": "[tasks.lint]\nrun='x'\n"},
+        [("mise run deploy", "not_checked")],
+        id="cd line then mise",
+    ),
+    pytest.param(
+        "```sh\ncd ../infra\nnpm run deploy\n```",
+        {"package.json": '{"scripts":{"lint":"x"}}'},
+        [("npm run deploy", "not_checked")],
+        id="cd line then npm",
+    ),
+    pytest.param(
+        "`pushd ../infra && make deploy`", {"Makefile": "lint:\n\techo\n"}, [("make deploy", "not_checked")], id="pushd"
+    ),
+    pytest.param(
+        "`(cd ../infra && make deploy)`",
+        {"Makefile": "lint:\n\techo\n"},
+        [("make deploy", "not_checked")],
+        id="subshell cd",
+    ),
+    pytest.param(
+        "`npm run --loglevel warn build`",
+        {"package.json": '{"scripts":{"build":"x"}}'},
+        [("npm run --loglevel warn build", "not_checked")],
+        id="npm valued opt",
+    ),
+    pytest.param(
+        "`pnpm run build --filter web`",
+        {"package.json": '{"scripts":{"lint":"x"}}'},
+        [("pnpm run build --filter web", "not_checked")],
+        id="pnpm run filter after",
+    ),
+    pytest.param(
+        "`pnpm run build -r`",
+        {"package.json": '{"scripts":{"lint":"x"}}'},
+        [("pnpm run build -r", "not_checked")],
+        id="pnpm -r after",
+    ),
+    pytest.param(
+        "`pnpm --workspace-concurrency 2 run build`",
+        {"package.json": '{"scripts":{"lint":"x"}}'},
+        [("pnpm --workspace-concurrency 2 run build", "not_checked")],
+        id="pnpm --workspace-concurrency",
+    ),
+    pytest.param(
+        "`make ENV=prod prod-svc-up`",
+        {"Makefile": "ENV ?= dev\nNAME := $(ENV)-svc\n$(NAME)-up:\n\t@echo up\n"},
+        [("make ENV=prod prod-svc-up", "not_checked")],
+        id="simple var chain override",
+    ),
+    pytest.param(
+        "`MAKEFLAGS=-r make foo`",
+        {"Makefile": "lint:\n\t@echo\n", "foo.c": "int x;"},
+        [("make foo", "not_checked")],
+        id="override MAKEFLAGS in doc",
+    ),
+    pytest.param(
+        "`mise run a7` `mise run a2` `mise run a6` `mise run five`",
+        {
+            "mise.toml": "[tools]\n",
+            "mise-tasks/seven.lua": '#!/usr/bin/env lua\n-- MISE alias="a7"\nprint(7)\n',
+            "mise-tasks/two": '#!/bin/sh\n#MISE alias="a2"\n',
+            "mise-tasks/six": '#!/bin/sh\n# MISE alias = "a6"\n',
+            "mise-tasks/five.js": '//MISE alias="a5"\n',
+        },
+        [("mise run a2", "ok"), ("mise run a6", "ok"), ("mise run a7", "ok"), ("mise run five", "ok")],
+        id="lua header",
+    ),
+    pytest.param(
+        "```console\n$ make help\nmake build    Build the app\nmake test     Run the tests\n```",
+        {"Makefile": "help:\n\t@echo\nbuild:\n\t@echo\ntest:\n\t@echo\n"},
+        [("make help", "ok")],
+        id="console output",
+    ),
+    pytest.param(
+        "```\nmake build    - build the app\n```",
+        {"Makefile": "build:\n\t@echo\n"},
+        [
+            ("make build    - build the app", "ok"),
+            ("make build    - build the app", "skipped"),
+            ("make build    - build the app", "ok"),
+            ("make build    - build the app", "not_checked"),
+            ("make build    - build the app", "not_checked"),
+        ],
+        id="plain fence help listing",
+    ),
+    pytest.param("```sh\ncat <<EOF > x.sh\nmake deploy\nEOF\n```", {"Makefile": "build:\n\t@echo\n"}, [], id="heredoc"),
+    pytest.param(
+        "```sh\nmake -j8 \\\n  build\n```",
+        {"Makefile": "build:\n\t@echo\n"},
+        [("make -j8 build", "ok")],
+        id="continuation make",
+    ),
+    pytest.param(
+        "```sh\nmake build \\\n  V=1\n```",
+        {"Makefile": "build:\n\t@echo\n"},
+        [("make build V=1", "ok")],
+        id="continuation make2",
+    ),
+    pytest.param(
+        "```sh\nnpm run \\\n  build\n```",
+        {"package.json": '{"scripts":{"build":"x"}}'},
+        [("npm run build", "ok")],
+        id="continuation npm",
+    ),
+    pytest.param(
+        "```sh\nmise run \\\n  build\n```",
+        {"mise.toml": "[tasks.build]\nrun='x'\n"},
+        [("mise run build", "ok")],
+        id="continuation mise",
+    ),
+    pytest.param(
+        "`make lnt`",
+        {"Makefile": ".venv:\n\tpython -m venv .venv\nlint: .venv\n\t@echo\n"},
+        [("make lnt", "missing")],
+        id="suffix venv",
+    ),
+    pytest.param(
+        "`make ./out/app`", {"Makefile": "out/app:\n\t@echo\n"}, [("make ./out/app", "ok")], id="dot slash goal"
+    ),
+    pytest.param("`make x/y`", {"Makefile": "./x/y:\n\t@echo\n"}, [("make x/y", "ok")], id="dot slash target"),
+    pytest.param(
+        "`make TARGET` `make …` `make {target}` `make my-target` `make example` `npm run SCRIPT` `mise run TASK` `make target-name` `make foo...`",
+        {
+            "Makefile": "build:\n\t@echo\n",
+            "package.json": '{"scripts":{"build":"x"}}',
+            "mise.toml": "[tasks.build]\nrun='x'\n",
+        },
+        [
+            ("make TARGET", "skipped"),
+            ("make example", "skipped"),
+            ("make foo...", "skipped"),
+            ("make my-target", "skipped"),
+            ("make target-name", "missing"),
+            ("make {target}", "skipped"),
+            ("make …", "skipped"),
+            ("mise run TASK", "skipped"),
+            ("npm run SCRIPT", "skipped"),
+        ],
+        id="placeholders",
+    ),
+]
+
+
+@pytest.mark.parametrize(("markdown", "files", "expected"), REVIEWED_CASES)
+def test_reviewed_cases(
+    tmp_path: Path, markdown: str, files: Mapping[str, str], expected: list[tuple[str, str]]
+) -> None:
+    assert _script_results(_commands(tmp_path, markdown, files)) == expected
+
+
+@pytest.mark.parametrize(
+    ("npmrc", "status"),
+    [
+        ("if-present=true\n", "not_checked"),
+        ("if-present = true\nregistry=https://registry.example.com/\n", "not_checked"),
+        ("if-present=false\n", "missing"),
+        ("registry=https://registry.example.com/\n", "missing"),
+    ],
+)
+def test_a_tracked_npmrc_that_sets_if_present_leaves_a_missing_script_unproven(
+    tmp_path: Path, npmrc: str, status: str
+) -> None:
+    files = {"package.json": _manifest("lint"), ".npmrc": npmrc}
+    assert _script_results(_commands(tmp_path, "`npm run deploy`", files)) == [("npm run deploy", status)]
 
 
 def test_a_missing_make_target_is_a_finding_naming_the_makefile(tmp_path: Path) -> None:

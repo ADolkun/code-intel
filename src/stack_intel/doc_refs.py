@@ -34,7 +34,7 @@ from typing import Any
 
 from stack_intel.code_paths import FileStamp, content_digest, is_racy, read_bytes_with_digest
 from stack_intel.code_words import EMPTY, CodeWords, code_words_from_bytes, is_code_file, package_bindings_from_bytes
-from stack_intel.doc_commands import PACKAGE_MANIFEST, command_mentions
+from stack_intel.doc_commands import PACKAGE_MANIFEST, CommandMention, command_mentions, fence_command_mentions
 from stack_intel.doc_report import (
     ConfigFinding,
     DocEntry,
@@ -75,7 +75,7 @@ from stack_intel.doc_rules import (
 from stack_intel.make_targets import MakeTargets, make_targets_from_bytes
 from stack_intel.markdown_facts import DocFacts, read_doc_facts
 from stack_intel.mise_tasks import MiseFile, mise_file_from_bytes
-from stack_intel.package_manifest import package_scripts_from_bytes
+from stack_intel.package_manifest import npmrc_sets_if_present, package_scripts_from_bytes
 from stack_intel.problems import Problem, diagnostic
 from stack_intel.repo_files import RepoFiles
 
@@ -133,6 +133,13 @@ def _load_scripts(path: Path, rel: str) -> tuple[Any, str | None, list[Problem],
     return scripts, digest, problems, False
 
 
+def _load_npmrc(path: Path, rel: str) -> tuple[Any, str | None, list[Problem], bool]:
+    data, digest, problem = read_bytes_with_digest(path, rel, stage=STAGE)
+    if data is None:
+        return True, None, [problem] if problem is not None else [], True
+    return npmrc_sets_if_present(data), digest, [], False
+
+
 def _load_make_targets(path: Path, rel: str) -> tuple[Any, str | None, list[Problem], bool]:
     data, digest, problem = read_bytes_with_digest(path, rel, stage=STAGE)
     if data is None:
@@ -176,6 +183,7 @@ class DocIndex:
         self._scripts: dict[str, _Entry] = {}
         self._make_targets: dict[str, _Entry] = {}
         self._mise_files: dict[str, _Entry] = {}
+        self._npmrc: dict[str, _Entry] = {}
 
     def clear(self) -> None:
         with self._lock:
@@ -185,6 +193,7 @@ class DocIndex:
             self._scripts.clear()
             self._make_targets.clear()
             self._mise_files.clear()
+            self._npmrc.clear()
 
     def doc_facts(self, rel: str, problems: list[Problem]) -> DocFacts | None:
         with self._lock:
@@ -210,6 +219,10 @@ class DocIndex:
         with self._lock:
             return self._cached(self._mise_files, rel, _load_mise_file, problems, None)
 
+    def npmrc_if_present(self, rel: str, problems: list[Problem]) -> bool:
+        with self._lock:
+            return self._cached(self._npmrc, rel, _load_npmrc, problems, True)
+
     def prune(
         self,
         docs: Iterable[str],
@@ -219,10 +232,10 @@ class DocIndex:
     ) -> None:
         """Drop entries for files a report no longer read. ``words`` is None
         when the report needed no words, which says nothing about the files.
-        ``definitions``: the package.json, makefile and mise files it read."""
+        ``definitions``: the package.json, .npmrc, makefile and mise files it read."""
         with self._lock:
             keep_definitions = set(definitions)
-            for cache in (self._scripts, self._make_targets, self._mise_files):
+            for cache in (self._scripts, self._make_targets, self._mise_files, self._npmrc):
                 for key in [k for k in cache if k not in keep_definitions]:
                     del cache[key]
             keep_docs = set(docs)
@@ -369,7 +382,9 @@ class _Run:
         self.links = LinkResolver(self.ctx, self.facts)
         self.paths = PathResolver(self.ctx)
         self.symbols = SymbolResolver(self.ctx, self.words)
-        self.commands = CommandResolver(self.ctx, self.package_scripts, self.make_targets, self.mise_file)
+        self.commands = CommandResolver(
+            self.ctx, self.package_scripts, self.make_targets, self.mise_file, self.npmrc_if_present
+        )
 
     # Inputs ----------------------------------------------------------------
 
@@ -392,6 +407,9 @@ class _Run:
 
     def package_scripts(self, directory: str) -> frozenset[str] | None:
         return self._definition(posixpath.join(directory, PACKAGE_MANIFEST), self.index.package_scripts)
+
+    def npmrc_if_present(self, directory: str) -> bool:
+        return self._definition(posixpath.join(directory, ".npmrc"), self.index.npmrc_if_present)
 
     def make_targets(self, rel: str) -> MakeTargets | None:
         return self._definition(rel, self.index.make_targets)
@@ -514,17 +532,20 @@ class _Run:
                 if mention is not None:
                     out.append(self.symbols.symbol(doc, mention, span.line, span.context))
         if "commands" in checks:
-            for span in facts.code_spans:
-                out.extend(self._command_drafts(doc, span.text, span.line, span.context))
+            found: list[tuple[CommandMention, int, str]] = [
+                (mention, span.line, span.context)
+                for span in facts.code_spans
+                for mention in command_mentions(span.text)
+            ]
             for fence in facts.fences:
                 if is_shell_fence(fence.info):
-                    for offset, text in enumerate(fence.lines):
-                        out.extend(self._command_drafts(doc, text, fence.content_line + offset, "fence"))
+                    found.extend(
+                        (mention, fence.content_line + offset, "fence")
+                        for offset, mention in fence_command_mentions(fence.info, fence.lines)
+                    )
+            drafts = (self.commands.command(doc, mention, line, context) for mention, line, context in found)
+            out.extend(draft for draft in drafts if draft is not None)
         return out
-
-    def _command_drafts(self, doc: str, text: str, line: int, context: str) -> list[Draft]:
-        drafts = (self.commands.command(doc, mention, line, context) for mention in command_mentions(text))
-        return [draft for draft in drafts if draft is not None]
 
     def _declared_roots(self, scope: Sequence[str]) -> frozenset[str]:
         """The roots the route-checked docs declare with an un-gated

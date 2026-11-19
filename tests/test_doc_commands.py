@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from stack_intel.doc_commands import command_mentions
+from stack_intel.doc_commands import command_mentions, fence_command_mentions
 
 Row = tuple[str, str, str | None, str]
 
@@ -246,3 +246,106 @@ def test_every_unproven_or_unchecked_form_says_why() -> None:
     for text in rows:
         for mention in command_mentions(text):
             assert (mention.reason is None) == (mention.verdict == "check"), text
+
+
+def _fence(info: str, text: str) -> list[tuple[int, str, str, str]]:
+    return [(offset, m.name, m.verdict, m.text) for offset, m in fence_command_mentions(info, text.split("\n"))]
+
+
+@pytest.mark.parametrize(
+    ("info", "text", "expected"),
+    [
+        ("sh", "make -j8 \\\n  build", [(0, "build", "check", "make -j8 build")]),
+        ("sh", "make build \\\n  V=1", [(0, "build", "check", "make build V=1")]),
+        ("sh", "npm run \\\n  build", [(0, "build", "check", "npm run build")]),
+        ("sh", "mise run \\\n  build", [(0, "build", "check", "mise run build")]),
+        ("sh", "make lint\nmake test", [(0, "lint", "check", "make lint"), (1, "test", "check", "make test")]),
+        (
+            "console",
+            "$ make help\nmake build    Build the app\nmake test     Run the tests",
+            [(0, "help", "check", "make help")],
+        ),
+        ("console", "# make install\nmake: Nothing to be done", [(0, "install", "check", "make install")]),
+        ("sh", "% make lint\nmake[1]: Entering directory", [(0, "lint", "check", "make lint")]),
+        ("sh", "# install\nmake install", [(1, "install", "check", "make install")]),
+        (
+            "",
+            "make build    - build the app",
+            [
+                (0, "build", "unproven", "make build    - build the app"),
+                (0, "-", "skipped", "make build    - build the app"),
+                (0, "build", "unproven", "make build    - build the app"),
+                (0, "the", "unproven", "make build    - build the app"),
+                (0, "app", "unproven", "make build    - build the app"),
+            ],
+        ),
+        ("sh", "cat <<EOF > x.sh\nmake deploy\nEOF\nmake lint", [(3, "lint", "check", "make lint")]),
+        ("sh", "cat <<-'END'\n\tmake deploy\n\tEND\nmake lint", [(3, "lint", "check", "make lint")]),
+        ("sh", "cat <<< 'make deploy'\nmake lint", [(1, "lint", "check", "make lint")]),
+        (
+            "sh",
+            "git clone https://example.com/tool && cd tool\nmake install",
+            [(1, "install", "unproven", "make install")],
+        ),
+        ("sh", "mkdir build && cd build\nmake", []),
+        ("sh", "cd web\nnpm run build", [(1, "build", "unproven", "npm run build")]),
+        ("sh", "pushd web\nmake lint\npopd", [(1, "lint", "unproven", "make lint")]),
+    ],
+)
+def test_fence_command_mentions(info: str, text: str, expected: list[tuple[int, str, str, str]]) -> None:
+    assert _fence(info, text) == expected
+
+
+def test_an_export_on_an_earlier_fence_line_sets_the_variable_for_make() -> None:
+    ((_, mention),) = fence_command_mentions("sh", ["export PREFIX=x", "make x-build"])
+    assert mention.overrides == frozenset({"PREFIX"})
+
+
+@pytest.mark.parametrize(
+    ("text", "overrides", "verdict"),
+    [
+        ("PREFIX=x make x-build", {"PREFIX"}, "check"),
+        ("env PREFIX=x make x-build", {"PREFIX"}, "check"),
+        ("make -e x-build", {"-e"}, "check"),
+        ("MAKEFLAGS=-r make foo", set(), "unchecked"),
+        ("make MAKEFILES=x.mk foo", set(), "unchecked"),
+    ],
+)
+def test_variables_a_make_command_sets(text: str, overrides: set[str], verdict: str) -> None:
+    (mention,) = command_mentions(text)
+    assert mention.verdict == verdict
+    if verdict == "check":
+        assert mention.overrides == overrides
+
+
+@pytest.mark.parametrize(
+    ("text", "verdict"),
+    [
+        ("npm run --loglevel warn build", "unproven"),
+        ("npm run --loglevel=warn build", "check"),
+        ("npm --silent run build", "check"),
+        ("npm run build --loglevel warn", "check"),
+        ("pnpm run --reporter silent build", "unproven"),
+        ("pnpm --workspace-concurrency 2 run build", "unproven"),
+        ("pnpm run build --filter web", "unchecked"),
+        ("pnpm run build -r", "unchecked"),
+        ("npm_config_if_present=true npm run build", "unproven"),
+        ("MISE_CONFIG_FILE=x.toml mise run build", "unchecked"),
+        ("MISE_ENV=ci mise run build", "check"),
+    ],
+)
+def test_options_and_variables_that_leave_a_name_uncertain(text: str, verdict: str) -> None:
+    assert [m.verdict for m in command_mentions(text)] == [verdict]
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        ("make my-target", [("my-target", "skipped")]),
+        ("make example", [("example", "skipped")]),
+        ("npm run my_script", [("my_script", "skipped")]),
+        ("make build \\", [("build", "check")]),
+    ],
+)
+def test_example_names_and_a_trailing_backslash(text: str, names: list[tuple[str, str]]) -> None:
+    assert [(m.name, m.verdict) for m in command_mentions(text)] == names

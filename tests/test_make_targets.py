@@ -77,9 +77,59 @@ def test_continuation_lines_join_targets_and_comments_end_a_line() -> None:
     assert (targets, opaque) == ({"one", "two", "four"}, None)
 
 
-def test_tab_lines_are_recipes_even_with_a_colon() -> None:
-    targets, _ = _read("build:\n\tdocker run -v a:b image\n\techo x: y\n")
-    assert targets == {"build"}
+def test_tab_lines_after_a_rule_are_its_recipe_even_with_a_colon() -> None:
+    targets, opaque = _read("build:\n\tdocker run -v a:b image\n\techo x: y\n")
+    assert (targets, opaque) == ({"build"}, None)
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("ifndef NOPE\n\tinclude extra.mk\nendif\n\nlint:\n\t@echo lint\n", "has include (line 2)"),
+        ("lint:\n\t@echo lint\nX = 1\n\tinclude extra.mk\n", "has include (line 4)"),
+        ("X = 1\n\t$(eval deploy: ; @echo d)\nlint:\n\t@echo lint\n", "has $(eval) (line 2)"),
+    ],
+)
+def test_a_tab_indented_line_can_still_hide_definitions(text: str, reason: str) -> None:
+    """GNU make reads a tab line as a recipe only while a rule is open, which
+    the reader does not track, so these count wherever they appear."""
+    assert _read(text)[1] == reason
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "PREFIX = app\nifeq ($(shell uname),Darwin)\n\tPREFIX = mac\nendif\n$(PREFIX)-build:\n\t@echo b\n",
+        "PREFIX = app\nifeq ($(shell uname),Darwin)\n  PREFIX = mac\nendif\n$(PREFIX)-build:\n\t@echo b\n",
+        "$(X)-build:\n\t@echo\nX = a\n\tX = b\n",
+        "X = a\n$(X)-build:\n\t@echo\nX = b\n",
+    ],
+)
+def test_a_variable_assigned_twice_anywhere_leaves_its_target_names_unknown(text: str) -> None:
+    assert "a target name built from variables it cannot expand" in str(_read(text)[1])
+
+
+def test_a_simple_assignment_expands_at_once_and_a_recursive_one_on_use() -> None:
+    found = read_make_targets("A := x\nS := $(A)-s\nR = $(A)-r\n$(S) $(R):\n")
+    assert (found.targets, found.opaque) == ({"x-s", "x-r"}, None)
+
+
+def test_a_leading_dot_slash_is_not_part_of_a_target() -> None:
+    assert _read("./x/y:\n\t@echo\n.PHONY: ./z\n")[0] == {"x/y", ".PHONY", "z"}
+
+
+@pytest.mark.parametrize(
+    ("text", "opaque"),
+    [
+        (".venv:\n\tpython -m venv .venv\nlint: .venv\n", False),
+        (".env.local:\n\tcp .env .env.local\n", False),
+        (".c.o:\n\tcc -c $<\n", True),
+        (".SUFFIXES: .md .html\n.md.html:\n\tpandoc $< -o $@\n", True),
+        (".md.html:\n\tpandoc $< -o $@\n", False),
+    ],
+)
+def test_only_known_suffixes_make_a_suffix_rule(text: str, opaque: bool) -> None:
+    assert (_read(text)[1] is not None) == opaque
 
 
 def test_target_specific_variables_and_special_target_prerequisites_count() -> None:

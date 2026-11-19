@@ -2,16 +2,21 @@
 
 The reader takes target names from rule lines, from every branch of every
 conditional, since a union cannot make a defined target look missing. Anything
-that can define a target the reader cannot see (an include, a pattern or
-suffix rule, ``.DEFAULT``, ``define`` or ``$(eval)``, ``vpath``, a target
-name it cannot expand) makes the set incomplete: ``MakeTargets.opaque`` says
-why, and a target absent from it is then not proven missing.
+that can define a target the reader cannot see makes the set incomplete, and
+``MakeTargets.opaque`` says why: an include, a pattern or suffix rule,
+``.DEFAULT``, ``define`` or ``$(eval)``, ``vpath``, or a target name it
+cannot expand. A target absent from an incomplete set is not proven missing.
 
-A target name built from variables is expanded when every variable it uses was
-set exactly once, outside a conditional and before the rule, from literal text
-and such variables. The environment does not count (the docs check assumes a
-clean one); a command line that sets one of those variables is the caller's
-concern, through ``MakeTargets.variables``.
+Whether a tab-indented line is a recipe depends on whether a rule is open,
+which the reader does not track. So the checks that guard against hidden
+definitions (``include``, ``$(eval)``, ``define`` and how often a variable is
+assigned) look at every line, tab-indented or not.
+
+A target name built from variables is expanded only when each variable it uses
+is assigned exactly once in the whole file, outside a conditional, before the
+rule, from literal text and such variables. ``MakeTargets.variables`` tells
+the caller that names depend on variables, which a command line or the
+environment may set.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Literal
 
 from stack_intel.doc_rules import STAGE
 from stack_intel.problems import Problem, diagnostic
@@ -31,7 +37,12 @@ _SPECIAL_TARGETS = frozenset(
     .DELETE_ON_ERROR .IGNORE .LOW_RESOLUTION_TIME .SILENT .EXPORT_ALL_VARIABLES .NOTPARALLEL .ONESHELL
     .POSIX .WAIT""".split()
 )
-_SUFFIX_RULE_RE = re.compile(r"(?:\.[^.\s/%]+){1,2}")
+# GNU make 4.4's default .SUFFIXES list.
+_DEFAULT_SUFFIXES = frozenset(
+    """.out .a .ln .o .c .cc .C .cpp .p .f .F .m .r .y .l .ym .yl .s .S .mod .sym .def .h .info .dvi
+    .tex .texinfo .texi .txinfo .w .ch .web .sh .elc .el""".split()
+)
+_SUFFIX_RULE_RE = re.compile(r"(\.[^.\s/%]+)(\.[^.\s/%]+)?")
 _CONDITIONALS = frozenset({"ifeq", "ifneq", "ifdef", "ifndef"})
 _INCLUDES = frozenset({"include", "-include", "sinclude"})
 _MODIFIERS = frozenset({"export", "override", "private", "unexport"})
@@ -43,13 +54,19 @@ _MAX_DEPTH = 20
 @dataclass(frozen=True)
 class MakeTargets:
     """``targets``: every name a rule line (or a special target's
-    prerequisite list) defines. ``opaque``: why the set may be incomplete,
-    None when it is complete. ``variables``: the variables the expanded target
-    names were built from."""
+    prerequisite list) defines, without a leading ``./``. ``opaque``: why the
+    set may be incomplete, None when it is complete. ``variables``: the
+    variables the expanded target names were built from."""
 
     targets: frozenset[str]
     opaque: str | None = None
     variables: frozenset[str] = frozenset()
+
+
+def strip_dot_slash(name: str) -> str:
+    while name.startswith("./"):
+        name = name[2:]
+    return name
 
 
 def _logical_lines(text: str) -> Iterator[tuple[int, str]]:
@@ -78,9 +95,19 @@ def _strip_comment(line: str) -> str:
     return line
 
 
-def _split_rule(line: str) -> tuple[str, str, int] | None:
-    """``("assign", name+op, value_start)`` or ``("rule", targets, rest_start)``
-    by the first ``:`` or assignment operator outside ``$(...)``, None for neither."""
+@dataclass(frozen=True)
+class _Split:
+    """A line split at its first ``:`` or assignment operator outside ``$(...)``:
+    an assignment (``head`` is the variable, ``op`` the operator) or a rule
+    (``head`` the targets, ``op`` ``:`` or ``::``); ``rest`` follows the operator."""
+
+    kind: Literal["assign", "rule"]
+    head: str
+    op: str
+    rest: str
+
+
+def _split(line: str) -> _Split | None:
     depth = 0
     index = 0
     while index < len(line):
@@ -93,32 +120,41 @@ def _split_rule(line: str) -> tuple[str, str, int] | None:
             depth -= 1
         elif not depth:
             if char == ":":
-                for op in (":=", "::=", ":::="):
+                for op in (":::=", "::=", ":="):
                     if line.startswith(op, index):
-                        return "assign", line[:index], index + len(op)
-                return "rule", line[:index], index + (2 if line.startswith("::", index) else 1)
+                        return _Split("assign", line[:index], op, line[index + len(op) :])
+                op = "::" if line.startswith("::", index) else ":"
+                return _Split("rule", line[:index], op, line[index + len(op) :])
             if char == "=":
-                return "assign", line[:index], index + 1
+                return _Split("assign", line[:index], "=", line[index + 1 :])
             if char in "?+!" and line[index + 1 : index + 2] == "=":
-                return "assign", line[: index + 1], index + 2
+                return _Split("assign", line[:index], char + "=", line[index + 2 :])
         index += 1
     return None
 
 
+def _words(raw: str) -> list[str]:
+    words = _strip_comment(raw).split()
+    while words and words[0] in _MODIFIERS:
+        words = words[1:]
+    return words
+
+
 class _Variables:
     """The variables known so far, for expanding target names: a name maps to
-    its text (recursive ones expand on use), or None when its value is not
-    known (set twice, appended to, set in a conditional or by a shell)."""
+    its text (a recursive one expands on use), or None when its value is not
+    known: assigned more than once in the file, appended to, assigned in a
+    conditional or by a shell. ``assignments`` counts every assignment line
+    of the file, tab-indented ones included."""
 
-    def __init__(self) -> None:
+    def __init__(self, assignments: dict[str, int]) -> None:
         self.values: dict[str, tuple[str, bool] | None] = {}
+        self.assignments = assignments
 
     def assign(self, name: str, op: str, value: str, conditional: bool) -> None:
-        if op == "?=" and name in self.values:
-            return
-        if conditional or op in ("+=", "!=") or name in self.values:
+        if conditional or op in ("+=", "!=") or name in self.values or self.assignments.get(name, 0) > 1:
             self.values[name] = None
-        elif op == "=" or op == "?=":
+        elif op in ("=", "?="):
             self.values[name] = (value, True)
         else:
             expanded = self.expand(value, set())
@@ -151,20 +187,48 @@ class _Variables:
 
 
 class _Reader:
-    def __init__(self) -> None:
+    def __init__(self, lines: list[tuple[int, str]]) -> None:
         self.targets: set[str] = set()
         self.used: set[str] = set()
         self.opaque: str | None = None
-        self.variables = _Variables()
         self.depth = 0
         self.in_define = False
+        assignments: dict[str, int] = {}
+        self.suffixes: set[str] = set(_DEFAULT_SUFFIXES)
+        self.any_suffix = False
+        for number, raw in lines:
+            self._scan(number, raw, assignments)
+        self.variables = _Variables(assignments)
 
     def unknowable(self, line: int, reason: str) -> None:
         if self.opaque is None:
             self.opaque = f"has {reason} (line {line})"
 
-    def read(self, text: str) -> MakeTargets:
-        for number, raw in _logical_lines(text):
+    def _scan(self, number: int, raw: str, assignments: dict[str, int]) -> None:
+        """What every line counts for, recipe or not: hidden definitions,
+        assignment counts and ``.SUFFIXES`` additions."""
+        words = _words(raw)
+        if not words:
+            return
+        if words[0] in _INCLUDES:
+            self.unknowable(number, words[0])
+        if words[0] == "define":
+            self.unknowable(number, "define")
+        if "$(eval" in raw or "${eval" in raw:
+            self.unknowable(number, "$(eval)")
+        split = _split(" ".join(words))
+        if split is None:
+            return
+        if split.kind == "assign":
+            name = split.head.strip()
+            assignments[name] = assignments.get(name, 0) + 1
+        elif split.head.split() == [".SUFFIXES"]:
+            listed = split.rest.split(";", 1)[0].split()
+            self.any_suffix = self.any_suffix or any("$" in word for word in listed)
+            self.suffixes.update(listed)
+
+    def read(self, lines: list[tuple[int, str]]) -> MakeTargets:
+        for number, raw in lines:
             self.line(number, raw)
         return MakeTargets(frozenset(self.targets), self.opaque, frozenset(self.used))
 
@@ -175,64 +239,45 @@ class _Reader:
             return
         if raw.startswith("\t"):
             return
-        line = _strip_comment(raw).strip()
-        words = line.split()
-        if not words:
-            return
-        while words and words[0] in _MODIFIERS:
-            words = words[1:]
+        words = _words(raw)
         first = words[0] if words else ""
         if first in _CONDITIONALS:
             self.depth += 1
             return
-        if first == "else":
-            return
         if first == "endif":
             self.depth = max(0, self.depth - 1)
             return
-        if first in _INCLUDES:
-            self.unknowable(number, first)
-            return
         if first == "define":
             self.in_define = True
-            self.unknowable(number, "define")
+            return
+        if first in ("else", *_INCLUDES):
             return
         if first in ("vpath", "load", "-load"):
             self.unknowable(number, first)
             return
-        if "$(eval" in line or "${eval" in line:
-            self.unknowable(number, "$(eval)")
-        split = _split_rule(" ".join(words))
+        split = _split(" ".join(words))
         if split is None:
             return
-        kind, head, rest = split
-        body = " ".join(words)[rest:]
-        if kind == "assign":
-            self.assign(number, head, body)
+        if split.kind == "assign":
+            self.assign(number, split)
         else:
-            self.rule(number, head, body)
+            self.rule(number, split.head, split.rest)
 
-    def assign(self, number: int, head: str, value: str) -> None:
-        op = "="
-        if head.endswith(("?", "+", "!")):
-            op = head[-1] + "="
-            head = head[:-1]
-        elif head.endswith(":"):
-            op = ":="
-        name = head.strip()
+    def assign(self, number: int, split: _Split) -> None:
+        name = split.head.strip()
         if _VARIABLE_NAME_RE.fullmatch(name) is None:
             self.unknowable(number, "a variable whose name is computed")
             return
         if name == "VPATH":
             self.unknowable(number, "VPATH")
-        self.variables.assign(name, op, value.strip(), self.depth > 0)
+        self.variables.assign(name, split.op, split.rest.strip(), self.depth > 0)
 
     def rule(self, number: int, head: str, rest: str) -> None:
         names = self.expand(number, head)
         prerequisites = rest.split(";", 1)[0]
         if names is None:
             return
-        if (split := _split_rule(prerequisites)) is not None and split[0] == "rule" and "%" in prerequisites:
+        if (split := _split(prerequisites)) is not None and split.kind == "rule" and "%" in prerequisites:
             self.unknowable(number, "a static pattern rule")
         for name in names:
             if "%" in name:
@@ -242,11 +287,17 @@ class _Reader:
             elif name in _SPECIAL_TARGETS:
                 self.targets.add(name)
                 listed = self.expand(number, prerequisites.replace("|", " ")) if "=" not in prerequisites else []
-                self.targets.update(listed or ())
-            elif _SUFFIX_RULE_RE.fullmatch(name):
+                self.targets.update(strip_dot_slash(item) for item in listed or ())
+            elif self.is_suffix_rule(name):
                 self.unknowable(number, f"an old-style suffix rule {name}")
             else:
-                self.targets.add(name)
+                self.targets.add(strip_dot_slash(name))
+
+    def is_suffix_rule(self, name: str) -> bool:
+        match = _SUFFIX_RULE_RE.fullmatch(name)
+        if match is None:
+            return False
+        return self.any_suffix or all(part in self.suffixes for part in match.groups() if part is not None)
 
     def expand(self, number: int, text: str) -> list[str] | None:
         if "$" not in text:
@@ -261,7 +312,8 @@ class _Reader:
 
 
 def read_make_targets(text: str) -> MakeTargets:
-    return _Reader().read(text)
+    lines = list(_logical_lines(text))
+    return _Reader(lines).read(lines)
 
 
 def make_targets_from_bytes(rel: str, data: bytes, *, stage: str = STAGE) -> tuple[MakeTargets | None, list[Problem]]:

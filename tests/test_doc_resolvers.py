@@ -16,7 +16,7 @@ from doc_config import doc_config
 from fake_repo_files import FakeRepoFiles
 
 from stack_intel.code_words import CodeWords
-from stack_intel.doc_commands import CommandMention
+from stack_intel.doc_commands import CommandMention, command_mentions
 from stack_intel.doc_report import route_rows, symbol_rows
 from stack_intel.doc_resolvers import (
     CommandResolver,
@@ -170,6 +170,7 @@ def _resolver(
     make: Mapping[str, MakeTargets | None] | None = None,
     mise: Mapping[str, MiseFile | None] | None = None,
     read: list[str] | None = None,
+    npmrc: Mapping[str, bool] | None = None,
 ) -> CommandResolver:
     def reader[T](table: Mapping[str, T] | None, default: T) -> Callable[[str], T]:
         def read_one(key: str) -> T:
@@ -179,7 +180,9 @@ def _resolver(
 
         return read_one
 
-    return CommandResolver(ctx, reader(scripts, frozenset()), reader(make, None), reader(mise, None))
+    return CommandResolver(
+        ctx, reader(scripts, frozenset()), reader(make, None), reader(mise, None), reader(npmrc, False)
+    )
 
 
 def _command(resolver: CommandResolver, mention: CommandMention, doc: str = "docs/a.md") -> Draft:
@@ -267,7 +270,7 @@ def test_a_make_target_absent_from_every_provable_makefile_is_missing(tmp_path: 
         (
             MakeTargets(frozenset({"web/out"}), variables=frozenset({"OUT"})),
             CommandMention("make", "nope", None, "make nope OUT=x", overrides=frozenset({"OUT"})),
-            "the command sets OUT, which names targets in Makefile",
+            "the command sets OUT, and Makefile names targets with variables",
         ),
     ],
 )
@@ -645,3 +648,91 @@ def test_dotted_symbols_match_their_whole_qualifier_chain(
     symbols = SymbolResolver(_symbol_ctx(tmp_path), lambda: CodeWords(frozenset(), frozenset()))
     draft = symbols.symbol("docs/a.md", SymbolMention(name, name, False, False), 1, "code")
     assert (draft.status, draft.defined_in) == (status, defined_in)
+
+
+def _first(text: str) -> CommandMention:
+    return command_mentions(text)[0]
+
+
+@pytest.mark.parametrize(
+    ("text", "files"),
+    [
+        ("make -C ../other build", ["Makefile"]),
+        ("cd ~/proj && make build", ["Makefile"]),
+        ("cd $APP && make build", ["Makefile"]),
+        ("(cd ../infra && make deploy)", ["Makefile"]),
+        ("cd .. && mise run deploy", ["mise.toml"]),
+        ("mise -C /opt/x run deploy", ["mise.toml"]),
+    ],
+)
+def test_an_unproven_make_or_mise_mention_is_never_missing(tmp_path: Path, text: str, files: list[str]) -> None:
+    ctx = _context(tmp_path, files)
+    resolver = _resolver(
+        ctx, make={"Makefile": MakeTargets(frozenset({"lint"}))}, mise={"mise.toml": MiseFile(frozenset({"lint"}))}
+    )
+    draft = _command(resolver, _first(text))
+    assert (draft.status, draft.checked) == ("not_checked", False)
+    assert draft.detail == "runs in a directory outside the repository or not written literally"
+
+
+@pytest.mark.parametrize(
+    ("files", "doc"),
+    [
+        (["configure.ac", "Makefile.am", "tools/Makefile"], "docs/a.md"),
+        (["Makefile.PL", "t/Makefile"], "docs/a.md"),
+    ],
+)
+def test_make_with_no_makefile_where_the_doc_runs_it_is_not_checked(tmp_path: Path, files: list[str], doc: str) -> None:
+    ctx = _context(tmp_path, files)
+    make = {rel: MakeTargets(frozenset({"build"})) for rel in files if rel.endswith("/Makefile")}
+    draft = _command(_resolver(ctx, make=make), _first("make install"), doc)
+    assert (draft.status, draft.detail) == ("not_checked", "no makefile where the doc runs it")
+
+
+def test_mise_with_no_config_where_the_doc_runs_it_is_not_checked(tmp_path: Path) -> None:
+    ctx = _context(tmp_path, ["tools/mise.toml"])
+    draft = _command(_resolver(ctx, mise={"tools/mise.toml": MiseFile(frozenset({"x"}))}), _first("mise run deploy"))
+    assert (draft.status, draft.detail) == ("not_checked", "no mise config where the doc runs it")
+
+
+@pytest.mark.parametrize(
+    ("text", "targets"),
+    [
+        ("PREFIX=x make x-build", MakeTargets(frozenset({"app-build"}), variables=frozenset({"PREFIX"}))),
+        ("env PREFIX=x make x-build", MakeTargets(frozenset({"app-build"}), variables=frozenset({"PREFIX"}))),
+        ("make ENV=prod prod-svc-up", MakeTargets(frozenset({"dev-svc-up"}), variables=frozenset({"NAME"}))),
+        ("PREFIX=x make -e x-build", MakeTargets(frozenset({"app-build"}), variables=frozenset({"PREFIX"}))),
+    ],
+)
+def test_a_command_that_sets_variables_leaves_variable_target_names_unproven(
+    tmp_path: Path, text: str, targets: MakeTargets
+) -> None:
+    draft = _command(_resolver(_context(tmp_path, ["Makefile"]), make={"Makefile": targets}), _first(text))
+    assert (draft.status, draft.checked) == ("not_checked", False)
+
+
+def test_a_leading_dot_slash_is_not_part_of_a_goal(tmp_path: Path) -> None:
+    resolver = _resolver(_context(tmp_path, ["Makefile"]), make={"Makefile": MakeTargets(frozenset({"out/app"}))})
+    assert _command(resolver, _first("make ./out/app")).status == "ok"
+
+
+@pytest.mark.parametrize("text", ["make TARGET", "npm run SCRIPT", "mise run TASK"])
+def test_an_undefined_all_caps_name_is_a_placeholder(tmp_path: Path, text: str) -> None:
+    ctx = _context(tmp_path, ["Makefile", "package.json", "mise.toml"])
+    resolver = _resolver(
+        ctx,
+        scripts={"": frozenset({"build"})},
+        make={"Makefile": MakeTargets(frozenset({"build"}))},
+        mise={"mise.toml": MiseFile(frozenset({"build"}))},
+    )
+    assert (_command(resolver, _first(text)).status) == "skipped"
+
+
+@pytest.mark.parametrize(("sets", "status"), [(True, "not_checked"), (False, "missing")])
+def test_an_npmrc_that_sets_if_present_leaves_a_missing_script_unproven(
+    tmp_path: Path, sets: bool, status: str
+) -> None:
+    ctx = _context(tmp_path, ["package.json", ".npmrc"])
+    resolver = _resolver(ctx, scripts={"": frozenset({"lint"})}, npmrc={"": sets})
+    assert _command(resolver, _first("npm run deploy")).status == status
+    assert _command(resolver, _first("yarn deploy")).status == "not_checked"

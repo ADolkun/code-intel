@@ -1,4 +1,5 @@
-"""The script names a ``package.json`` defines, for the docs check's npm script references."""
+"""The script names a ``package.json`` defines, and whether an ``.npmrc`` sets
+``if-present``, for the docs check's package script references."""
 
 from __future__ import annotations
 
@@ -21,3 +22,17 @@ def package_scripts_from_bytes(
         return None, [diagnostic("parse_failed", stage=stage, step="parse file", file=rel, exc=exc)]
     scripts = manifest.get("scripts") if isinstance(manifest, dict) else None
     return frozenset(scripts if isinstance(scripts, dict) else ()), []
+
+
+def npmrc_sets_if_present(data: bytes) -> bool:
+    """Whether an ``.npmrc`` sets ``if-present`` to anything but false. A file
+    that is not UTF-8 counts as setting it: it cannot be shown not to."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    for line in text.splitlines():
+        key, equals, value = line.partition("=")
+        if equals and key.strip() == "if-present" and value.strip().lower() not in ("false", '"false"'):
+            return True
+    return False

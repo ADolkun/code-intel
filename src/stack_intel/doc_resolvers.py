@@ -65,7 +65,7 @@ from stack_intel.doc_rules import (
     strict_suffix,
     symbol_tier,
 )
-from stack_intel.make_targets import MAKEFILE_NAMES, MakeTargets
+from stack_intel.make_targets import MAKEFILE_NAMES, MakeTargets, strip_dot_slash
 from stack_intel.markdown_facts import DocFacts, Link, match_anchor
 from stack_intel.mise_tasks import MiseFile, config_owner, file_task_names, task_dir_entry
 from stack_intel.repo_files import RepoFiles
@@ -79,6 +79,8 @@ WordsReader = Callable[[], CodeWords]
 ScriptsReader = Callable[[str], "frozenset[str] | None"]
 MakeReader = Callable[[str], "MakeTargets | None"]
 MiseReader = Callable[[str], "MiseFile | None"]
+# Whether a directory's tracked .npmrc sets if-present (True when it cannot be read).
+NpmrcReader = Callable[[str], bool]
 
 
 def untracked_path(repo: RepoFiles, file: str | None) -> bool:
@@ -191,6 +193,8 @@ class ResolutionContext:
     mise_configs: Mapping[str, tuple[str, ...]]
     # Directory → the tracked files under its default mise task directories.
     mise_task_files: Mapping[str, tuple[str, ...]]
+    # Directory → the names of the git-visible files directly in it.
+    files_by_dir: Mapping[str, tuple[str, ...]]
 
     @classmethod
     def build(
@@ -265,6 +269,7 @@ class ResolutionContext:
             makefiles=definitions.makefiles,
             mise_configs=definitions.mise_configs,
             mise_task_files=definitions.mise_task_files,
+            files_by_dir=definitions.files_by_dir,
         )
 
     def dir_landing(self, directory: str) -> str | None:
@@ -280,6 +285,7 @@ class _DefinitionFiles(NamedTuple):
     makefiles: Mapping[str, str]
     mise_configs: Mapping[str, tuple[str, ...]]
     mise_task_files: Mapping[str, tuple[str, ...]]
+    files_by_dir: Mapping[str, tuple[str, ...]]
 
 
 def _definition_files(repo: RepoFiles) -> _DefinitionFiles:
@@ -287,6 +293,10 @@ def _definition_files(repo: RepoFiles) -> _DefinitionFiles:
     makefiles: dict[str, str] = {}
     configs: dict[str, list[str]] = {}
     task_files: dict[str, list[str]] = {}
+    by_dir: dict[str, list[str]] = {}
+    for path in sorted(repo.files):
+        directory, name = posixpath.split(path)
+        by_dir.setdefault(directory, []).append(name)
     for path in sorted(repo.tracked):
         if has_skip_dir(path):
             continue
@@ -303,6 +313,7 @@ def _definition_files(repo: RepoFiles) -> _DefinitionFiles:
         MappingProxyType(makefiles),
         MappingProxyType({key: tuple(value) for key, value in configs.items()}),
         MappingProxyType({key: tuple(value) for key, value in task_files.items()}),
+        MappingProxyType({key: tuple(value) for key, value in by_dir.items()}),
     )
 
 
@@ -889,8 +900,6 @@ class SymbolResolver:
         return draft.set("missing", "no definition in the symbol index and no use in tracked code")
 
 
-# ── Commands ─────────────────────────────────────────────────────────────
-
 _NO_DIRECTORY = "the doc names no directory"
 
 
@@ -937,15 +946,26 @@ class CommandResolver:
     package.json under the frontend root: ``ok`` when one of those defines it,
     ``not_checked`` when only another file does, and ``missing`` only when no
     tracked file of the runner defines it and every one of them could be read
-    and holds a provable set. Nothing outside the repository and no environment
-    variable counts. A repository with no file of the runner gives no reference.
+    and holds a provable set, and the runner has a file where the doc runs it.
+    Nothing outside the repository and no environment variable counts. A
+    repository with no file of the runner gives no reference. An ``unproven``
+    mention, and an undefined ALL-CAPS name (a placeholder such as ``TARGET``),
+    never ends ``missing``.
     """
 
-    def __init__(self, ctx: ResolutionContext, scripts: ScriptsReader, make: MakeReader, mise: MiseReader) -> None:
+    def __init__(
+        self,
+        ctx: ResolutionContext,
+        scripts: ScriptsReader,
+        make: MakeReader,
+        mise: MiseReader,
+        npmrc: NpmrcReader,
+    ) -> None:
         self.ctx = ctx
         self.scripts = scripts
         self.make = make
         self.mise = mise
+        self.npmrc = npmrc
         self._tasks: dict[str, _Tasks] = {}
 
     def command(self, doc: str, mention: CommandMention, line: int, context: str) -> Draft | None:
@@ -973,12 +993,12 @@ class CommandResolver:
         directory = posixpath.dirname(doc)
         return ["", directory] if directory else [""]
 
-    def _unproven(self, draft: Draft, mention: CommandMention, missing: str) -> Draft:
+    def _unproven(self, draft: Draft, mention: CommandMention, name: str, missing: str) -> Draft:
         if mention.verdict == "unproven":
             return draft.set("not_checked", mention.reason, checked=False)
+        if any(ch.isalpha() for ch in name) and name.upper() == name:
+            return draft.set("skipped", "an ALL-CAPS placeholder", checked=False)
         return draft.set("missing", missing)
-
-    # package.json scripts --------------------------------------------------
 
     def _script(self, draft: Draft, mention: CommandMention) -> Draft:
         dirs = self.ctx.manifest_dirs
@@ -1005,29 +1025,34 @@ class CommandResolver:
             return draft.set("not_checked", f"defined only in {_join_or(files)}; {_NO_DIRECTORY}", checked=False)
         if None in found.values():
             return draft.set("skipped", "a package.json could not be read", checked=False)
-        if mention.verdict != "unproven" and (default := self._default_script(name, searched)) is not None:
+        if not candidates:
+            return draft.set("not_checked", "no package.json where the doc runs it", checked=False)
+        if mention.verdict != "unproven" and (default := self._default_script(mention, searched)) is not None:
             return draft.set("not_checked", default, checked=False)
         files = [posixpath.join(d, PACKAGE_MANIFEST) for d in searched]
-        return self._unproven(draft, mention, f"{_join_or(files)} defines no script {name!r}")
+        return self._unproven(draft, mention, name, f"{_join_or(files)} defines no script {name!r}")
 
-    def _default_script(self, name: str, dirs: Sequence[str]) -> str | None:
-        """Why a script npm supplies itself may run (``start`` beside a
-        ``server.js``, ``install`` beside a ``*.gyp`` file)."""
-        if name == "start":
-            for directory in dirs:
-                if posixpath.join(directory, "server.js") in self.ctx.repo.files:
-                    return f"runs node server.js from {_where(directory)} when package.json has no start script"
-        if name == "install":
-            for path in sorted(self.ctx.repo.files):
-                if path.endswith(".gyp") and posixpath.dirname(path) in dirs:
-                    return f"runs node-gyp rebuild for {path} when package.json has no install script"
+    def _default_script(self, mention: CommandMention, dirs: Sequence[str]) -> str | None:
+        """Why the run may pass without the script: npm supplies ``start``
+        beside a ``server.js`` and ``install`` beside a ``*.gyp`` file, and a
+        tracked ``.npmrc`` may set ``if-present``."""
+        for directory in dirs:
+            names = self.ctx.files_by_dir.get(directory, ())
+            if mention.name == "start" and "server.js" in names:
+                return f"runs node server.js from {_where(directory)} when package.json has no start script"
+            if mention.name == "install" and (gyp := next((n for n in names if n.endswith(".gyp")), None)):
+                path = posixpath.join(directory, gyp)
+                return f"runs node-gyp rebuild for {path} when package.json has no install script"
+        if mention.runner in ("npm", "pnpm"):
+            for directory in sorted({"", *dirs}):
+                rc = posixpath.join(directory, ".npmrc")
+                if rc in self.ctx.repo.tracked and self.npmrc(directory):
+                    return f"{rc} sets if-present, so a missing script passes"
         return None
-
-    # make targets ----------------------------------------------------------
 
     def _target(self, draft: Draft, mention: CommandMention) -> Draft:
         makefiles = self.ctx.makefiles
-        name = mention.name
+        name = strip_dot_slash(mention.name)
         if mention.directory is not None:
             if mention.directory not in makefiles:
                 return draft.set("skipped", f"no makefile in {_where(mention.directory)}", checked=False)
@@ -1055,14 +1080,16 @@ class CommandResolver:
                 return draft.set(
                     "not_checked", f"{rel} {targets.opaque}, so its targets are not all known", checked=False
                 )
-            if set_here := sorted(mention.overrides & targets.variables):
-                detail = f"the command sets {set_here[0]}, which names targets in {rel}"
+            if mention.overrides and targets.variables:
+                detail = f"the command sets {sorted(mention.overrides)[0]}, and {rel} names targets with variables"
                 return draft.set("not_checked", detail, checked=False)
+        if not candidates:
+            return draft.set("not_checked", "no makefile where the doc runs it", checked=False)
         for directory in places:
             if (reason := self._buildable(directory, name)) is not None:
                 return draft.set("not_checked", reason, checked=False)
         rels = [makefiles[d] for d in searched]
-        return draft.set("missing", f"{_join_or(rels)} defines no target {name!r}")
+        return self._unproven(draft, mention, name, f"{_join_or(rels)} defines no target {name!r}")
 
     def _buildable(self, directory: str, name: str) -> str | None:
         """Why make may succeed on a target no rule names: a file of that name
@@ -1074,18 +1101,13 @@ class CommandResolver:
         if repo.exists(path):
             return f"{path} exists, so make has nothing to do for it"
         parent, base = posixpath.split(path)
-        prefix = parent + "/" if parent else ""
-        sources = (f"{base},v", f"s.{base}", f"RCS/{base},v", f"RCS/{base}", f"SCCS/s.{base}")
+        sources = [f"{base},v", f"s.{base}", f"RCS/{base},v", f"RCS/{base}", f"SCCS/s.{base}"]
         stems = (base + ".", posixpath.splitext(base)[0] + ".")
-        for candidate in sorted(repo.files):
-            if not candidate.startswith(prefix):
-                continue
-            rest = candidate[len(prefix) :]
-            if rest in sources or ("/" not in rest and rest.startswith(stems)):
+        sources += [name for name in self.ctx.files_by_dir.get(parent, ()) if name.startswith(stems)]
+        for source in sources:
+            if repo.exists(candidate := posixpath.join(parent, source)):
                 return f"{candidate} exists, and a built-in make rule may build {path} from it"
         return None
-
-    # mise tasks ------------------------------------------------------------
 
     def _owner_tasks(self, owner: str) -> _Tasks:
         """The tasks one directory's own config files, file tasks and includes define."""
@@ -1193,9 +1215,7 @@ class CommandResolver:
             return draft.set("skipped", "names no task", checked=False)
         if explicit and works[0] and works[0] not in self.ctx.repo.dirs:
             return draft.set("skipped", f"no directory {works[0]} in the repository", checked=False)
-        if explicit and not any(
-            self.ctx.mise_configs.get(owner) or self.ctx.mise_task_files.get(owner) for owner in _chain(works[0])
-        ):
+        if explicit and not any(self._has_mise(owner) for owner in _chain(works[0])):
             return draft.set("skipped", f"no mise config in {_where(works[0])} or above it", checked=False)
         read = _Tasks()
         for directory, task in [*paths, *literals]:
@@ -1219,13 +1239,19 @@ class CommandResolver:
             return draft.set("skipped", f"{read.unreadable[0]} could not be read", checked=False)
         if read.opaque:
             return draft.set("not_checked", f"{read.opaque[0]}, so its tasks are not all known", checked=False)
+        if not explicit and not any(self._has_mise(owner) for work in works for owner in _chain(work)):
+            return draft.set("not_checked", "no mise config where the doc runs it", checked=False)
         parts = [
             f"no task {task!r} in {_join_or(self._owner_tasks(path).configs) or _where(path)}" for path, task in paths
         ]
         if literals:
             where = _join_or([_where(work) for work, _ in literals])
             parts.append(f"no task {literals[0][1]!r} visible from {where}")
-        return draft.set("missing", " and ".join(parts))
+        task = literals[0][1] if literals else paths[0][1]
+        return self._unproven(draft, mention, task.rsplit(":", 1)[-1], " and ".join(parts))
+
+    def _has_mise(self, owner: str) -> bool:
+        return bool(self.ctx.mise_configs.get(owner) or self.ctx.mise_task_files.get(owner))
 
 
 def _repo_dir(path: str) -> str:

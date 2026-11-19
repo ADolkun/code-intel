@@ -430,9 +430,6 @@ def test_a_command_with_a_bad_config_exits_2(
     assert "cannot read the config" in capsys.readouterr().err
 
 
-# ── Docs commands check (0.3 rename) ─────────────────────────────────────
-
-
 @pytest.mark.parametrize(
     ("docs", "expected"),
     [

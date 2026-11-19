@@ -144,8 +144,6 @@ def test_a_config_that_is_not_toml_is_a_parse_diagnostic() -> None:
     assert [(p.kind, p.file) for p in problems] == [("parse_failed", "mise.toml")]
 
 
-# ── References, through the docs check ───────────────────────────────────
-
 MONOREPO = {
     "mise.toml": 'monorepo_root = true\n[monorepo]\nconfig_roots = ["backend/", "frontend/"]\n'
     '[monorepo.path_aliases]\nbe = "backend"\n[tasks.release]\nrun = "x"\n',
@@ -308,6 +306,9 @@ def test_a_repository_without_mise_files_has_no_mise_references(tmp_path: Path) 
         ("# NOMISE alias='b'\n", set(), None),
         ("#MISE alias=\n", set(), "the #MISE header of mise-tasks/build is not TOML the docs check can read"),
         ('#MISE extends="base"\n', set(), "file task mise-tasks/build extends another task"),
+        ('-- MISE alias="a7"\n', {"a7"}, None),
+        ('echo "$MISE_PROJECT_ROOT"\n# uses MISE settings\n', set(), None),
+        (';; MISE alias="b"\n', set(), "mise-tasks/build has a MISE header line the docs check cannot read"),
     ],
 )
 def test_a_file_task_header_declares_aliases(header: str, aliases: set[str], opaque: str | None) -> None:
