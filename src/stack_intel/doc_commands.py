@@ -13,7 +13,7 @@ The line is split into commands at ``&&``, ``||``, ``;``, ``|``, ``&`` and the
 parentheses of a subshell. A ``cd <dir>`` applies to the commands after it until
 the subshell it is in closes. A fence is read as a whole
 (``fence_command_mentions``): continued lines are joined, heredoc bodies are
-skipped, a console fence is read only on its prompt lines, and a ``cd`` or an
+skipped, a fence with prompts is read only on its prompt lines, and a ``cd`` or an
 ``export`` on one line leaves every later line unprovable for what it changes.
 
 Whatever the reader cannot place is unprovable rather than modeled: a directory
@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
-from stack_intel.doc_rules import is_example_path, is_placeholder_path
+from stack_intel.doc_rules import is_placeholder_path
 
 PACKAGE_MANIFEST = "package.json"
 
@@ -68,8 +68,9 @@ _WRAPPERS = frozenset({"sudo", "time", "exec", "command", "nohup", "env", "nice"
 _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _REDIRECT_RE = re.compile(r"\d*(?:&>>?|>>?&?|>\||<<<|<<-?|<>|<&?)")
 _PLACEHOLDER_WORD_RE = re.compile(r"<[^<>\s]+>")
-_HEREDOC_RE = re.compile(r"(?<![<\w])<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-_CONSOLE_FENCES = frozenset({"console", "shell-session"})
+_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# `$` and `%` only: a `#` line in a doc is far more often a comment than a root prompt.
+_PROMPT_RE = re.compile(r"^\s*[$%]\s+")
 # Environment variables that change which makefile or config is read.
 _MAKE_ENVIRONMENT = frozenset({"MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEFILES", "MAKEFILE_LIST"})
 
@@ -269,8 +270,6 @@ def _named(
     name = _unquote(name)
     if verdict != "unchecked" and (_placeholder(name) or any(ch in name for ch in _WILDCARD_CHARS)):
         verdict, reason = "skipped", "a placeholder or a wildcard, not a name"
-    elif verdict != "unchecked" and is_example_path(name):
-        verdict, reason = "skipped", "an example name"
     elif directory == _LOST and verdict == "check":
         verdict, reason = "unproven", "runs in a directory outside the repository or not written literally"
     return CommandMention(runner, name, _final_dir(directory), text, verdict, reason, overrides)
@@ -774,12 +773,6 @@ def command_mentions(text: str) -> list[CommandMention]:
     return _line_mentions(text, _LineState(), fence=False)
 
 
-def _prompt_re(info: str) -> re.Pattern[str]:
-    words = info.split()
-    console = (words[0].lower() if words else "") in _CONSOLE_FENCES
-    return re.compile(r"^\s*[$%#]\s+" if console else r"^\s*[$%]\s+")
-
-
 def _joined(lines: Sequence[str]) -> Iterator[tuple[int, str]]:
     """``(offset of the first line, line)`` with backslash-continued lines joined."""
     index = 0
@@ -793,13 +786,13 @@ def _joined(lines: Sequence[str]) -> Iterator[tuple[int, str]]:
         yield start, line
 
 
-def fence_command_mentions(info: str, lines: Sequence[str]) -> list[tuple[int, CommandMention]]:
+def fence_command_mentions(lines: Sequence[str]) -> list[tuple[int, CommandMention]]:
     """Every script, target or task the lines of a shell fence run, as
-    ``(line offset, mention)``. Where any line starts with a prompt (``$``,
-    ``%``, and ``#`` in a console fence), only the prompt lines are commands;
+    ``(line offset, mention)``. Where any line starts with a ``$`` or ``%``
+    prompt, only the prompt lines are commands;
     the rest are output. A line after one that changed directory runs where
     the reader cannot tell."""
-    prompt = _prompt_re(info)
+    prompt = _PROMPT_RE
     joined = list(_joined(lines))
     prompted = any(prompt.match(line) for _, line in joined)
     out: list[tuple[int, CommandMention]] = []

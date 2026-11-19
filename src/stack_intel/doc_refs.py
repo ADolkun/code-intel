@@ -541,7 +541,7 @@ class _Run:
                 if is_shell_fence(fence.info):
                     found.extend(
                         (mention, fence.content_line + offset, "fence")
-                        for offset, mention in fence_command_mentions(fence.info, fence.lines)
+                        for offset, mention in fence_command_mentions(fence.lines)
                     )
             drafts = (self.commands.command(doc, mention, line, context) for mention, line, context in found)
             out.extend(draft for draft in drafts if draft is not None)

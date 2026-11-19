@@ -248,28 +248,26 @@ def test_every_unproven_or_unchecked_form_says_why() -> None:
             assert (mention.reason is None) == (mention.verdict == "check"), text
 
 
-def _fence(info: str, text: str) -> list[tuple[int, str, str, str]]:
-    return [(offset, m.name, m.verdict, m.text) for offset, m in fence_command_mentions(info, text.split("\n"))]
+def _fence(text: str) -> list[tuple[int, str, str, str]]:
+    return [(offset, m.name, m.verdict, m.text) for offset, m in fence_command_mentions(text.split("\n"))]
 
 
 @pytest.mark.parametrize(
-    ("info", "text", "expected"),
+    ("text", "expected"),
     [
-        ("sh", "make -j8 \\\n  build", [(0, "build", "check", "make -j8 build")]),
-        ("sh", "make build \\\n  V=1", [(0, "build", "check", "make build V=1")]),
-        ("sh", "npm run \\\n  build", [(0, "build", "check", "npm run build")]),
-        ("sh", "mise run \\\n  build", [(0, "build", "check", "mise run build")]),
-        ("sh", "make lint\nmake test", [(0, "lint", "check", "make lint"), (1, "test", "check", "make test")]),
+        ("make -j8 \\\n  build", [(0, "build", "check", "make -j8 build")]),
+        ("make build \\\n  V=1", [(0, "build", "check", "make build V=1")]),
+        ("npm run \\\n  build", [(0, "build", "check", "npm run build")]),
+        ("mise run \\\n  build", [(0, "build", "check", "mise run build")]),
+        ("make lint\nmake test", [(0, "lint", "check", "make lint"), (1, "test", "check", "make test")]),
         (
-            "console",
             "$ make help\nmake build    Build the app\nmake test     Run the tests",
             [(0, "help", "check", "make help")],
         ),
-        ("console", "# make install\nmake: Nothing to be done", [(0, "install", "check", "make install")]),
-        ("sh", "% make lint\nmake[1]: Entering directory", [(0, "lint", "check", "make lint")]),
-        ("sh", "# install\nmake install", [(1, "install", "check", "make install")]),
+        ("# make install\nmake: Nothing to be done", []),
+        ("% make lint\nmake[1]: Entering directory", [(0, "lint", "check", "make lint")]),
+        ("# install\nmake install", [(1, "install", "check", "make install")]),
         (
-            "",
             "make build    - build the app",
             [
                 (0, "build", "unproven", "make build    - build the app"),
@@ -279,25 +277,24 @@ def _fence(info: str, text: str) -> list[tuple[int, str, str, str]]:
                 (0, "app", "unproven", "make build    - build the app"),
             ],
         ),
-        ("sh", "cat <<EOF > x.sh\nmake deploy\nEOF\nmake lint", [(3, "lint", "check", "make lint")]),
-        ("sh", "cat <<-'END'\n\tmake deploy\n\tEND\nmake lint", [(3, "lint", "check", "make lint")]),
-        ("sh", "cat <<< 'make deploy'\nmake lint", [(1, "lint", "check", "make lint")]),
+        ("cat <<EOF > x.sh\nmake deploy\nEOF\nmake lint", [(3, "lint", "check", "make lint")]),
+        ("cat <<-'END'\n\tmake deploy\n\tEND\nmake lint", [(3, "lint", "check", "make lint")]),
+        ("cat <<< 'make deploy'\nmake lint", [(1, "lint", "check", "make lint")]),
         (
-            "sh",
             "git clone https://example.com/tool && cd tool\nmake install",
             [(1, "install", "unproven", "make install")],
         ),
-        ("sh", "mkdir build && cd build\nmake", []),
-        ("sh", "cd web\nnpm run build", [(1, "build", "unproven", "npm run build")]),
-        ("sh", "pushd web\nmake lint\npopd", [(1, "lint", "unproven", "make lint")]),
+        ("mkdir build && cd build\nmake", []),
+        ("cd web\nnpm run build", [(1, "build", "unproven", "npm run build")]),
+        ("pushd web\nmake lint\npopd", [(1, "lint", "unproven", "make lint")]),
     ],
 )
-def test_fence_command_mentions(info: str, text: str, expected: list[tuple[int, str, str, str]]) -> None:
-    assert _fence(info, text) == expected
+def test_fence_command_mentions(text: str, expected: list[tuple[int, str, str, str]]) -> None:
+    assert _fence(text) == expected
 
 
 def test_an_export_on_an_earlier_fence_line_sets_the_variable_for_make() -> None:
-    ((_, mention),) = fence_command_mentions("sh", ["export PREFIX=x", "make x-build"])
+    ((_, mention),) = fence_command_mentions(["export PREFIX=x", "make x-build"])
     assert mention.overrides == frozenset({"PREFIX"})
 
 
@@ -341,11 +338,18 @@ def test_options_and_variables_that_leave_a_name_uncertain(text: str, verdict: s
 @pytest.mark.parametrize(
     ("text", "names"),
     [
-        ("make my-target", [("my-target", "skipped")]),
-        ("make example", [("example", "skipped")]),
-        ("npm run my_script", [("my_script", "skipped")]),
         ("make build \\", [("build", "check")]),
+        ("npm run \\", []),
     ],
 )
-def test_example_names_and_a_trailing_backslash(text: str, names: list[tuple[str, str]]) -> None:
+def test_a_trailing_backslash_is_not_a_name(text: str, names: list[tuple[str, str]]) -> None:
     assert [(m.name, m.verdict) for m in command_mentions(text)] == names
+
+
+def test_a_hash_line_in_a_console_fence_is_a_comment_not_a_prompt() -> None:
+    lines = ["# make sure the server is up", "$ make deploy", "# npm run lint first"]
+    assert [(offset, m.name) for offset, m in fence_command_mentions(lines)] == [(1, "deploy")]
+
+
+def test_a_heredoc_without_a_space_is_skipped() -> None:
+    assert fence_command_mentions(["cat<<EOF > x.sh", "make deploy", "EOF"]) == []

@@ -998,6 +998,8 @@ class CommandResolver:
             return draft.set("not_checked", mention.reason, checked=False)
         if any(ch.isalpha() for ch in name) and name.upper() == name:
             return draft.set("skipped", "an ALL-CAPS placeholder", checked=False)
+        if is_example_path(name):
+            return draft.set("skipped", "an example name", checked=False)
         return draft.set("missing", missing)
 
     def _script(self, draft: Draft, mention: CommandMention) -> Draft:
@@ -1053,6 +1055,8 @@ class CommandResolver:
     def _target(self, draft: Draft, mention: CommandMention) -> Draft:
         makefiles = self.ctx.makefiles
         name = strip_dot_slash(mention.name)
+        if not name.strip("/"):
+            return draft.set("not_checked", "an empty goal names no target", checked=False)
         if mention.directory is not None:
             if mention.directory not in makefiles:
                 return draft.set("skipped", f"no makefile in {_where(mention.directory)}", checked=False)
@@ -1095,8 +1099,8 @@ class CommandResolver:
         """Why make may succeed on a target no rule names: a file of that name
         exists, or a built-in rule may make it from a file beside it."""
         path = posixpath.normpath(posixpath.join(directory, name))
-        if path.startswith("..") or path.startswith("/"):
-            return None
+        if path.startswith(("..", "/")):
+            return f"{name} names a path outside the repository, which may exist where the command runs"
         repo = self.ctx.repo
         if repo.exists(path):
             return f"{path} exists, so make has nothing to do for it"

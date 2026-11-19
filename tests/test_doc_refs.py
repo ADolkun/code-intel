@@ -1808,7 +1808,10 @@ def test_reviewed_cases(
     [
         ("if-present=true\n", "not_checked"),
         ("if-present = true\nregistry=https://registry.example.com/\n", "not_checked"),
+        ("if-present\n", "not_checked"),
+        ("if-present[]=x\n", "not_checked"),
         ("if-present=false\n", "missing"),
+        ("if-present=0\n", "missing"),
         ("registry=https://registry.example.com/\n", "missing"),
     ],
 )
@@ -1817,6 +1820,51 @@ def test_a_tracked_npmrc_that_sets_if_present_leaves_a_missing_script_unproven(
 ) -> None:
     files = {"package.json": _manifest("lint"), ".npmrc": npmrc}
     assert _script_results(_commands(tmp_path, "`npm run deploy`", files)) == [("npm run deploy", status)]
+
+
+SECOND_REVIEW_CASES = [
+    pytest.param(
+        "```console\n# make sure the server is up\n$ make deploy\n```\n",
+        {"Makefile": "deploy:\n"},
+        [("make deploy", "ok")],
+        id="hash-comment-in-console-fence",
+    ),
+    pytest.param(
+        "```console\n# npm run lint first\n$ make deploy\n```\n",
+        {"Makefile": "deploy:\n", "package.json": _manifest("build")},
+        [("make deploy", "ok")],
+        id="hash-comment-names-no-script",
+    ),
+    pytest.param(
+        "```sh\ncat<<EOF > x.sh\nmake deploy\nEOF\n```\n",
+        {"Makefile": "build:\n"},
+        [],
+        id="heredoc-without-space",
+    ),
+    pytest.param(
+        "`make example-app`", {"Makefile": "example-app:\n"}, [("make example-app", "ok")], id="defined-example"
+    ),
+    pytest.param("`make example-app`", {"Makefile": "build:\n"}, [("make example-app", "skipped")], id="example"),
+    pytest.param("`make ''`", {"Makefile": "build:\n"}, [("make ''", "not_checked")], id="empty-goal"),
+    pytest.param("`make './'`", {"Makefile": "build:\n"}, [("make './'", "not_checked")], id="dot-slash-goal"),
+    pytest.param("`make /abs/path`", {"Makefile": "build:\n"}, [("make /abs/path", "not_checked")], id="absolute"),
+    pytest.param("`make ../x`", {"Makefile": "build:\n"}, [("make ../x", "not_checked")], id="parent"),
+]
+
+
+@pytest.mark.parametrize(("markdown", "files", "expected"), SECOND_REVIEW_CASES)
+def test_second_review_cases(
+    tmp_path: Path, markdown: str, files: Mapping[str, str], expected: list[tuple[str, str]]
+) -> None:
+    assert _script_results(_commands(tmp_path, markdown, files)) == expected
+
+
+def test_an_empty_goal_and_an_outside_path_say_why(tmp_path: Path) -> None:
+    report = _commands(tmp_path, "`make ''` `make /abs/path`", {"Makefile": "build:\n"})
+    assert [r.detail for r in refs(report, kind="command")] == [
+        "an empty goal names no target",
+        "/abs/path names a path outside the repository, which may exist where the command runs",
+    ]
 
 
 def test_a_missing_make_target_is_a_finding_naming_the_makefile(tmp_path: Path) -> None:

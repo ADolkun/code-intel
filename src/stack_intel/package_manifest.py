@@ -25,14 +25,18 @@ def package_scripts_from_bytes(
 
 
 def npmrc_sets_if_present(data: bytes) -> bool:
-    """Whether an ``.npmrc`` sets ``if-present`` to anything but false. A file
-    that is not UTF-8 counts as setting it: it cannot be shown not to."""
+    """Whether an ``.npmrc`` sets ``if-present``. In npm's ini format a bare
+    key (``if-present``) or an array key (``if-present[]=x``) is true, and only
+    ``false`` and ``0`` unset it. A file that is not UTF-8 counts as setting
+    it: it cannot be shown not to."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return True
     for line in text.splitlines():
-        key, equals, value = line.partition("=")
-        if equals and key.strip() == "if-present" and value.strip().lower() not in ("false", '"false"'):
+        key, equals, value = line.strip().partition("=")
+        if key.strip().removesuffix("[]") != "if-present":
+            continue
+        if not equals or value.strip().strip("\"'").lower() not in ("false", "0"):
             return True
     return False
