@@ -6,8 +6,14 @@ Releases up to 0.2.3 were published as `code-intel`, installed from git; the nam
 
 ## Unreleased
 
+### Added
+
+- `doc-check` checks documented commands beyond npm scripts: pnpm, yarn and bun scripts, make targets and mise tasks, in code spans and shell fences. A command whose outcome the tracked files cannot settle is `not_checked` with the reason, never `missing`.
+
 ### Changed
 
+- The docs check `scripts` is renamed `commands`, and the reference kind `script` is renamed `command`. A config that still uses the old names fails with an error naming the new one.
+- A `package.json` that cannot be read or parsed no longer adds a `parse_failed` diagnostic (which made the run incomplete): the script references that depend on it are `not_checked`, naming the file and the error. Makefiles, mise files and `.npmrc` files are treated the same way.
 - The README is now an overview with a quickstart; the full reference moved to `docs/`, unchanged.
 
 ## 0.2.3 - 2026-11-05

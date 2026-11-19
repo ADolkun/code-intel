@@ -8,11 +8,12 @@ Elements come from the TypeScript compiler (the helper's ``facts`` mode, cached
 per file by ``ts_facts.FactsCache``). ``.ts``/``.mts``/``.cts`` files are not
 read: TypeScript parses ``<X>`` there as a type assertion, never JSX.
 
-``parent_function`` follows the README rule: the innermost function declaration
-or expression with a name, or arrow/function expression that initializes a
-variable directly or as a direct call argument, whose span from its parameter
-list on holds the element. Methods, class fields and object-literal properties
-are not named functions, and fragments (``<>``) have no tag to query.
+``parent_function`` follows the parent rule (docs/analysis.md, "Parent rule"):
+the innermost function declaration or expression with a name, or
+arrow/function expression that initializes a variable directly or as a direct
+call argument, whose span from its parameter list on holds the element.
+Methods, class fields and object-literal properties are not named functions,
+and fragments (``<>``) have no tag to query.
 
 CLI (verification): ``stack-intel dump jsx --all --json [--include-tests] [--root DIR]``
 prints every element under the root (default: ``frontend.root``).

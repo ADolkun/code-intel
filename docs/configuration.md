@@ -187,8 +187,8 @@ URL builders are found in the modules of the configured clients: exported functi
 | `scope` | Required, non-empty. Globs of the Markdown files to check, if git sees them. |
 | `route_prefixes` | Prefixes a mention may add or omit: with `["/api"]`, a doc may write `GET /items` for the route `/api/items`, or `GET /api/items` for an unprefixed one. Each starts with `/` and does not end with one. |
 | `reachability` | Optional table `root`, `include`, `exclude`. Docs matching `include` (and not `exclude`) must be reachable from `root` through links, else they are `orphaned doc` findings. Without the table there is no orphan check. |
-| `rules` | `[[docs.rules]]`: `paths` (globs), `checks` (a non-empty subset of `links`, `paths`, `routes`, `symbols`, `scripts`) and a required `reason`. A doc gets every check unless the first rule whose `paths` match it names fewer. |
-| `ignore` | `[[docs.ignore]]`: `file`, `kind` (`link`, `path`, `route`, `symbol` or `script`), `text` and a required `reason`. Suppresses the failing references of that kind in that file whose text, as written, equals `text`. An entry that suppresses nothing is itself a finding. |
+| `rules` | `[[docs.rules]]`: `paths` (globs), `checks` (a non-empty subset of `links`, `paths`, `routes`, `symbols`, `commands`; `scripts` was renamed `commands` in 0.3) and a required `reason`. A doc gets every check unless the first rule whose `paths` match it names fewer. |
+| `ignore` | `[[docs.ignore]]`: `file`, `kind` (`link`, `path`, `route`, `symbol` or `command`; `script` was renamed `command` in 0.3), `text` and a required `reason`. Suppresses the failing references of that kind in that file whose text, as written, equals `text`. An entry that suppresses nothing is itself a finding. |
 
 ## `[agents]`
 

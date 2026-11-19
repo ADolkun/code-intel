@@ -3,7 +3,8 @@
 A *diagnostic* means content was lost or a resolver failed: it sets
 ``complete: false``. A *limitation* is a known blind spot that leaves the
 result usable: it never changes ``complete``. Every kind is registered here so
-a test can check that each emitted kind is documented in the README.
+a test can check that each emitted kind is documented in docs/tools.md
+("Diagnostic kinds", "Limitation kinds").
 """
 
 from __future__ import annotations

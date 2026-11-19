@@ -4,7 +4,8 @@
 // Names come from each declaration node's own name, never from source text, so
 // keywords in comments, strings, JSX text or type syntax declare nothing.
 // Classification follows the declaration's own body (components) and position
-// (scope); see README "Symbols" for the indexed forms and the documented gaps.
+// (scope); see docs/analysis.md, "Symbols", for the indexed forms and the
+// documented gaps.
 
 const {
   containsJsxOutsideNestedFunctions,

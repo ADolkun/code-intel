@@ -103,6 +103,11 @@ def append(path: Path, text: str) -> None:
     write(path, path.read_text(encoding="utf-8") + text, 2000)
 
 
+def _plant_make_typo(repo: Path) -> None:
+    write(repo / "Makefile", ".PHONY: lint\nlint:\n\truff check .\n", 2000)
+    append(repo / "docs" / "a.md", "\nRun `make lint`, then `make lnt`.\n")
+
+
 @pytest.mark.parametrize(
     ("plant", "expected"),
     [
@@ -122,8 +127,9 @@ def append(path: Path, text: str) -> None:
             lambda repo: write(repo / "docs" / "orphan.md", "# Orphan\n"),
             "docs/orphan.md:1: orphaned doc: not reachable from docs/README.md",
         ),
+        (_plant_make_typo, "docs/a.md:9: command not found: make lnt (Makefile defines no target 'lnt')"),
     ],
-    ids=["stale-path", "broken-anchor", "removed-route", "orphaned-doc"],
+    ids=["stale-path", "broken-anchor", "removed-route", "orphaned-doc", "missing-make-target"],
 )
 def test_each_planted_drift_prints_its_exact_line_and_exits_1(repo: Path, plant, expected: str) -> None:
     plant(repo)

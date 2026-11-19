@@ -105,7 +105,7 @@ It prints `ok: <path>` and the configured tables, or an error that names the key
 stack-intel doc-check
 ```
 
-Every link and anchor must resolve, and every repository path, backend route, code symbol and npm script a doc names must still exist. The agent instruction files Claude Code and GitHub Copilot load are checked too, with or without `[docs]`. Each finding is one `path:line: message` line; the exit code is 0 with no findings, 1 with findings and 2 when the check could not run or is incomplete. Run it on every pull request. What it checks and how to fix a finding: [Docs check](https://github.com/ADolkun/stack-intel/blob/main/docs/docs-check.md).
+Every link and anchor must resolve, every repository path, backend route and code symbol a doc names must still exist, and every `package.json` script, make target and mise task it runs must be defined. The agent instruction files Claude Code and GitHub Copilot load are checked too, with or without `[docs]`. Each finding is one `path:line: message` line; the exit code is 0 with no findings, 1 with findings and 2 when the check could not run or is incomplete. Run it on every pull request. What it checks and how to fix a finding: [Docs check](https://github.com/ADolkun/stack-intel/blob/main/docs/docs-check.md).
 
 ### 4. Register the MCP server
 

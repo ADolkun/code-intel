@@ -6,6 +6,11 @@ root = "docs/README.md"
 include = ["docs/**/*.md"]
 exclude = []
 
+[[docs.rules]]
+paths = ["docs/docs-check.md"]
+checks = ["links", "routes", "symbols", "commands"]
+reason = "The page describes the docs check on an analyzed repository: its paths are the conventional agent-file locations, example globs and sample output the check reads there, not this repository's files."
+
 [[docs.ignore]]
 file = "README.md"
 kind = "path"
@@ -71,99 +76,3 @@ file = "docs/tools.md"
 kind = "path"
 text = "docs/items.md:5"
 reason = "Sample doc_refs output from an example repository."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = "docs/items.md:7"
-reason = "Sample doc-check output from an example repository."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = ".github/instructions/**/*.instructions.md"
-reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = ".github/agents/**/*.md"
-reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = ".github/hooks/*.json"
-reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = ".github/mcp.json"
-reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = ".github/copilot-instructions.md"
-reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = ".github/agents"
-reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = ".github/instructions"
-reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = ".github/prompts"
-reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = ".github/skills"
-reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = "src/api/**"
-reason = "An example frontmatter glob from an analyzed repository."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "path"
-text = "../"
-reason = "Names the `../` import prefix, not a path. It also resolves to the repository root, which the path check wrongly reports as missing."
-
-[[docs.ignore]]
-file = "CHANGELOG.md"
-kind = "script"
-text = "npm test"
-reason = "Names the npm command forms the check reads, not a command run in this repository. Its only package.json is the TypeScript helper's, under src/stack_intel/ts/, which without [frontend] the check counts for an unqualified script."
-
-[[docs.ignore]]
-file = "CHANGELOG.md"
-kind = "script"
-text = "npm start"
-reason = "Names the npm command forms the check reads, not a command run in this repository. Its only package.json is the TypeScript helper's, under src/stack_intel/ts/, which without [frontend] the check counts for an unqualified script."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "script"
-text = "npm test"
-reason = "Names the npm command forms the check reads, not a command run in this repository. Its only package.json is the TypeScript helper's, under src/stack_intel/ts/, which without [frontend] the check counts for an unqualified script."
-
-[[docs.ignore]]
-file = "docs/docs-check.md"
-kind = "script"
-text = "npm start"
-reason = "Names the npm command forms the check reads, not a command run in this repository. Its only package.json is the TypeScript helper's, under src/stack_intel/ts/, which without [frontend] the check counts for an unqualified script."

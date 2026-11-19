@@ -6,9 +6,10 @@
 // Emits every JsxOpeningElement and JsxSelfClosingElement under scan_root as
 // {file, name, line, col, kind, parent, is_test}. `line` breaks only at \r\n, \r
 // and \n (not U+2028/U+2029, which editors and rg do not count); `col` counts
-// code points. `parent` applies the README rule by walking up from each element,
-// a formulation of its own: the nearest enclosing function that holds the
-// element in its parameters or body and has a name. Every TS/JS suffix is
+// code points. `parent` applies the parent rule (docs/analysis.md, "Parent
+// rule") by walking up from each element, a formulation of its own: the nearest
+// enclosing function that holds the element in its parameters or body and has a
+// name. Every TS/JS suffix is
 // parsed, so a `.ts` file holding an element would show up here even though the
 // tool skips `.ts`. compare_facts.py diffs this against `stack-intel dump jsx --all --json`.
 // `frontend_root` is relative to repo_root or absolute.
@@ -144,8 +145,9 @@ async function main() {
     ts.SyntaxKind.TypeAssertionExpression,
   ]);
 
-  // The name the README gives a function node, or null. A function declaration
-  // or function expression with its own name is named by it. An arrow or
+  // The name the parent rule (docs/analysis.md) gives a function node, or null.
+  // A function declaration or function expression with its own name is named by
+  // it. An arrow or
   // anonymous function expression is named by the variable it initializes, seen
   // through value wrappers and through any calls it is an argument of
   // (`const X = memo(forwardRef((p, r) => ...))`, `const X = withA(B)(() => ...)`).
