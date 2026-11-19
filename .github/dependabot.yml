@@ -31,6 +31,10 @@ updates:
 
   - package-ecosystem: npm
     directory: /src/stack_intel/ts
+    # The TypeScript pin moves only in the TypeScript 7.1 release step; Dependabot would
+    # propose nightly 7.1 builds, which sort above 7.1.0-beta.
+    ignore:
+      - dependency-name: typescript
     schedule:
       interval: weekly
     cooldown:

@@ -110,6 +110,7 @@ FILES = {
     "docs/guide.md": GUIDE,
 }
 
+CLEAN_SUMMARY = "doc-check: 0 findings in 2 docs (5 references, 5 checked)"
 ROUTE_NOT_FOUND = "docs/guide.md:3: route not found: GET /api/items (not in the analyzed backend routes)"
 
 
@@ -166,7 +167,7 @@ def check_commands(env: dict[str, str], repo: Path) -> None:
     proc = run(env, repo, "doc-check")
     check_ok(proc, "stack-intel doc-check on the clean fixture")
     check(proc.stdout == "", f"doc-check printed findings on the clean fixture:\n{proc.stdout}")
-    check("0 findings in 2 docs" in proc.stderr, f"doc-check summary:\n{proc.stderr}")
+    check(CLEAN_SUMMARY in proc.stderr.splitlines(), f"expected {CLEAN_SUMMARY!r} in:\n{proc.stderr}")
 
 
 def check_doc_check_fails_on_drift(env: dict[str, str], repo: Path) -> None:

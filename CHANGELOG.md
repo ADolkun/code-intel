@@ -49,6 +49,7 @@ Releases up to 0.2.3 were published as `code-intel`, installed from git; the nam
 ### Fixed
 
 - Malformed capture entries are rejected with a `parse_failed` diagnostic, and the oracle's app process is killed as a group on timeout.
+- `FastAPIInstrumentor.instrument_app` is recognized under its real module, `opentelemetry.instrumentation.fastapi`, again, and the `route not found` hint no longer names one framework: it points at the limitation when the route may be mounted by code the analysis cannot see.
 
 ## 0.1.0 - 2026-11-05
 
