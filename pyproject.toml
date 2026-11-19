@@ -59,7 +59,9 @@ fastapi-copy = [
 ]
 
 [tool.uv]
-required-version = ">=0.13.9"
+# Keep at or below the uv that Dependabot runs: above it, every uv update fails with
+# tool_version_not_supported. Releases pin their own uv in release.yml.
+required-version = ">=0.13.7"
 default-groups = ["dev", "fastapi-live"]
 conflicts = [
     [{ group = "fastapi-live" }, { group = "fastapi-copy" }],
