@@ -6,7 +6,7 @@ import textwrap
 
 import pytest
 
-from code_intel.code_words import (
+from stack_intel.code_words import (
     BUILTIN_WORDS,
     code_words,
     code_words_from_bytes,

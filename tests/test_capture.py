@@ -1,4 +1,4 @@
-"""``code-intel capture`` over a checkout whose app uses an installed library
+"""``stack-intel capture`` over a checkout whose app uses an installed library
 (``library_fixture``), the clean environment the app is imported in, and the
 guarantee that nothing but the three commands runs repository code."""
 
@@ -22,14 +22,14 @@ from fixture_repo import hermetic_git
 from library_fixture import checkout, lock_text
 from mcp_fixtures import write
 
-from code_intel import capture, cli, library_capture, runner, ts_bridge, verify
-from code_intel import server as mcp_server
-from code_intel.analysis_runtime import AnalysisRuntime
-from code_intel.config import ConfigFile
+from stack_intel import capture, cli, library_capture, runner, ts_bridge, verify
+from stack_intel import server as mcp_server
+from stack_intel.analysis_runtime import AnalysisRuntime
+from stack_intel.config import ConfigFile
 
 pytestmark = pytest.mark.usefixtures("ctime_follows_mtime")
 
-CAPTURE_FILE = ".code-intel/library-capture.json"
+CAPTURE_FILE = ".stack-intel/library-capture.json"
 
 
 @pytest.fixture
@@ -192,7 +192,7 @@ def test_a_second_capture_writes_the_same_bytes_and_check_passes(repo: Path) -> 
 def test_check_writes_nothing_and_exits_1_when_there_is_no_file(repo: Path) -> None:
     code, out, err = run_capture(repo, "--check")
     assert code == 1
-    assert "library-capture.json does not exist" in out and "run code-intel capture" in err
+    assert "library-capture.json does not exist" in out and "run stack-intel capture" in err
     assert not (repo / CAPTURE_FILE).exists()
 
 
@@ -549,7 +549,7 @@ def test_a_stale_capture_is_refused_like_a_plain_capture_when_the_environment_di
 
 
 def test_if_stale_without_the_config_table_says_so_and_exits_0(repo: Path, oracle_calls: list[Sequence[str]]) -> None:
-    config = repo / ".code-intel" / "config.toml"
+    config = repo / ".stack-intel" / "config.toml"
     text = config.read_text(encoding="utf-8")
     config.write_text(text[: text.index("[backend.capture]")] + text[text.index("[frontend]") :], encoding="utf-8")
     code, out, err = run_capture(repo, "--if-stale")
@@ -599,7 +599,7 @@ def test_an_app_that_does_not_import_exits_2_with_its_error(repo: Path) -> None:
 
 
 def test_capture_needs_the_config_table(repo: Path) -> None:
-    config = repo / ".code-intel" / "config.toml"
+    config = repo / ".stack-intel" / "config.toml"
     text = config.read_text(encoding="utf-8")
     config.write_text(text[: text.index("[backend.capture]")] + text[text.index("[frontend]") :], encoding="utf-8")
     code, _, err = run_capture(repo)
@@ -613,7 +613,7 @@ def test_the_configured_python_is_used_without_the_option_and_must_exist(repo: P
 
 
 def test_the_lock_is_required_to_check_versions(repo: Path) -> None:
-    config = repo / ".code-intel" / "config.toml"
+    config = repo / ".stack-intel" / "config.toml"
     config.write_text(config.read_text(encoding="utf-8").replace('lock = "backend/uv.lock"\n', ""), encoding="utf-8")
     code, _, err = run_capture(repo)
     assert code == 2 and "[backend] lock is not set" in err
@@ -676,16 +676,16 @@ def test_a_timeout_kills_the_whole_process_group_so_a_child_holding_the_pipe_can
 # ── Nothing else runs repository code ────────────────────────────────────
 
 NEVER_IMPORTED_BY_THE_SERVER = (
-    "code_intel.runner",
-    "code_intel.capture",
-    "code_intel.verify",
-    "code_intel.runtime_check",
+    "stack_intel.runner",
+    "stack_intel.capture",
+    "stack_intel.verify",
+    "stack_intel.runtime_check",
 )
 
 
 def test_importing_the_mcp_server_never_imports_a_module_that_starts_the_app() -> None:
     probe = (
-        "import sys, code_intel.server\n"
+        "import sys, stack_intel.server\n"
         f"print([name for name in {NEVER_IMPORTED_BY_THE_SERVER!r} if name in sys.modules])"
     )
     done = subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True, check=True)
@@ -701,7 +701,7 @@ def marker_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typescript_tool
     hermetic_git(monkeypatch, tmp_path / "home")
     monkeypatch.setenv(ts_bridge.TS_DIR_ENV, str(typescript_toolchain.typescript_dir))
     root = test_verify.checkout(tmp_path / "repo")
-    config = root / ".code-intel" / "config.toml"
+    config = root / ".stack-intel" / "config.toml"
     text = config.read_text(encoding="utf-8")
     config.write_text(text.replace("\n[frontend]", MARKER_CONFIG_TABLE + "\n[frontend]", 1), encoding="utf-8")
     script = root / "bin" / "python"

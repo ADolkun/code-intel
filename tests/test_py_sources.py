@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from code_intel import code_paths, py_sources
-from code_intel.backend_model import PyModule
-from code_intel.py_sources import ModuleScope, PySources, module_name_for, resolve_relative, static_names
+from stack_intel import code_paths, py_sources
+from stack_intel.backend_model import PyModule
+from stack_intel.py_sources import ModuleScope, PySources, module_name_for, resolve_relative, static_names
 
 
 def write_tree(root: Path, files: dict[str, str]) -> None:

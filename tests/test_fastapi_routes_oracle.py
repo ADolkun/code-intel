@@ -16,11 +16,11 @@ from pathlib import Path
 
 import pytest
 
-from code_intel import include_model
-from code_intel.backend_model import BackendModel, Def, Located, Unknown
-from code_intel.oracles import case_package
-from code_intel.oracles.fastapi_cases import CASES, IMPORT_ERRORS_ON_NEWER_FASTAPI, INEXACT, INEXACT_LIVE
-from code_intel.router_graph import build_backend_model
+from stack_intel import include_model
+from stack_intel.backend_model import BackendModel, Def, Located, Unknown
+from stack_intel.oracles import case_package
+from stack_intel.oracles.fastapi_cases import CASES, IMPORT_ERRORS_ON_NEWER_FASTAPI, INEXACT, INEXACT_LIVE
+from stack_intel.router_graph import build_backend_model
 
 
 def dependency_id(model: BackendModel, loc: Located) -> str:

@@ -1,4 +1,4 @@
-"""``code-intel runtime-check``: which differences between the running app and
+"""``stack-intel runtime-check``: which differences between the running app and
 the static analysis are explained, the report, and the command over a real
 checkout that imports a real FastAPI app."""
 
@@ -16,9 +16,9 @@ import pytest
 from fixture_repo import hermetic_git
 from test_verify import MAIN, checkout, git
 
-from code_intel import cli, runner, runtime_check
-from code_intel.config import CaptureConfig
-from code_intel.oracles import fastapi_oracle
+from stack_intel import cli, runner, runtime_check
+from stack_intel.config import CaptureConfig
+from stack_intel.oracles import fastapi_oracle
 
 LIB = "backend/.venv/lib/python3.14/site-packages/extlib/router.py"
 INSTALLED = {"dist": "extlib", "file": "extlib/router.py", "line": 3}
@@ -482,7 +482,7 @@ def test_the_command_exits_2_without_a_python_from_the_option_or_the_config(repo
 
 @pytest.mark.skipif(os.name == "nt", reason="the configured interpreter is a shell script")
 def test_the_configured_python_and_env_are_used_without_the_option(repo: Path) -> None:
-    config = repo / ".code-intel" / "config.toml"
+    config = repo / ".stack-intel" / "config.toml"
     text = config.read_text(encoding="utf-8")
     launcher = repo / "py"
     launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")

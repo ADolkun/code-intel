@@ -7,8 +7,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from code_intel.config import CONFIG_REL, parse_config
-from code_intel.doc_rules import DocRefsConfig
+from stack_intel.config import CONFIG_REL, parse_config
+from stack_intel.doc_rules import DocRefsConfig
 
 FAKE_ROOT = Path("/fake-repo")
 

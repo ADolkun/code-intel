@@ -14,9 +14,9 @@ import pytest
 from fake_npm import NODE, NPM, FakeNpm, which
 from fixture_repo import FULL_CONFIG, git_init, hermetic_git, make_repo, write
 
-from code_intel import analysis_runtime, cli, provision, setup, toolchain_pins, ts_bridge
-from code_intel import server as mcp_server
-from code_intel.config import ConfigFile
+from stack_intel import analysis_runtime, cli, provision, setup, toolchain_pins, ts_bridge
+from stack_intel import server as mcp_server
+from stack_intel.config import ConfigFile
 
 
 def _env(tmp_path: Path, extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -79,7 +79,7 @@ def test_a_failed_attempt_names_the_cause_and_is_not_retried(tmp_path: Path, mon
     problem = _find(tmp_path, npm).problem
     assert problem is not None and problem.code == "typescript_not_found"
     assert "npm ci exited with code 1 (npm error 404)" in problem.fix
-    assert 'run "code-intel setup" to retry' in problem.fix
+    assert 'run "stack-intel setup" to retry' in problem.fix
     assert _find(tmp_path, npm).problem == problem
     assert len(npm.npm_calls) == 1
 
@@ -97,7 +97,7 @@ def test_missing_npm_is_the_cause(tmp_path: Path) -> None:
     assert toolchain.problem is not None
     assert toolchain.problem.code == "typescript_not_found"
     assert "automatic setup failed: npm not found on PATH" in toolchain.problem.fix
-    assert "code-intel setup" in toolchain.problem.fix
+    assert "stack-intel setup" in toolchain.problem.fix
 
 
 def test_missing_node_is_reported_as_node_and_nothing_is_installed(tmp_path: Path) -> None:

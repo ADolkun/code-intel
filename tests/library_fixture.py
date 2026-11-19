@@ -188,7 +188,7 @@ def checkout(root: Path, site: Path, *, lock: str | None = None) -> Path:
     """A git work tree with the app, a lock, the config and the installed library in ``site``."""
     write_extlib(site)
     files = {
-        ".code-intel/config.toml": CONFIG.format(site=json.dumps(str(site))),
+        ".stack-intel/config.toml": CONFIG.format(site=json.dumps(str(site))),
         "backend/pkg/__init__.py": "",
         "backend/pkg/deps.py": DEPS,
         "backend/pkg/main.py": MAIN,

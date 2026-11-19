@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from code_intel.backend_model import (
+from stack_intel.backend_model import (
     Def,
     DepLayer,
     DepUse,
@@ -28,8 +28,8 @@ from code_intel.backend_model import (
     Unknown,
     Value,
 )
-from code_intel.code_paths import FileStamp
-from code_intel.dependency_resolver import BOTH_DECLARED_MESSAGE, DependencyResolver, ModuleSource
+from stack_intel.code_paths import FileStamp
+from stack_intel.dependency_resolver import BOTH_DECLARED_MESSAGE, DependencyResolver, ModuleSource
 
 PACKAGE = "pkg"
 
@@ -229,7 +229,7 @@ def analyze(request: pytest.FixtureRequest, tmp_path: Path) -> Callable[[Mapping
         if request.param == "double":
             sources = FakeSources(all_files)
             return Analysis(DependencyResolver(FakeResolver(sources), sources), sources)
-        from code_intel import py_sources, py_values
+        from stack_intel import py_sources, py_values
 
         for rel, source in all_files.items():
             path = tmp_path / "backend" / rel

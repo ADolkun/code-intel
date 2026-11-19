@@ -1,4 +1,4 @@
-# code-intel
+# stack-intel
 
 Static analysis of a FastAPI backend and its TypeScript frontend, served to coding agents over MCP.
 
@@ -11,9 +11,9 @@ It answers the questions general code search cannot:
 - which docs describe a file, route or symbol, and whether they still match the code;
 - which routes and dependencies installed libraries add (a fastapi-users router, `current_user(...)`), through [a committed capture](#library-routers-and-dependencies) of the running app.
 
-The same analyses check the docs against the code in CI (`code-intel doc-check`), check themselves against the source and against the running app (`verify`, `runtime-check`), and report their own counts (`summary`).
+The same analyses check the docs against the code in CI (`stack-intel doc-check`), check themselves against the source and against the running app (`verify`, `runtime-check`), and report their own counts (`summary`).
 
-Every repository-specific fact (the backend package and app, the frontend root, how the frontend calls the API, which docs to check) comes from one config file in the analyzed repository: [`.code-intel/config.toml`](#configuration). Nothing else is assumed.
+Every repository-specific fact (the backend package and app, the frontend root, how the frontend calls the API, which docs to check) comes from one config file in the analyzed repository: [`.stack-intel/config.toml`](#configuration). Nothing else is assumed.
 
 Contents: [Requirements](#requirements) · [Install and launch](#install-and-launch) · [Commands](#commands) · [Configuration](#configuration) · [Tools](#tools) · [Response contract](#response-contract) · [Analysis notes](#analysis-notes) · [Docs check](#docs-check) · [Freshness and the restart rule](#freshness-and-the-restart-rule) · [Performance](#performance) · [Verification](#verification) · [Development](#development) · [License](#license)
 
@@ -21,8 +21,8 @@ Contents: [Requirements](#requirements) · [Install and launch](#install-and-lau
 
 - **Python 3.14** and [uv](https://docs.astral.sh/uv/). The backend analysis parses the analyzed code with the running interpreter, so it must be at least the version the backend declares (`backend.python_version_file`); see [Old interpreter](#old-interpreter). The package depends on `mcp` (>=2.3, <3), `markdown-it-py` (==4.2.0) and `PyYAML`; `uv` installs them.
 - **git** on `PATH`. Whether a path exists is decided by git (tracked, or untracked and not ignored), never by the filesystem, so a local checkout full of generated or ignored files answers like a clean CI checkout. Every walk (backend, frontend, symbols, docs) is limited to the same git-visible files. A git failure is reported by name; there is no filesystem fallback.
-- **Node.js 18 or newer** on `PATH` (or named by `CODE_INTEL_NODE`, a path or a command name) for the frontend analysis. MCP clients started from a GUI often lack the version manager's `PATH`, so set `CODE_INTEL_NODE` in the server entry's `env`. A relative `CODE_INTEL_NODE` containing a directory separator resolves against the repository root.
-- **TypeScript 7.1 or newer** for the frontend analysis, installed once per machine, on first use or by [`code-intel setup`](#install-and-launch), into a user cache shared by every checkout and repository. The helper has its own pinned copy (`7.1.0-beta`, in the package's `ts/package.json` and lockfile) because it calls the compiler's JavaScript API, which TypeScript 7.0 does not export: 7.1 adds it at stable paths (`typescript/sync`, `typescript/ast`). When 7.1 is released, the pin becomes a version bump. `CODE_INTEL_TYPESCRIPT_DIR` names another TypeScript package directory instead (a relative value resolves against the repository root). A TypeScript older than 7.1 is refused with a `typescript_unsupported` problem that names the fix.
+- **Node.js 18 or newer** on `PATH` (or named by `STACK_INTEL_NODE`, a path or a command name) for the frontend analysis. MCP clients started from a GUI often lack the version manager's `PATH`, so set `STACK_INTEL_NODE` in the server entry's `env`. A relative `STACK_INTEL_NODE` containing a directory separator resolves against the repository root.
+- **TypeScript 7.1 or newer** for the frontend analysis, installed once per machine, on first use or by [`stack-intel setup`](#install-and-launch), into a user cache shared by every checkout and repository. The helper has its own pinned copy (`7.1.0-beta`, in the package's `ts/package.json` and lockfile) because it calls the compiler's JavaScript API, which TypeScript 7.0 does not export: 7.1 adds it at stable paths (`typescript/sync`, `typescript/ast`). When 7.1 is released, the pin becomes a version bump. `STACK_INTEL_TYPESCRIPT_DIR` names another TypeScript package directory instead (a relative value resolves against the repository root). A TypeScript older than 7.1 is refused with a `typescript_unsupported` problem that names the fix.
 
 Without Node or TypeScript:
 
@@ -33,55 +33,55 @@ A helper that crashes while Node and TypeScript are present is reported the same
 
 ## Install and launch
 
-A repository pins the tool by commit in one file, `.code-intel/requirements.txt`:
+A repository pins the tool by commit in one file, `.stack-intel/requirements.txt`:
 
 ```
-code-intel @ git+https://github.com/ADolkun/code-intel@<full commit sha>  # v0.2.2
+stack-intel @ git+https://github.com/ADolkun/stack-intel@<full commit sha>  # v0.2.2
 ```
 
 A full SHA is immutable, so `uv` serves later launches from its cache without fetching. Every caller (the MCP client, CI, a git hook) uses the same launcher from the repository root:
 
 ```sh
-uv run --no-project --python 3.14 --with-requirements .code-intel/requirements.txt code-intel <command>
+uv run --no-project --python 3.14 --with-requirements .stack-intel/requirements.txt stack-intel <command>
 ```
 
 `--no-project` keeps the launch independent of whatever project the directory belongs to; `--python 3.14` is needed because `uv` only finds a repository's `.python-version` when it runs inside it.
 
-**TypeScript install, automatic on first use.** A command or tool that needs the frontend and finds no TypeScript installs it itself, the way `code-intel setup` does: it copies the packaged `ts/package.json` and `ts/package-lock.json` to `${CODE_INTEL_CACHE_DIR:-~/.cache/code-intel}/ts/<lock digest>/` and runs `npm ci --ignore-scripts` there (npm is the only code it runs). It needs Node.js with npm on `PATH` and network access to the npm registry, once.
+**TypeScript install, automatic on first use.** A command or tool that needs the frontend and finds no TypeScript installs it itself, the way `stack-intel setup` does: it copies the packaged `ts/package.json` and `ts/package-lock.json` to `${STACK_INTEL_CACHE_DIR:-~/.cache/stack-intel}/ts/<lock digest>/` and runs `npm ci --ignore-scripts` there (npm is the only code it runs). It needs Node.js with npm on `PATH` and network access to the npm registry, once.
 
-- A **command** installs first, printing one line to standard error (`code-intel: installing TypeScript into … (first use, one time)`), and then runs.
+- A **command** installs first, printing one line to standard error (`stack-intel: installing TypeScript into … (first use, one time)`), and then runs.
 - The **MCP server** installs in a background thread and does not block the reply. Until the install finishes, a frontend answer carries `problem: "frontend_provisioning"` (an error body, or the `frontend_unavailable` diagnostic of a partial answer, plus a `frontend_provisioning` [limitation](#limitation-kinds)) saying TypeScript will be ready shortly; backend tools are unaffected. The next call after the install finishes answers in full.
 - The install is built in a staging directory and renamed into place under a lock file (`ts/.<digest>.lock`, `flock`), so a failed or killed run leaves nothing half-installed, and several servers (worktrees) and commands at once take turns: the one that waits finds the winner's install and does not call npm.
-- A process makes one attempt per lock digest. When it fails (no `node` or `npm`, npm offline), the answer is the usual `frontend_unavailable`, and its fix names the cause and says to run `code-intel setup` to retry.
-- `CODE_INTEL_TYPESCRIPT_DIR` is an explicit TypeScript location and is never provisioned over: with it set, nothing is installed. `CODE_INTEL_NODE` only picks the `node` to run, so a missing TypeScript is still installed; the install uses the `npm` in the same directory as that node when there is one (with the directory first on `PATH`), else `npm` on `PATH`. `CODE_INTEL_NO_AUTO_SETUP=1` restores the earlier behaviour, a missing TypeScript being reported with the `setup` fix.
+- A process makes one attempt per lock digest. When it fails (no `node` or `npm`, npm offline), the answer is the usual `frontend_unavailable`, and its fix names the cause and says to run `stack-intel setup` to retry.
+- `STACK_INTEL_TYPESCRIPT_DIR` is an explicit TypeScript location and is never provisioned over: with it set, nothing is installed. `STACK_INTEL_NODE` only picks the `node` to run, so a missing TypeScript is still installed; the install uses the `npm` in the same directory as that node when there is one (with the directory first on `PATH`), else `npm` on `PATH`. `STACK_INTEL_NO_AUTO_SETUP=1` restores the earlier behaviour, a missing TypeScript being reported with the `setup` fix.
 
-**Prewarming.** `code-intel setup` does the same install on demand, for CI or a machine that is about to go offline. It needs no repository and no config, and a second run finds the install and does not call npm (`ok: typescript 7.1.0-beta already installed at …`). Every checkout, worktree and repository shares the install; the tool needs no `npm ci` per worktree.
+**Prewarming.** `stack-intel setup` does the same install on demand, for CI or a machine that is about to go offline. It needs no repository and no config, and a second run finds the install and does not call npm (`ok: typescript 7.1.0-beta already installed at …`). Every checkout, worktree and repository shares the install; the tool needs no `npm ci` per worktree.
 
 **MCP client entry.** Register the server in the repository's `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "code-intel": {
+    "stack-intel": {
       "command": "git",
       "args": [
         "-c",
-        "alias.code-intel-mcp=!exec uv run --no-project --python 3.14 --with-requirements .code-intel/requirements.txt code-intel mcp",
-        "code-intel-mcp"
+        "alias.stack-intel-mcp=!exec uv run --no-project --python 3.14 --with-requirements .stack-intel/requirements.txt stack-intel mcp",
+        "stack-intel-mcp"
       ]
     }
   }
 }
 ```
 
-The entry runs the server through a git shell alias because git runs a shell alias from the top level of the work tree on every platform, while a client started in a subdirectory (for example in `frontend/`) can load the root file and then starts the server from that subdirectory, where the relative requirements path does not exist. The server serves the repository that contains the current directory; `--repo-root PATH` names another. Clients show the tools as `mcp__code-intel__<tool>` (Claude Code) or under the server name `code-intel`.
+The entry runs the server through a git shell alias because git runs a shell alias from the top level of the work tree on every platform, while a client started in a subdirectory (for example in `frontend/`) can load the root file and then starts the server from that subdirectory, where the relative requirements path does not exist. The server serves the repository that contains the current directory; `--repo-root PATH` names another. Clients show the tools as `mcp__stack-intel__<tool>` (Claude Code) or under the server name `stack-intel`.
 
 MCP clients do not reliably pass your shell environment to the servers they start; the Python SDK's stdio client passes only a minimal default set. To point the server at a Node that is not on the client's `PATH`, or at a TypeScript outside the cache, add an `env` object to the entry:
 
 ```json
 "env": {
-  "CODE_INTEL_NODE": "/absolute/path/to/node",
-  "CODE_INTEL_TYPESCRIPT_DIR": "/absolute/path/to/node_modules/typescript"
+  "STACK_INTEL_NODE": "/absolute/path/to/node",
+  "STACK_INTEL_TYPESCRIPT_DIR": "/absolute/path/to/node_modules/typescript"
 }
 ```
 
@@ -93,15 +93,15 @@ Environment variables:
 
 | Variable | Meaning |
 | --- | --- |
-| `CODE_INTEL_NODE` | The `node` binary (a path or a command name). Default: the first `node` on `PATH`. The [automatic TypeScript install](#install-and-launch) uses the `npm` beside it. |
-| `CODE_INTEL_TYPESCRIPT_DIR` | A TypeScript package directory used instead of the cache install. Setting it turns off the automatic install. |
-| `CODE_INTEL_CACHE_DIR` | Where the automatic install and `setup` put TypeScript. Default: `~/.cache/code-intel`. |
-| `CODE_INTEL_NO_AUTO_SETUP` | Set to `1` to turn off the automatic TypeScript install: a missing TypeScript is reported as `frontend_unavailable`, as before 0.2.1. |
-| `CODE_INTEL_REQUIRE_TOOLCHAIN` | Set to `1` in the test suite: a test that needs Node, TypeScript, git or FastAPI fails instead of skipping when it is missing. |
+| `STACK_INTEL_NODE` | The `node` binary (a path or a command name). Default: the first `node` on `PATH`. The [automatic TypeScript install](#install-and-launch) uses the `npm` beside it. |
+| `STACK_INTEL_TYPESCRIPT_DIR` | A TypeScript package directory used instead of the cache install. Setting it turns off the automatic install. |
+| `STACK_INTEL_CACHE_DIR` | Where the automatic install and `setup` put TypeScript. Default: `~/.cache/stack-intel`. |
+| `STACK_INTEL_NO_AUTO_SETUP` | Set to `1` to turn off the automatic TypeScript install: a missing TypeScript is reported as `frontend_unavailable`, as before 0.2.1. |
+| `STACK_INTEL_REQUIRE_TOOLCHAIN` | Set to `1` in the test suite: a test that needs Node, TypeScript, git or FastAPI fails instead of skipping when it is missing. |
 
 ## Commands
 
-Every command takes `--repo-root PATH` (default: the git work tree containing the current directory) and `--config PATH` (default: `<repo-root>/.code-intel/config.toml`), except `setup`, which needs neither.
+Every command takes `--repo-root PATH` (default: the git work tree containing the current directory) and `--config PATH` (default: `<repo-root>/.stack-intel/config.toml`), except `setup`, which needs neither.
 
 | Command | Does | Exit codes |
 | --- | --- | --- |
@@ -112,7 +112,7 @@ Every command takes `--repo-root PATH` (default: the git work tree containing th
 | `verify [CHECK …]` | Check the analyzers against each other and against the source; see [Verification](#verification). Its `library-capture` check starts the app. | 0 passed, 1 a check failed, 2 a check could not run |
 | `summary` | Markdown counts and coverage of the analysis, one table per analyzer. | 0, 1 a section failed |
 | `runtime-check [--python PYTHON] [--set K=V …] [--env-file FILE]` | Compare the static route analysis with the running app. | 0, 1 unexplained difference, 2 could not run |
-| `capture [--check \| --if-stale] [--python PYTHON]` | Record what installed code contributes to the app (routers library factories build, library dependency trees) in `.code-intel/library-capture.json`; `--check` compares without writing; `--if-stale` starts the app only when a static check finds the file stale; see [Library routers and dependencies](#library-routers-and-dependencies). Needs `[backend.capture]`; `--if-stale` without it prints a note and exits 0. | 0, 1 `--check` found a difference, 2 could not run or the environment differs from the lock |
+| `capture [--check \| --if-stale] [--python PYTHON]` | Record what installed code contributes to the app (routers library factories build, library dependency trees) in `.stack-intel/library-capture.json`; `--check` compares without writing; `--if-stale` starts the app only when a static check finds the file stale; see [Library routers and dependencies](#library-routers-and-dependencies). Needs `[backend.capture]`; `--if-stale` without it prints a note and exits 0. | 0, 1 `--check` found a difference, 2 could not run or the environment differs from the lock |
 | `dump di [--json]` | Dependency-injection map: every route with its dependencies in FastAPI order. | 0, 1 could not run, 2 incomplete |
 | `dump routes [--json] [--unmatched]` | Backend routes matched with frontend calls. | 0, 1 could not run, 2 incomplete |
 | `dump jsx (COMPONENT \| --all) [--root DIR] [--include-tests] [--no-self-close] [--json]` | JSX usage of a component, or every element. | 0, 2 frontend unavailable |
@@ -130,7 +130,7 @@ The `dump` commands are for checking an analyzer by hand; their JSON is the same
 
 What it checks and how to fix a finding: [Docs check](#docs-check).
 
-**Running the TypeScript helper by hand.** When a tool reports `helper_failed`, run the helper to see the full error. It reads one JSON request on standard input and writes one JSON document on standard output (the protocol is in `ts_bridge.py` and `result_types.py`). The path is `code_intel.ts_bridge.HELPER`; the TypeScript directory is the one `status` reports:
+**Running the TypeScript helper by hand.** When a tool reports `helper_failed`, run the helper to see the full error. It reads one JSON request on standard input and writes one JSON document on standard output (the protocol is in `ts_bridge.py` and `result_types.py`). The path is `stack_intel.ts_bridge.HELPER`; the TypeScript directory is the one `status` reports:
 
 ```sh
 echo '{"protocol": 1, "mode": "facts", "typescript_dir": "'"$TS_DIR"'",
@@ -140,7 +140,7 @@ echo '{"protocol": 1, "mode": "facts", "typescript_dir": "'"$TS_DIR"'",
 
 ## Configuration
 
-The analyzed repository carries `.code-intel/config.toml`. Every path in it is relative to the repository root, uses forward slashes and has no `..`. Unknown keys, unknown `kind`s and missing required keys are errors that name the key and the file. The file is read again on every call and is part of every cache's fingerprint, so a config edit needs no restart.
+The analyzed repository carries `.stack-intel/config.toml`. Every path in it is relative to the repository root, uses forward slashes and has no `..`. Unknown keys, unknown `kind`s and missing required keys are errors that name the key and the file. The file is read again on every call and is part of every cache's fingerprint, so a config edit needs no restart.
 
 ```toml
 [backend]
@@ -227,7 +227,7 @@ Optional. Its presence turns on the [library capture](#library-routers-and-depen
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `python` | yes | An interpreter with the app's dependencies installed (a virtual environment's, for example). Repository-relative; it need not exist for `config-check`. |
-| `file` | no | The capture file. Default `.code-intel/library-capture.json`. |
+| `file` | no | The capture file. Default `.stack-intel/library-capture.json`. |
 | `env` | no | Environment variables the import sees besides `PATH`, `HOME`, `TMPDIR`, `LANG` and `LC_ALL`. Synthetic values only: the file is committed and shown in messages. |
 
 ### `[frontend]`
@@ -388,7 +388,7 @@ Without the frontend (see [Requirements](#requirements)) the reply makes no orph
 ```
 ⚠ INCOMPLETE — the frontend was not analyzed, so frontend-derived results are n/a.
 
-Frontend not analyzed: node not found on PATH. Fix: install Node.js 18 or newer and put node on PATH, or set CODE_INTEL_NODE to the node binary
+Frontend not analyzed: node not found on PATH. Fix: install Node.js 18 or newer and put node on PATH, or set STACK_INTEL_NODE to the node binary
 No frontend consumer can be confirmed or ruled out until the frontend is analyzed.
 
 Backend routes that fit the query (1):
@@ -474,8 +474,8 @@ Reports the FastAPI version `backend.lock` locks and the include model it gives 
 The toolchain state is `ok`, `unavailable` (the probe found a problem) or `helper_failed` (the probe is fine, but the last TypeScript helper run in some mode crashed). `helper_failures` maps each helper mode whose last run crashed (`facts`, `routes`) to its problem; an entry clears when a run in that mode succeeds. The probe itself never runs the helper:
 
 ```
-Frontend toolchain: node v26.13.0, typescript 7.1.0-beta (~/.cache/code-intel/ts/<digest>/node_modules/typescript): ok
-Frontend toolchain: unavailable: …/node_modules/typescript/package.json not found. Fix: run "code-intel setup" (or set CODE_INTEL_TYPESCRIPT_DIR to a typescript package directory). DI tools are unaffected; JSX usage, frontend symbols and route matching need it.
+Frontend toolchain: node v26.13.0, typescript 7.1.0-beta (~/.cache/stack-intel/ts/<digest>/node_modules/typescript): ok
+Frontend toolchain: unavailable: …/node_modules/typescript/package.json not found. Fix: run "stack-intel setup" (or set STACK_INTEL_TYPESCRIPT_DIR to a typescript package directory). DI tools are unaffected; JSX usage, frontend symbols and route matching need it.
 ```
 
 `load_counts=true` runs DI and routes and adds `counts: {"di": {...}, "routes": {...}}`. Each analyzer runs on its own: one that fails leaves its counts `null` with the error under `counts_errors`, and routes counts are `null` with a `frontend_unavailable` error when the frontend could not be analyzed. On an old interpreter nothing runs: `counts` is `null` and `counts_error` names the refusal.
@@ -552,7 +552,7 @@ Rows use `file` and `line` (frontend rows add `def_line`); route matches nest `b
 | `mount_shadows_route` | a route registered after a mount that the mount's path overlaps is not reached for those requests (Starlette dispatches to the mount first); matching still pairs calls with it |
 | `unresolved_route_methods` | a `methods=` value the analysis cannot evaluate; the route is reported as `ANY`. `methods=None` is FastAPI's default `GET` and is not reported |
 | `unresolved_redirect_slashes` | an app's `redirect_slashes=` could not be evaluated; it is reported as `True` |
-| `library_capture_stale` | the library capture does not match the code: a captured distribution's version differs from the lock (the capture is still applied), or an entry matches nothing the analysis finds, names a callable the package lacks, is a binding captured for another expression, or is for another app (not applied); the message names it and says to run `code-intel capture` |
+| `library_capture_stale` | the library capture does not match the code: a captured distribution's version differs from the lock (the capture is still applied), or an entry matches nothing the analysis finds, names a callable the package lacks, is a binding captured for another expression, or is for another app (not applied); the message names it and says to run `stack-intel capture` |
 | `opaque_decorator` | a package decorator returns a wrapper that does not copy the function's metadata (`functools.wraps` or `functools.update_wrapper`), so FastAPI reads the wrapper's signature, not the function's |
 | `shared_dependency_id` | callables FastAPI reads with different parameters share one dependency id (a `functools.partial` and its function, a factory and the closure it returns, two definitions of one name). The id's `dependency_functions` entry lists one form's sub-dependencies; the message names the id and both lists |
 | `unresolved_http_method` | a frontend call's HTTP method could not be evaluated; it is reported as `UNKNOWN` |
@@ -609,12 +609,12 @@ Security scopes, `use_cache`, the `scope=` of `Depends` and `app.dependency_over
 
 ### Library routers and dependencies
 
-Static analysis reads the repository, never installed code. Two things in installed code decide what a route is and cannot be read from its source: a router a library builds when it runs (`app.include_router(fastapi_users.get_users_router(...))`), and the dependencies of a callable whose signature the library sets at runtime (`current_user = fastapi_users.current_user(active=True)`, then `Depends(current_user)`). `code-intel capture` imports the app once, under the interpreter of `[backend.capture]`, and records only those facts in `.code-intel/library-capture.json`. The analysis applies that file without running anything, so the MCP server, `doc-check` and every other command give the same answer on every machine.
+Static analysis reads the repository, never installed code. Two things in installed code decide what a route is and cannot be read from its source: a router a library builds when it runs (`app.include_router(fastapi_users.get_users_router(...))`), and the dependencies of a callable whose signature the library sets at runtime (`current_user = fastapi_users.current_user(active=True)`, then `Depends(current_user)`). `stack-intel capture` imports the app once, under the interpreter of `[backend.capture]`, and records only those facts in `.stack-intel/library-capture.json`. The analysis applies that file without running anything, so the MCP server, `doc-check` and every other command give the same answer on every machine.
 
 **Workflow.**
 
 1. Add `[backend.capture]` to the config. Install the backend's locked dependencies (`uv sync --locked` in the backend) so the interpreter matches the lock.
-2. Run `code-intel capture`. It finds the gaps statically (each `unresolved_include`, each `external` dependency binding, each installed callable the package uses as a dependency), imports the app, records what the running app shows at exactly those places, and writes the file. A second run writes the same bytes. A gap it cannot fill stays a gap; its reason is printed (`capture: not captured, include_router at backend/app/main.py:28 (…): pkg.main:own_handler is defined in the backend package`) and the gap is recorded in the file's `unfilled` key, without the reason, which can hold a path of the machine that captured. The same goes for an entry the analysis would not apply (a package function that returns a closure it defines, for one): it is not written as an entry but recorded as unfilled, and the message of a gap recorded this way says that the capture could not fill it, not that it is missing from the file. A dependency that shows only once the entries before it are applied is captured in a further run of the app, however long the chain.
+2. Run `stack-intel capture`. It finds the gaps statically (each `unresolved_include`, each `external` dependency binding, each installed callable the package uses as a dependency), imports the app, records what the running app shows at exactly those places, and writes the file. A second run writes the same bytes. A gap it cannot fill stays a gap; its reason is printed (`capture: not captured, include_router at backend/app/main.py:28 (…): pkg.main:own_handler is defined in the backend package`) and the gap is recorded in the file's `unfilled` key, without the reason, which can hold a path of the machine that captured. The same goes for an entry the analysis would not apply (a package function that returns a closure it defines, for one): it is not written as an entry but recorded as unfilled, and the message of a gap recorded this way says that the capture could not fill it, not that it is missing from the file. A dependency that shows only once the entries before it are applied is captured in a further run of the app, however long the chain.
 3. Commit the file. `capture --check` (and the `library-capture` check of `verify`) fails when the file differs from what the app builds now; run it in CI with the backend's locked environment. After a lock bump of FastAPI or of a captured library, a change to an `include_router` of installed code or to a library dependency, or when `library_capture_stale` appears, run `capture` again; two branches that both recapture conflict, and running it again resolves that.
 
 `capture --if-stale` runs the freshness checks below with the file applied and starts the app only when one of them finds the file stale; otherwise it prints `capture: <file> is up to date (static check)` and exits 0, having imported nothing. When it does start the app it does what `capture` does, including the refusal below. It needs no interpreter when the file is fresh. What the static check cannot see is anything the library call's result depends on other than the text of the include's router argument or of the binding's own expression: an argument whose value changes in another module, or the object the call is made on (the `fastapi_users` of `current_user = fastapi_users.current_user()`, configured elsewhere). `--if-stale` can report a file fresh that `capture --check` reports different; keep `--check` in CI.
@@ -636,10 +636,10 @@ Everything the repository owns is still read from source on every call: an inclu
 
 **Freshness.** The capture file is part of the backend fingerprint, so editing or regenerating it rebuilds DI, routes and docs. On every build the analysis checks, without importing anything:
 
-- each captured distribution's version against the lock: on a difference the capture is still applied and a `library_capture_stale` limitation names the distribution, both versions and `code-intel capture`;
+- each captured distribution's version against the lock: on a difference the capture is still applied and a `library_capture_stale` limitation names the distribution, both versions and `stack-intel capture`;
 - an `includes` entry that matches no unresolved `include_router` call, an entry for another `app`, and an entry that names a callable of the package the analysis cannot find: not applied, and reported as `library_capture_stale`;
 - a `dependencies` entry that no dependency of the package matches, or a `binding` entry whose `bound_to` differs from the expression the package binds the name to now (a rebound name): reported the same way;
-- a gap with no entry while `[backend.capture]` is configured keeps its own limitation, which adds `not in .code-intel/library-capture.json; run code-intel capture`; when the file records the gap as `unfilled` it adds `the capture could not fill it; code-intel capture prints why` instead.
+- a gap with no entry while `[backend.capture]` is configured keeps its own limitation, which adds `not in .stack-intel/library-capture.json; run stack-intel capture`; when the file records the gap as `unfilled` it adds `the capture could not fill it; stack-intel capture prints why` instead.
 
 A malformed file is a `parse_failed` diagnostic on it. What static checks cannot see is a change to anything the library call's result depends on other than the text of its router argument or binding expression (a value passed in from another module, or the object the call is made on); the `library-capture` check catches it.
 
@@ -652,15 +652,15 @@ A pre-commit or [prek](https://github.com/j178/prek) local hook can run `capture
 ```yaml
 - repo: local
   hooks:
-    - id: code-intel-capture
-      name: refresh the code-intel library capture
-      entry: uv run --no-project --python 3.14 --with-requirements .code-intel/requirements.txt code-intel capture --if-stale
+    - id: stack-intel-capture
+      name: refresh the stack-intel library capture
+      entry: uv run --no-project --python 3.14 --with-requirements .stack-intel/requirements.txt stack-intel capture --if-stale
       language: system
       pass_filenames: false
-      files: ^(backend/.*\.py|backend/uv\.lock|\.code-intel/)
+      files: ^(backend/.*\.py|backend/uv\.lock|\.stack-intel/)
 ```
 
-Set `files` to the backend's Python files, its lockfile and `.code-intel/`. A hook that rewrites a file fails the commit, as every pre-commit hook does: stage the file and commit again. Starting the app needs the backend's locked environment (`uv sync --locked`); when the file is fresh the hook needs no interpreter. CI should still run `capture --check`, which also catches what the static check cannot.
+Set `files` to the backend's Python files, its lockfile and `.stack-intel/`. A hook that rewrites a file fails the commit, as every pre-commit hook does: stage the file and commit again. Starting the app needs the backend's locked environment (`uv sync --locked`); when the file is fresh the hook needs no interpreter. CI should still run `capture --check`, which also catches what the static check cannot.
 
 **Limits.** A router that is not wholly from installed code (a repository handler passed into the factory), or whose include did not run once while the app was imported, is not captured. A package callable that returns a closure it defines is identified by FastAPI as its factory, so its parameters cannot be told from the closure's and the entry is not applied. A library that adds routes to a router it is handed (an app-level `get_app()`) is not captured. Library routes are never reported as backend-only or counted in coverage.
 
@@ -781,7 +781,7 @@ Two file-level findings complete the list: `orphaned doc` for a doc matching the
 
 **Submodules.** Links and paths into a submodule that is not checked out are `not_checked`, with a `submodule_missing` limitation. Symbols are never `not_checked` for a missing submodule.
 
-**Pages.** Without Node or TypeScript, `react-router` pages are unavailable and a bare path that only a page could satisfy is `not_checked` (`frontend_pages_unavailable`); install the toolchain in the job (`code-intel setup`) to check them.
+**Pages.** Without Node or TypeScript, `react-router` pages are unavailable and a bare path that only a page could satisfy is `not_checked` (`frontend_pages_unavailable`); install the toolchain in the job (`stack-intel setup`) to check them.
 
 **Library routes.** A route installed code adds is live once the [library capture](#library-routers-and-dependencies) has it, so a doc naming it resolves like any route, and a lookup of the route names the repository `include_router` that mounts it and where the library defines the handler. Without a capture entry it is missing from the analyzed list, so a doc naming it fails with `route not found`, with the limitation printed below. Giving every such doc an ignore entry is the intended fix, since treating the limitation as "not confirmed" would leave the route check unable to fail.
 
@@ -800,7 +800,7 @@ Two file-level findings complete the list: `orphaned doc` for a doc matching the
 Add an ignore entry only when the doc is right and the check cannot see it, and say why in `reason`.
 
 ```
-$ code-intel doc-check
+$ stack-intel doc-check
 docs/items.md:7: route not found: POST /items/import (only /api/items/{item_id} fits, by a word in a parameter)
 doc-check: 1 finding in 2 docs (7 references, 6 checked)
 ```
@@ -829,7 +829,7 @@ Every cache is keyed by a fingerprint of exactly the files it reads (and of the 
 - **The toolchain** is probed again on every call while it is unavailable, and whenever the TypeScript package's `package.json` or the compiler file it names changes, or the node a probe would choose is a different path or file.
 - **Docs** (`doc-check` and `doc_refs`): each doc's Markdown facts and each tracked code file's identifier words are cached per file by stamp, under the racy-clean rule, so after an edit only that file is read again. The file list comes from git on every call, DI and the symbol index come from their own caches, and resolution, reachability and the ignore entries run on every call.
 
-**The restart rule.** Python modules are imported once, so a running server keeps the code it started with. The server records a digest of the exact bytes each of its modules was compiled from, and of the repository's `.code-intel/requirements.txt`. **After a pin bump (or a `git pull` of an editable install), restart the code-intel MCP server in your client.** Until then every reply leads with `⚠ code-intel changed since this server started (its code, or the version pinned in .code-intel/requirements.txt); restart the code-intel MCP server in your client to load it. These results come from the old code.` and JSON carries `"analyzer_code_stale": true`. A module that was modified so close to its load that its bytes cannot be compared makes replies lead with `⚠ Cannot confirm that the analyzer code this server loaded matches the files on disk; restart the code-intel MCP server in your client to be sure.`, with `"analyzer_code_stale": null` and `analyzer_code_unconfirmed` listing each `{"file", "reason"}`. The TypeScript helper (`ts/*.cjs`) and the TypeScript package need no restart. Config edits need no restart: the file is read on every call.
+**The restart rule.** Python modules are imported once, so a running server keeps the code it started with. The server records a digest of the exact bytes each of its modules was compiled from, and of the repository's `.stack-intel/requirements.txt`. **After a pin bump (or a `git pull` of an editable install), restart the stack-intel MCP server in your client.** Until then every reply leads with `⚠ stack-intel changed since this server started (its code, or the version pinned in .stack-intel/requirements.txt); restart the stack-intel MCP server in your client to load it. These results come from the old code.` and JSON carries `"analyzer_code_stale": true`. A module that was modified so close to its load that its bytes cannot be compared makes replies lead with `⚠ Cannot confirm that the analyzer code this server loaded matches the files on disk; restart the stack-intel MCP server in your client to be sure.`, with `"analyzer_code_stale": null` and `analyzer_code_unconfirmed` listing each `{"file", "reason"}`. The TypeScript helper (`ts/*.cjs`) and the TypeScript package need no restart. Config edits need no restart: the file is read on every call.
 
 The runtime serializes access to its caches with a lock, so concurrent tool calls cannot corrupt them.
 
@@ -899,14 +899,14 @@ The two oracle checks compare only git-visible files. The `docs-*` checks are sk
 
 ### `summary`
 
-Prints one Markdown table per analyzer, for a job summary (`code-intel summary >> "$GITHUB_STEP_SUMMARY"`): the app, FastAPI version and include model, routes, dependency targets, files scanned, diagnostics and limitations by kind and the cold analysis time; the route figures with their bounds and coverage; JSX elements and TypeScript declarations by kind; Python symbols by kind; and the docs (references, checked, findings). A section that crashes prints a `Failed` row naming the analyzer and the error instead of costing the other sections; one that cannot run prints `Unavailable` with the fix, and one that does not apply prints `Skipped`. The exit code is 1 only when a section failed.
+Prints one Markdown table per analyzer, for a job summary (`stack-intel summary >> "$GITHUB_STEP_SUMMARY"`): the app, FastAPI version and include model, routes, dependency targets, files scanned, diagnostics and limitations by kind and the cold analysis time; the route figures with their bounds and coverage; JSX elements and TypeScript declarations by kind; Python symbols by kind; and the docs (references, checked, findings). A section that crashes prints a `Failed` row naming the analyzer and the error instead of costing the other sections; one that cannot run prints `Unavailable` with the fix, and one that does not apply prints `Skipped`. The exit code is 1 only when a section failed.
 
 ### `runtime-check`
 
 Imports the configured app with a Python that has the app's dependencies installed and compares what FastAPI built with the dependency map:
 
 ```sh
-code-intel runtime-check --python backend/.venv/bin/python \
+stack-intel runtime-check --python backend/.venv/bin/python \
   --set FEATURE_FLAG=true --env-file .env.test
 ```
 
@@ -939,13 +939,13 @@ uv sync
 uv run ruff check && uv run ruff format --check
 uv run pyrefly check
 git ls-files '*.cjs' | xargs -n1 node --check
-uv run code-intel setup
-CODE_INTEL_REQUIRE_TOOLCHAIN=1 uv run pytest -n auto
+uv run stack-intel setup
+STACK_INTEL_REQUIRE_TOOLCHAIN=1 uv run pytest -n auto
 ```
 
-The dependency groups `fastapi-live` (default) and `fastapi-copy` select the FastAPI the oracle tests run against; install one at a time: `uv sync --no-default-groups --group dev --group fastapi-copy`. The tests turn the automatic install off (`CODE_INTEL_NO_AUTO_SETUP=1`), so run `code-intel setup` first. Tests that need Node, TypeScript, git or FastAPI skip when they are missing; `CODE_INTEL_REQUIRE_TOOLCHAIN=1` (set in CI) turns those skips into failures. The code has no type-check suppressions; keep it that way.
+The dependency groups `fastapi-live` (default) and `fastapi-copy` select the FastAPI the oracle tests run against; install one at a time: `uv sync --no-default-groups --group dev --group fastapi-copy`. The tests turn the automatic install off (`STACK_INTEL_NO_AUTO_SETUP=1`), so run `stack-intel setup` first. Tests that need Node, TypeScript, git or FastAPI skip when they are missing; `STACK_INTEL_REQUIRE_TOOLCHAIN=1` (set in CI) turns those skips into failures. The code has no type-check suppressions; keep it that way.
 
-Layout of `src/code_intel/`: `server.py` registers the tools, validates arguments and maps failures to error bodies; `analysis_runtime.py` owns every cache, its freshness and the analyzer-code staleness check; `queries.py` and `doc_queries.py` hold the pure filtering, matching and suggestion logic; `presenters.py` and `doc_presenters.py` render text and JSON through one envelope. Backend: `py_sources.py`, `py_escapes.py`, `py_values.py`, `router_bases.py`, `router_graph.py`, `include_model.py`, `dependency_resolver.py` and `di_map.py`; the library capture is `library_capture.py` (the file format), `library_view.py` (what the analysis applies and checks), `capture.py` and `runner.py` (the command and the clean-environment subprocess). Frontend: `ts_bridge.py`, `provision.py` (the install on first use), `ts_facts.py`, `ts/*.cjs`, `route_map.py`, `route_matching.py`, `jsx_usage.py`, `symbol_resolve.py`. Docs: `markdown_facts.py`, `repo_files.py`, `code_words.py`, `doc_rules.py`, `doc_refs.py`, `doc_report.py`, `doc_resolvers.py`, `pages.py`, `agent_files.py`, `doc_check.py`. Commands: `cli.py`, `setup.py`, `verify.py`, `summary.py`, `runtime_check.py`.
+Layout of `src/stack_intel/`: `server.py` registers the tools, validates arguments and maps failures to error bodies; `analysis_runtime.py` owns every cache, its freshness and the analyzer-code staleness check; `queries.py` and `doc_queries.py` hold the pure filtering, matching and suggestion logic; `presenters.py` and `doc_presenters.py` render text and JSON through one envelope. Backend: `py_sources.py`, `py_escapes.py`, `py_values.py`, `router_bases.py`, `router_graph.py`, `include_model.py`, `dependency_resolver.py` and `di_map.py`; the library capture is `library_capture.py` (the file format), `library_view.py` (what the analysis applies and checks), `capture.py` and `runner.py` (the command and the clean-environment subprocess). Frontend: `ts_bridge.py`, `provision.py` (the install on first use), `ts_facts.py`, `ts/*.cjs`, `route_map.py`, `route_matching.py`, `jsx_usage.py`, `symbol_resolve.py`. Docs: `markdown_facts.py`, `repo_files.py`, `code_words.py`, `doc_rules.py`, `doc_refs.py`, `doc_report.py`, `doc_resolvers.py`, `pages.py`, `agent_files.py`, `doc_check.py`. Commands: `cli.py`, `setup.py`, `verify.py`, `summary.py`, `runtime_check.py`.
 
 ## License
 

@@ -17,9 +17,9 @@ import pytest
 from fixture_repo import MINIMAL_CONFIG, git_init, make_repo, write
 from test_dependency_resolver import DEPS, FakeResolver, FakeSources
 
-from code_intel import cli, di_map, problems
-from code_intel.backend_model import BackendModel, DepLayer, IncludeEdge, LiveRoute, Located, RouterNode, Unknown
-from code_intel.dependency_resolver import DependencyResolver
+from stack_intel import cli, di_map, problems
+from stack_intel.backend_model import BackendModel, DepLayer, IncludeEdge, LiveRoute, Located, RouterNode, Unknown
+from stack_intel.dependency_resolver import DependencyResolver
 
 FILES = {
     "pkg/__init__.py": "",
@@ -476,7 +476,7 @@ def test_cli_refuses_a_too_old_interpreter(monkeypatch, tmp_path, capsys) -> Non
 
 
 def test_cli_names_a_missing_backend_package(tmp_path, capsys) -> None:
-    write(tmp_path / ".code-intel" / "config.toml", MINIMAL_CONFIG)
+    write(tmp_path / ".stack-intel" / "config.toml", MINIMAL_CONFIG)
     assert _dump_di("--json", "--repo-root", tmp_path) == 1
     err = capsys.readouterr().err
     assert str(tmp_path.resolve() / "backend" / "service_backend") in err
@@ -508,7 +508,7 @@ def test_cli_runs_end_to_end_on_a_small_backend(tmp_path) -> None:
         "from service_backend.main import app\n@app.get('/copy')\ndef c(): ...\n",
     )
     proc = subprocess.run(
-        [sys.executable, "-m", "code_intel.cli", "dump", "di", "--json", "--repo-root", str(tmp_path)],
+        [sys.executable, "-m", "stack_intel.cli", "dump", "di", "--json", "--repo-root", str(tmp_path)],
         capture_output=True,
         text=True,
         timeout=60,

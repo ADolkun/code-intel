@@ -18,12 +18,12 @@ from doc_config import FAKE_ROOT, LAYOUT, config_text, doc_config
 from fake_repo_files import FakeRepoFiles
 from fixture_repo import hermetic_git
 
-from code_intel import code_paths, doc_presenters, doc_queries, doc_refs
-from code_intel.code_paths import FileStamp
-from code_intel.config import CONFIG_REL, ConfigError, load_config, parse_config
-from code_intel.doc_refs import DocIndex, Reference
-from code_intel.doc_report import symbol_rows
-from code_intel.doc_rules import (
+from stack_intel import code_paths, doc_presenters, doc_queries, doc_refs
+from stack_intel.code_paths import FileStamp
+from stack_intel.config import CONFIG_REL, ConfigError, load_config, parse_config
+from stack_intel.doc_refs import DocIndex, Reference
+from stack_intel.doc_report import symbol_rows
+from stack_intel.doc_rules import (
     CATCH,
     CATCH_OPT,
     PARAM,
@@ -47,8 +47,8 @@ from code_intel.doc_rules import (
     script_mentions,
     split_path_token,
 )
-from code_intel.problems import limitation
-from code_intel.repo_files import list_repo_files
+from stack_intel.problems import limitation
+from stack_intel.repo_files import list_repo_files
 
 PAGES = NextAppPages("frontend/app", "frontend/public")
 
@@ -1478,7 +1478,7 @@ def test_files_outside_scope_are_not_docs(tmp_path: Path) -> None:
 def test_glob_semantics() -> None:
     assert glob_match("docs/a.md", "docs/**/*.md")
     assert glob_match("docs/x/y/a.md", "docs/**/*.md")
-    assert glob_match("tools/code-intel/README.md", "tools/*/README.md")
+    assert glob_match("tools/stack-intel/README.md", "tools/*/README.md")
     assert not glob_match("tools/a/b/README.md", "tools/*/README.md")
     assert glob_match("frontend/app/[id]/page.tsx", "frontend/app/[id]/*.tsx")
     assert not glob_match("frontend/app/i/page.tsx", "frontend/app/[id]/*.tsx")

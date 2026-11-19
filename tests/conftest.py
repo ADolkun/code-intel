@@ -1,6 +1,6 @@
-"""Shared fixtures for the code-intel tests.
+"""Shared fixtures for the stack-intel tests.
 
-``CODE_INTEL_REQUIRE_TOOLCHAIN=1`` (CI) turns a missing node, TypeScript or
+``STACK_INTEL_REQUIRE_TOOLCHAIN=1`` (CI) turns a missing node, TypeScript or
 fastapi into a test failure instead of a skip. Any other value, or unset, skips.
 """
 
@@ -15,9 +15,9 @@ from typing import NoReturn
 
 import pytest
 
-from code_intel import code_paths, provision, ts_bridge
+from stack_intel import code_paths, provision, ts_bridge
 
-REQUIRE_TOOLCHAIN_ENV = "CODE_INTEL_REQUIRE_TOOLCHAIN"
+REQUIRE_TOOLCHAIN_ENV = "STACK_INTEL_REQUIRE_TOOLCHAIN"
 
 pytest_plugins = ["fastapi_fixtures"]
 
@@ -95,7 +95,7 @@ def toolchain_required() -> bool:
 
 
 def unavailable(message: str) -> NoReturn:
-    """Skip, or fail when ``CODE_INTEL_REQUIRE_TOOLCHAIN=1``."""
+    """Skip, or fail when ``STACK_INTEL_REQUIRE_TOOLCHAIN=1``."""
     if toolchain_required():
         pytest.fail(f"{message} ({REQUIRE_TOOLCHAIN_ENV}=1)", pytrace=False)
     pytest.skip(message)
@@ -103,7 +103,7 @@ def unavailable(message: str) -> NoReturn:
 
 @pytest.fixture(scope="session")
 def typescript_toolchain() -> ts_bridge.Toolchain:
-    """The real toolchain: ``CODE_INTEL_TYPESCRIPT_DIR``, else the install ``code-intel setup`` made."""
+    """The real toolchain: ``STACK_INTEL_TYPESCRIPT_DIR``, else the install ``stack-intel setup`` made."""
     toolchain = ts_bridge.find_toolchain(Path(__file__).resolve().parent.parent)
     if not toolchain.available:
         problem = toolchain.problem

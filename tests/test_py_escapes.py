@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from code_intel.backend_model import DepLayer, Located, Unknown
-from code_intel.py_escapes import collect_escapes, mutable_value
-from code_intel.py_sources import PySources
-from code_intel.py_values import ESCAPED_REASON, ValueEvaluator
-from code_intel.router_graph import build_backend_model
+from stack_intel.backend_model import DepLayer, Located, Unknown
+from stack_intel.py_escapes import collect_escapes, mutable_value
+from stack_intel.py_sources import PySources
+from stack_intel.py_values import ESCAPED_REASON, ValueEvaluator
+from stack_intel.router_graph import build_backend_model
 
 DEPS = "from fastapi import Depends\ndef verify(): ...\ndef audit(): ...\n"
 

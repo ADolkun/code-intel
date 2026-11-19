@@ -19,10 +19,10 @@ from pathlib import Path
 import pytest
 from fixture_repo import FULL_CONFIG, MINIMAL_CONFIG, git_init, write
 
-from code_intel import cli, code_paths, symbol_resolve, ts_bridge, ts_facts
-from code_intel.config import parse_config
-from code_intel.oracles import compare_facts
-from code_intel.repo_files import RepoFilesError
+from stack_intel import cli, code_paths, symbol_resolve, ts_bridge, ts_facts
+from stack_intel.config import parse_config
+from stack_intel.oracles import compare_facts
+from stack_intel.repo_files import RepoFilesError
 
 pytestmark = pytest.mark.usefixtures("module_git")
 
@@ -676,8 +676,8 @@ def symbols(typescript_toolchain: ts_bridge.Toolchain, tmp_path_factory: pytest.
 def _unavailable_toolchain() -> ts_bridge.Toolchain:
     problem = ts_bridge.ToolchainProblem(
         "typescript_not_found",
-        "tools/code-intel/ts/node_modules/typescript/package.json not found",
-        "tools/code-intel/ts/node_modules/typescript/package.json",
+        "tools/stack-intel/ts/node_modules/typescript/package.json not found",
+        "tools/stack-intel/ts/node_modules/typescript/package.json",
         ts_bridge.FRONTEND_TS_FIX,
     )
     return ts_bridge.Toolchain("/node", "v24", None, None, None, None, problem, ())
@@ -1276,12 +1276,12 @@ def test_frontend_side_raises_and_both_degrades_without_the_toolchain(python_rep
     [problem] = [p for p in result.problems if p.kind == "frontend_unavailable"]
     assert (
         problem.message
-        == "frontend symbols were not searched: tools/code-intel/ts/node_modules/typescript/package.json not found"
+        == "frontend symbols were not searched: tools/stack-intel/ts/node_modules/typescript/package.json not found"
     )
     as_dict = problem.as_diagnostic()
     assert (as_dict["problem"], as_dict["missing"], as_dict["fix"]) == (
         "typescript_not_found",
-        "tools/code-intel/ts/node_modules/typescript/package.json",
+        "tools/stack-intel/ts/node_modules/typescript/package.json",
         ts_bridge.FRONTEND_TS_FIX,
     )
     backend = python_repo.resolve("Appointment", side="backend")
@@ -2016,7 +2016,7 @@ def test_only_methods_are_annotated(protocol_repo: Repo) -> None:
 
 
 def test_protocol_matches_are_in_the_cli_json(protocol_repo: Repo, capsys: pytest.CaptureFixture[str]) -> None:
-    write(protocol_repo.root / ".code-intel" / "config.toml", MINIMAL_CONFIG)
+    write(protocol_repo.root / ".stack-intel" / "config.toml", MINIMAL_CONFIG)
     argv = ["dump", "symbols", "fetch", "--side", "backend", "--json", "--repo-root", str(protocol_repo.root)]
     assert cli.main(argv) == 0
     rows = {(c["file"], c["container"]): c for c in json.loads(capsys.readouterr().out)["candidates"]}
@@ -2133,13 +2133,13 @@ def test_instance_attributes_skip_nested_functions_at_every_depth() -> None:
 def test_symbol_resolve_cli_dumps(typescript_toolchain, tmp_path: Path) -> None:
     _write_tree(tmp_path / "frontend", {"a.tsx": "export const App = () => <div />;\n"})
     _write_tree(tmp_path / "backend", {"m.py": "class M:\n    X = 1\n"})
-    write(tmp_path / ".code-intel" / "config.toml", MINIMAL_CONFIG)
+    write(tmp_path / ".stack-intel" / "config.toml", MINIMAL_CONFIG)
     git_init(tmp_path)
     env = {**os.environ, ts_bridge.TS_DIR_ENV: str(typescript_toolchain.typescript_dir)}
 
     def run(*args: str) -> dict:
         proc = subprocess.run(
-            [sys.executable, "-m", "code_intel.cli", "dump", "symbols", *args, "--json", "--repo-root", str(tmp_path)],
+            [sys.executable, "-m", "stack_intel.cli", "dump", "symbols", *args, "--json", "--repo-root", str(tmp_path)],
             capture_output=True,
             text=True,
             encoding="utf-8",

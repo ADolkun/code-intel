@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from code_intel import include_model
+from stack_intel import include_model
 
 LOCK = "backend/uv.lock"
 

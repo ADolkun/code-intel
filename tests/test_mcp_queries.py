@@ -28,8 +28,8 @@ from mcp_fixtures import (
     use,
 )
 
-from code_intel import doc_presenters, doc_queries, problems, queries
-from code_intel.doc_report import SymbolRow
+from stack_intel import doc_presenters, doc_queries, problems, queries
+from stack_intel.doc_report import SymbolRow
 
 GET_DB = "service_backend.core.database:get_db"
 PERM = "service_backend.core.auth:require_any_permission"
@@ -448,7 +448,7 @@ def test_di_reverse_route_count_spans_every_group() -> None:
 
 
 def test_orphan_gap_kinds_are_registered_and_the_stage_is_the_routes_scan() -> None:
-    from code_intel import route_map
+    from stack_intel import route_map
 
     registered = set(problems.DIAGNOSTIC_KINDS) | set(problems.LIMITATION_KINDS)
     assert queries.FRONTEND_CALL_GAP_KINDS <= registered

@@ -12,11 +12,11 @@ from typing import Any
 import pytest
 from mcp_fixtures import LAYOUT, toolchain, write
 
-from code_intel import ts_bridge
-from code_intel.config import parse_config
-from code_intel.doc_rules import CATCH_OPT, PARAM, FrontendPage
-from code_intel.pages import ReactRouterPages, page_provider, route_pages
-from code_intel.ts_facts import FactsCache, JsxElement
+from stack_intel import ts_bridge
+from stack_intel.config import parse_config
+from stack_intel.doc_rules import CATCH_OPT, PARAM, FrontendPage
+from stack_intel.pages import ReactRouterPages, page_provider, route_pages
+from stack_intel.ts_facts import FactsCache, JsxElement
 
 pytestmark = pytest.mark.usefixtures("ctime_follows_mtime")
 
@@ -248,7 +248,7 @@ def test_the_real_helper_gives_the_joined_pages(tmp_path: Path, typescript_toolc
 
 
 def config_for(pages: str):
-    return parse_config(LAYOUT + f"[frontend.pages]\n{pages}\n", ".code-intel/config.toml", Path("/x/config.toml"))
+    return parse_config(LAYOUT + f"[frontend.pages]\n{pages}\n", ".stack-intel/config.toml", Path("/x/config.toml"))
 
 
 @pytest.mark.parametrize(

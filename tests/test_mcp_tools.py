@@ -49,12 +49,12 @@ from mcp_fixtures import (
     write_config,
 )
 
-from code_intel import analysis_runtime, loaded_code, presenters, problems, ts_bridge
-from code_intel import server as mcp_server
-from code_intel.config import ConfigFile
-from code_intel.doc_rules import FrontendPage, PageSet
-from code_intel.protocol_match import ProtocolMatch
-from code_intel.result_types import DiResult
+from stack_intel import analysis_runtime, loaded_code, presenters, problems, ts_bridge
+from stack_intel import server as mcp_server
+from stack_intel.config import ConfigFile
+from stack_intel.doc_rules import FrontendPage, PageSet
+from stack_intel.protocol_match import ProtocolMatch
+from stack_intel.result_types import DiResult
 
 # The runtime's timeline is fixture mtimes and an injected clock; the kernel's
 # ctime would put every file in the clock's future.
@@ -92,13 +92,13 @@ def test_configure_watches_the_package_and_the_pin_file(tmp_path: Path, monkeypa
     rt = mcp_server.configure(repo, ConfigFile.locate(repo))
     assert mcp_server.runtime is rt
     assert rt.code_watch.modules == tuple(analysis_runtime.watched_files())
-    assert rt.code_watch.pins == (repo / ".code-intel" / "requirements.txt",)
+    assert rt.code_watch.pins == (repo / ".stack-intel" / "requirements.txt",)
     assert rt.config().backend.package == "service_backend"
 
 
 def test_a_server_without_a_repository_says_how_to_start_it(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mcp_server, "runtime", None)
-    with pytest.raises(RuntimeError, match="code-intel mcp"):
+    with pytest.raises(RuntimeError, match="stack-intel mcp"):
         mcp_server.status()
 
 
@@ -123,7 +123,7 @@ def test_code_watch_covers_every_module_the_server_imports() -> None:
     them raises the restart warning, and each has an exact record."""
     watched = {p.resolve() for p in analysis_runtime.watched_files()}
     probe = (
-        "import sys, pathlib; from code_intel import server, loaded_code; "
+        "import sys, pathlib; from stack_intel import server, loaded_code; "
         "d = loaded_code.PACKAGE_DIR; "
         "loaded = sorted(str(pathlib.Path(m.__file__).resolve()) for m in list(sys.modules.values()) "
         "if getattr(m, '__file__', None) and pathlib.Path(m.__file__).resolve().is_relative_to(d)); "
@@ -142,7 +142,7 @@ def test_code_watch_covers_every_module_the_server_imports() -> None:
 def _copy_package(tmp_path: Path) -> Path:
     """A fresh copy of the package, importable from the returned directory, so a probe can edit it."""
     site = tmp_path / "site"
-    shutil.copytree(PACKAGE_DIR, site / "code_intel", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(PACKAGE_DIR, site / "stack_intel", ignore=shutil.ignore_patterns("__pycache__"))
     return site
 
 
@@ -164,9 +164,9 @@ from pathlib import Path
 
 site = Path(sys.argv[1])
 sys.path.insert(0, str(site))
-package = site / "code_intel"
-from code_intel import loaded_code, server
-from code_intel.config import ConfigFile
+package = site / "stack_intel"
+from stack_intel import loaded_code, server
+from stack_intel.config import ConfigFile
 assert loaded_code.PACKAGE_DIR == package.resolve(), loaded_code.PACKAGE_DIR
 repo = site.parent / "repo"
 repo.mkdir(exist_ok=True)
@@ -186,17 +186,17 @@ _IMPORT_FAILURE_PROBE = (
 out = {}
 target = package / "di_map.py"
 good = target.read_bytes()
-assert "code_intel.di_map" not in sys.modules, "di_map must load lazily for this probe"
+assert "stack_intel.di_map" not in sys.modules, "di_map must load lazily for this probe"
 for label, bad in (("syntax", b"def (\\n"), ("runtime", good + b"\\nraise RuntimeError('boom')\\n")):
     target.write_bytes(bad)
     try:
-        importlib.import_module("code_intel.di_map")
+        importlib.import_module("stack_intel.di_map")
     except (SyntaxError, RuntimeError) as exc:
         out[label + "_error"] = type(exc).__name__
     out[label + "_recorded"] = recorded("di_map.py")
     target.write_bytes(good)
     out[label + "_fixed"] = state()
-importlib.import_module("code_intel.di_map")
+importlib.import_module("stack_intel.di_map")
 out["retried"] = state()
 out["retried_recorded"] = recorded("di_map.py")
 
@@ -204,7 +204,7 @@ queries_py = package / "queries.py"
 original = queries_py.read_bytes()
 queries_py.write_bytes(original + b"\\nRELOADED = 1\\n")
 out["edited"] = state()
-from code_intel import queries
+from stack_intel import queries
 importlib.reload(queries)
 out["reloaded"] = state()
 queries_py.write_bytes(original + b"\\nraise RuntimeError('half')\\n")
@@ -509,7 +509,7 @@ def test_route_unmatched_needs_the_frontend_for_every_side(no_toolchain: SimpleN
     payload = j(mcp_server.route_unmatched(side=cast(Any, side), output_format="json"))
     assert payload["error"] == "frontend_unavailable"
     assert payload["missing"] == "ts-cache/node_modules/typescript/package.json"
-    assert payload["fix"].startswith('run "code-intel setup"')
+    assert payload["fix"].startswith('run "stack-intel setup"')
     assert payload["problem"] == "typescript_not_found"
 
 
@@ -992,7 +992,7 @@ def test_jsx_usage_passes_filters_and_root(server: SimpleNamespace) -> None:
 def test_symbol_kind_argument_is_every_symbol_kind_plus_none(server: SimpleNamespace) -> None:
     """The tool's kind enum and the index's kinds cannot drift apart, and an
     unknown kind is answered with the full list."""
-    from code_intel import symbol_resolve
+    from stack_intel import symbol_resolve
 
     assert mcp_server._SYMBOL_KINDS == (*symbol_resolve.SYMBOL_KINDS, "none")
     payload = j(mcp_server.symbol_resolve("X", kind=cast(Any, "struct"), output_format="json"))
@@ -1139,14 +1139,14 @@ def test_warns_when_analyzer_code_changed_since_start(server: SimpleNamespace, t
         return mcp_server.symbol_resolve("Foo", side=cast(Any, "sideways"))
 
     assert j(mcp_server.status(output_format="json"))["analyzer_code_stale"] is False
-    assert "restart the code-intel MCP server" not in tool_text()
+    assert "restart the stack-intel MCP server" not in tool_text()
     os.utime(src, (5000, 5000))
-    assert "restart the code-intel MCP server" not in tool_text()
+    assert "restart the stack-intel MCP server" not in tool_text()
 
     write(src, "VERSION = 2\n", 9000)
     assert j(mcp_server.status(output_format="json"))["analyzer_code_stale"] is True
     assert mcp_server.status().startswith(presenters.STALE_CODE_WARNING)
-    assert mcp_server.status().count("restart the code-intel MCP server") == 1
+    assert mcp_server.status().count("restart the stack-intel MCP server") == 1
     assert tool_text().startswith(presenters.STALE_CODE_WARNING)
     assert (
         j(mcp_server.symbol_resolve("Foo", side=cast(Any, "sideways"), output_format="json"))["analyzer_code_stale"]
@@ -1166,7 +1166,7 @@ def test_editing_a_server_module_marks_the_server_stale(
         copy = write(tmp_path / "copies" / path.name, path.read_text(encoding="utf-8"), 1000)
         copies.append(copy)
     server.rt.code_watch = analysis_runtime.CodeWatch(copies)
-    assert "restart the code-intel MCP server" not in mcp_server.route_unmatched(side=cast(Any, "bogus"))
+    assert "restart the stack-intel MCP server" not in mcp_server.route_unmatched(side=cast(Any, "bogus"))
     edited = tmp_path / "copies" / module_file
     write(edited, edited.read_text(encoding="utf-8") + "\n# edited\n", 2000)
     assert mcp_server.route_unmatched(side=cast(Any, "bogus")).startswith(presenters.STALE_CODE_WARNING)
@@ -1178,7 +1178,7 @@ def test_server_instructions_name_no_other_tool_layer() -> None:
     text = mcp_server.mcp.instructions or ""
     assert text.splitlines()[-1] == (
         "For general references, call hierarchy and text search, use the repository's other "
-        "code-intelligence tools (see AGENTS.md)."
+        "code-navigation tools (see AGENTS.md)."
     )
     for name in ("probe", "LSP", "mcp__"):
         assert name not in text
@@ -1316,7 +1316,7 @@ def test_a_real_helper_crash_carries_its_problem_code_on_every_symbol_side(
     compiler makes the real helper crash; every side names `helper_failed`."""
     fake_ts = tmp_path / "fake-typescript"
     write(fake_ts / "package.json", '{"name": "typescript", "version": "7.1.0-beta"}\n')
-    monkeypatch.setenv("CODE_INTEL_TYPESCRIPT_DIR", str(fake_ts))
+    monkeypatch.setenv("STACK_INTEL_TYPESCRIPT_DIR", str(fake_ts))
     hermetic_git(monkeypatch, tmp_path / "home")
     repo = make_repo(git_init(tmp_path / "repo"))
     rt = analysis_runtime.AnalysisRuntime(repo, ConfigFile.locate(repo), [])
@@ -2095,7 +2095,7 @@ def test_doc_refs_an_unresolved_app_makes_the_reply_incomplete(docs: SimpleNames
 def test_doc_refs_a_doc_that_cannot_be_read_makes_the_reply_incomplete(
     docs: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from code_intel import code_paths
+    from stack_intel import code_paths
 
     real = code_paths.read_file_bytes
 
@@ -2113,7 +2113,7 @@ def test_doc_refs_a_doc_that_cannot_be_read_makes_the_reply_incomplete(
 
 def test_doc_refs_needs_frontend_definitions_only_for_symbols_and_frontend_files(docs: SimpleNamespace) -> None:
     docs.fakes.ts_error = ts_bridge.ToolchainProblem(
-        "typescript_not_found", "typescript not found", "ts-cache/node_modules", "code-intel setup"
+        "typescript_not_found", "typescript not found", "ts-cache/node_modules", "stack-intel setup"
     )
     symbol = j(mcp_server.doc_refs(symbol="Holder", output_format="json"))
     assert symbol["complete"] is False
@@ -2134,12 +2134,12 @@ def test_doc_refs_refuses_on_an_old_interpreter(tmp_path: Path, monkeypatch: pyt
 
 
 def test_doc_refs_a_missing_config_is_an_analysis_failure(docs: SimpleNamespace) -> None:
-    (docs.repo / ".code-intel" / "config.toml").unlink()
+    (docs.repo / ".stack-intel" / "config.toml").unlink()
     payload = j(mcp_server.doc_refs(doc="docs/a.md", output_format="json"))
     assert (payload["error"], payload["analyzer"], payload["step"]) == ("analysis_failed", "config", "read config")
-    assert payload["missing"] == ".code-intel/config.toml"
+    assert payload["missing"] == ".stack-intel/config.toml"
     status = mcp_server.status()
-    assert "Config error:" in status and ".code-intel/config.toml" in status
+    assert "Config error:" in status and ".stack-intel/config.toml" in status
 
 
 def test_doc_refs_internal_errors_name_the_tool_and_frame(docs: SimpleNamespace, monkeypatch, caplog) -> None:
@@ -2158,10 +2158,10 @@ def test_a_pin_bump_after_start_puts_the_restart_banner_on_every_reply(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = make_repo(tmp_path / "repo")
-    pin = write(repo / ".code-intel" / "requirements.txt", "code-intel @ git+https://example.invalid/x@aaa\n")
+    pin = write(repo / ".stack-intel" / "requirements.txt", "stack-intel @ git+https://example.invalid/x@aaa\n")
     _server(tmp_path, monkeypatch, pin_files=[pin])
     assert not mcp_server.di_deps().startswith("⚠")
-    write(pin, "code-intel @ git+https://example.invalid/x@bbb\n", 3000)
+    write(pin, "stack-intel @ git+https://example.invalid/x@bbb\n", 3000)
     assert mcp_server.di_deps().startswith(presenters.STALE_CODE_WARNING)
     assert mcp_server.jsx_usage("X", root="../..").startswith(presenters.STALE_CODE_WARNING), "errors too"
     assert j(mcp_server.status(output_format="json"))["analyzer_code_stale"] is True
@@ -2172,9 +2172,9 @@ def test_a_config_edit_changes_the_next_reply_without_a_restart(server: SimpleNa
     mcp_server.jsx_usage("Widget")
     assert server.fakes.jsx_calls[-1]["root"] == (server.repo / "frontend").resolve()
     write(server.repo / "web" / "a.tsx", "export {};\n")
-    config = server.repo / ".code-intel" / "config.toml"
+    config = server.repo / ".stack-intel" / "config.toml"
     write(config, config.read_text(encoding="utf-8").replace('root = "frontend"', 'root = "web"'), 5000)
     mcp_server.jsx_usage("Widget")
     assert server.fakes.jsx_calls[-1]["root"] == (server.repo / "web").resolve()
     assert server.fakes.jsx_calls[-1]["frontend_root"] == "web"
-    assert "Config:         .code-intel/config.toml" in mcp_server.status()
+    assert "Config:         .stack-intel/config.toml" in mcp_server.status()

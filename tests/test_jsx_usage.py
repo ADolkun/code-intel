@@ -20,8 +20,8 @@ from typing import get_args
 import pytest
 from fixture_repo import MINIMAL_CONFIG, git_init
 
-from code_intel import code_paths, jsx_usage, ts_bridge, ts_facts
-from code_intel.oracles import compare_facts
+from stack_intel import code_paths, jsx_usage, ts_bridge, ts_facts
+from stack_intel.oracles import compare_facts
 
 ORACLE = Path(compare_facts.__file__).parent / "jsx_oracle.cjs"
 
@@ -1199,7 +1199,7 @@ def test_find_jsx_usage_raises_when_the_toolchain_is_unavailable(tmp_path: Path)
 
 def _cli(repo: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "-m", "code_intel.cli", "dump", "jsx", "--repo-root", str(repo), *args],
+        [sys.executable, "-m", "stack_intel.cli", "dump", "jsx", "--repo-root", str(repo), *args],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1213,8 +1213,8 @@ def _cli_repo(tmp_path: Path, files: dict[str, str], config: str = MINIMAL_CONFI
     """A git work tree (the CLI reads only git-visible files) with ``files`` under ``frontend/``."""
     git_init(tmp_path)
     _write_tree(tmp_path, files)
-    (tmp_path / ".code-intel").mkdir()
-    (tmp_path / ".code-intel" / "config.toml").write_text(config, encoding="utf-8")
+    (tmp_path / ".stack-intel").mkdir()
+    (tmp_path / ".stack-intel" / "config.toml").write_text(config, encoding="utf-8")
     return tmp_path
 
 
@@ -1254,8 +1254,8 @@ def test_jsx_usage_cli_scans_the_configured_frontend_root(typescript_toolchain, 
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("export const A = () => <X />;\n", encoding="utf-8")
-    (tmp_path / ".code-intel").mkdir()
-    (tmp_path / ".code-intel" / "config.toml").write_text(config, encoding="utf-8")
+    (tmp_path / ".stack-intel").mkdir()
+    (tmp_path / ".stack-intel" / "config.toml").write_text(config, encoding="utf-8")
     env = {**os.environ, ts_bridge.TS_DIR_ENV: str(typescript_toolchain.typescript_dir)}
     body = json.loads(_cli(tmp_path, "--all", "--json", env=env).stdout)
     assert [e["file"] for e in body["elements"]] == ["web/app/src/a.tsx"]
@@ -1271,11 +1271,11 @@ def test_jsx_usage_cli_without_a_toolchain_says_how_to_set_it_up(tmp_path: Path)
     assert body["complete"] is False and body["elements"] == []
     [found] = body["diagnostics"]
     assert (found["kind"], found["problem"]) == ("frontend_unavailable", "typescript_not_found")
-    assert 'run "code-intel setup"' in found["fix"]
+    assert 'run "stack-intel setup"' in found["fix"]
     assert "typescript_not_found" not in done.stderr
     plain = _cli(repo, "--all", env=env)
     assert plain.returncode == 2 and plain.stdout == ""
-    assert 'Fix: run "code-intel setup"' in plain.stderr
+    assert 'Fix: run "stack-intel setup"' in plain.stderr
 
 
 def test_jsx_usage_cli_reports_a_missing_frontend_root(tmp_path: Path) -> None:
