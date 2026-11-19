@@ -96,7 +96,7 @@ def repo(tmp_path: Path) -> Path:
 def test_a_clean_checkout_exits_0_with_nothing_on_stdout(repo: Path) -> None:
     code, out, err = check(repo, fixture_fakes())
     assert (code, out) == (0, "")
-    assert err.splitlines()[-1] == "doc-check: 0 findings in 3 docs (5 references, 5 checked)"
+    assert err.splitlines()[-1] == "doc-check: 0 findings in 3 docs (5 references, 5 checked); 0 agent files"
 
 
 def append(path: Path, text: str) -> None:
@@ -262,8 +262,7 @@ def test_an_internal_error_exits_2_and_names_the_crash(repo: Path, monkeypatch: 
 
 AGENTS_TABLE = """\
 [agents]
-rules_dir = ".claude/rules"
-skills_dir = ".claude/skills"
+strict = true
 instruction_map = { file = "AGENTS.md", heading = "Scoped instruction map" }
 """
 
@@ -303,6 +302,30 @@ def test_agent_findings_print_with_the_docs_findings_in_file_order(tmp_path: Pat
             "docs/orphan.md:1: orphaned doc: not reachable from docs/README.md",
         ],
     )
+
+
+def test_the_summary_counts_the_agent_files(tmp_path: Path) -> None:
+    root = agent_repo(tmp_path / "repo")
+    write(root / ".claude" / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\ndescription: Ship.\n---\n")
+    code, _, err = check(root, fixture_fakes())
+    assert code == 0
+    assert err.splitlines()[-1].endswith("; 3 agent files")
+    write(root / ".claude" / "skills" / "deploy" / "SKILL.md", "# Deploy\n")
+    write(root / ".claude" / "rules" / "api.md", "# API\n")
+    assert check(root, fixture_fakes())[2].splitlines()[-1].endswith("; 3 agent files")
+
+
+def test_agent_files_are_checked_without_an_agents_table(repo: Path) -> None:
+    write(repo / ".mcp.json", '{\n  "mcpServers": {\n    "docs": {"url": "https://example.com/mcp"}\n  }\n}\n')
+    code, out, err = check(repo, fixture_fakes())
+    assert (code, out.splitlines()) == (
+        1,
+        [
+            ".mcp.json:3: MCP server 'docs' has a url but no type; Claude Code reads it as a stdio server and skips "
+            'it (add "type": "http")'
+        ],
+    )
+    assert err.splitlines()[-1] == "doc-check: 1 finding in 3 docs (5 references, 5 checked); 1 agent file"
 
 
 def test_agent_findings_are_in_the_json_findings_and_counts(tmp_path: Path) -> None:
@@ -618,11 +641,40 @@ def test_an_agents_only_config_checks_the_agent_files(tmp_path: Path) -> None:
     write(root / CONFIG_FILE, AGENTS_TABLE)
     code, out, err = check(root, FakeAnalyzers())
     assert (code, out) == (0, ""), err
-    assert err.splitlines()[-1] == "doc-check: 0 findings in 0 docs (0 references, 0 checked); docs not configured"
+    assert err.splitlines()[-1] == (
+        "doc-check: 0 findings in 0 docs (0 references, 0 checked); 2 agent files; docs not configured"
+    )
     write(root / ".claude" / "rules" / "api.md", API_RULE.replace("backend/**", "backend/gone/**"))
     code, out, _ = check(root, FakeAnalyzers())
     assert code == 1
     assert out.splitlines()[0] == ".claude/rules/api.md:3: paths glob 'backend/gone/**' matches no git-visible file"
+
+
+NO_DOCS_CONFIG = BACKEND_ONLY_CONFIG.split("[docs]")[0]
+
+
+def test_without_docs_the_agent_files_found_without_a_table_decide_the_exit_code(repo: Path) -> None:
+    write(repo / CONFIG_FILE, NO_DOCS_CONFIG)
+    write(repo / ".mcp.json", '{"mcpServers": {"docs": {"command": "uv"}}}')
+    code, out, err = check(repo, fixture_fakes())
+    assert (code, out) == (0, ""), err
+    assert err.splitlines()[-1].endswith("; 1 agent file; docs not configured")
+    write(repo / ".mcp.json", '{"mcpServers": {"docs": {"url": "https://example.com/mcp"}}}')
+    code, out, _ = check(repo, fixture_fakes())
+    assert (code, out.splitlines()) == (
+        1,
+        [
+            ".mcp.json:1: MCP server 'docs' has a url but no type; Claude Code reads it as a stdio server and skips "
+            'it (add "type": "http")'
+        ],
+    )
+
+
+def test_an_empty_agents_table_with_no_agent_files_has_nothing_to_check(repo: Path) -> None:
+    write(repo / CONFIG_FILE, "[agents]\n")
+    code, out, err = check(repo, FakeAnalyzers())
+    assert (code, out) == (2, "")
+    assert err == "doc-check: .stack-intel/config.toml has no [docs] table and there are no agent files to check\n"
 
 
 def test_nothing_to_check_exits_2(repo: Path) -> None:

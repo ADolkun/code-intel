@@ -985,6 +985,20 @@ def test_scaling_check_times_with_the_collector_paused() -> None:
         gc.enable()
 
 
+def test_scaling_check_times_both_sides_of_a_ratio_in_alternation() -> None:
+    import gc
+    from itertools import groupby
+
+    import scaling_check
+
+    seen: list[tuple[str, bool]] = []
+    ratio = scaling_check.best_ratio(lambda side: seen.append((side, gc.isenabled())), "num", "den", repeats=3)
+    assert ratio > 0
+    assert not any(enabled for _, enabled in seen), "no measurement may run with the collector on"
+    runs = [side for side, _ in groupby(side for side, _ in seen)]
+    assert runs == ["num", "den"] + ["num", "den"] * 3, "each side is calibrated, then timed in alternating rounds"
+
+
 def test_scaling_check_measures_an_over_bound_ratio_once_more_before_failing() -> None:
     import scaling_check
 

@@ -125,9 +125,11 @@ class InstructionMap:
 
 @dataclass(frozen=True)
 class AgentsConfig:
-    rules_dir: str
-    skills_dir: str
-    instruction_map: InstructionMap | None
+    """``[agents]``: extras and policy; the conventional locations are checked without it."""
+
+    skill_dirs: tuple[str, ...] = ()  # more Agent Skills roots, each <dir>/<name>/SKILL.md
+    strict: bool = False
+    instruction_map: InstructionMap | None = None
 
 
 _TABLE_FIXES: Mapping[str, str] = {
@@ -330,6 +332,10 @@ class _Table:
     def _child(self, key: str) -> str:
         return f"{self.name}.{key}" if self.name else key
 
+    def take(self, key: str) -> tuple[bool, object]:
+        """Whether ``key`` is present, and its raw value (None when absent)."""
+        return (key in self._data, self._data.pop(key, None))
+
     def unknown_keys(self, allowed: tuple[str, ...]) -> list[str]:
         return sorted(set(self._data) - set(allowed))
 
@@ -504,16 +510,47 @@ def _parse_docs(table: _Table) -> DocsConfig:
     return docs
 
 
+_CONVENTIONAL_SKILL_ROOTS = (".claude/skills", ".github/skills", ".agents/skills")
+
+
+def _removed_agents_key(table: _Table, key: str, value: object) -> ConfigError:
+    removed = f"{key!r} in {table.where} was removed in 0.3"
+    if key == "rules_dir":
+        return table.fail(
+            f"{removed}: .claude/rules is checked automatically. Delete the key; "
+            "add strict = true to keep requiring 'paths' in every rule."
+        )
+    normalized = PurePosixPath(value).as_posix() if isinstance(value, str) else None
+    if normalized in _CONVENTIONAL_SKILL_ROOTS:
+        return table.fail(
+            f"{removed}: {normalized} is checked automatically. Delete the key; "
+            "add strict = true to keep requiring a SKILL.md with a matching name in every skill directory."
+        )
+    return table.fail(f'{removed}: use skill_dirs = ["{value}"].')
+
+
 def _parse_agents(table: _Table) -> AgentsConfig:
-    rules_dir = table.relpath("rules_dir")
-    skills_dir = table.relpath("skills_dir")
+    for key in ("rules_dir", "skills_dir"):
+        present, value = table.take(key)
+        if present:
+            raise _removed_agents_key(table, key, value)
+    skill_dirs = tuple(dict.fromkeys(PurePosixPath(d).as_posix() for d in table.strings("skill_dirs", relative=True)))
+    if "." in skill_dirs:
+        raise table.fail(
+            f"'skill_dirs' in {table.where}: '.' is the repository root; list the directory holding the skills"
+        )
+    if conventional := [d for d in skill_dirs if d in _CONVENTIONAL_SKILL_ROOTS]:
+        raise table.fail(
+            f"'skill_dirs' in {table.where}: {conventional[0]} is checked automatically; remove it from the list"
+        )
+    strict = table.boolean("strict", False)
     map_table = table.table("instruction_map")
     instruction_map = None
     if map_table is not None:
         instruction_map = InstructionMap(file=map_table.relpath("file"), heading=map_table.text("heading"))
         map_table.done()
     table.done()
-    return AgentsConfig(rules_dir, skills_dir, instruction_map)
+    return AgentsConfig(skill_dirs, strict, instruction_map)
 
 
 def _parse_symbols(table: _Table | None) -> SymbolsConfig:

@@ -73,7 +73,7 @@ def test_full_config_is_read() -> None:
         config.DocIgnore("docs/guide.md", "route", "/api/external", "Served by another service."),
     )
     assert cfg.agents == config.AgentsConfig(
-        ".claude/rules", ".claude/skills", config.InstructionMap("AGENTS.md", "Scoped instruction map")
+        ("skills",), True, config.InstructionMap("AGENTS.md", "Scoped instruction map")
     )
 
 
@@ -494,6 +494,94 @@ def test_the_commands_check_and_kind_are_accepted() -> None:
     assert (docs.rules[0].checks, docs.ignore[0].kind) == (("commands",), "command")
 
 
+# ── [agents] ─────────────────────────────────────────────────────────────
+
+
+def test_an_empty_agents_table_takes_the_defaults() -> None:
+    assert parse(MINIMAL_CONFIG + "\n[agents]\n").agents == config.AgentsConfig((), False, None)
+
+
+def test_agents_skill_dirs_are_normalized() -> None:
+    cfg = parse(MINIMAL_CONFIG + '\n[agents]\nskill_dirs = ["skills/", "./more/skills"]\n')
+    assert cfg.agents == config.AgentsConfig(("skills", "more/skills"))
+
+
+@pytest.mark.parametrize(
+    ("table", "expected"),
+    [
+        (
+            'rules_dir = ".claude/rules"',
+            "cfg.toml: 'rules_dir' in [agents] was removed in 0.3: .claude/rules is checked automatically. "
+            "Delete the key; add strict = true to keep requiring 'paths' in every rule.",
+        ),
+        (
+            'rules_dir = ".claude/rules"\nskills_dir = "skills"',
+            "cfg.toml: 'rules_dir' in [agents] was removed in 0.3: .claude/rules is checked automatically. "
+            "Delete the key; add strict = true to keep requiring 'paths' in every rule.",
+        ),
+        (
+            'skills_dir = ".claude/skills"',
+            "cfg.toml: 'skills_dir' in [agents] was removed in 0.3: .claude/skills is checked automatically. "
+            "Delete the key; add strict = true to keep requiring a SKILL.md with a matching name in every "
+            "skill directory.",
+        ),
+        (
+            'skills_dir = ".github/skills/"',
+            "cfg.toml: 'skills_dir' in [agents] was removed in 0.3: .github/skills is checked automatically. "
+            "Delete the key; add strict = true to keep requiring a SKILL.md with a matching name in every "
+            "skill directory.",
+        ),
+        (
+            'skills_dir = ".agents/skills"',
+            "cfg.toml: 'skills_dir' in [agents] was removed in 0.3: .agents/skills is checked automatically. "
+            "Delete the key; add strict = true to keep requiring a SKILL.md with a matching name in every "
+            "skill directory.",
+        ),
+        (
+            'skills_dir = "skills"',
+            "cfg.toml: 'skills_dir' in [agents] was removed in 0.3: use skill_dirs = [\"skills\"].",
+        ),
+    ],
+    ids=["rules-dir", "rules-dir-first", "claude-skills", "github-skills", "agents-skills", "other"],
+)
+def test_the_removed_agents_keys_say_what_to_do(table: str, expected: str) -> None:
+    assert error_of(f"{MINIMAL_CONFIG}\n[agents]\n{table}\n") == expected
+
+
+@pytest.mark.parametrize(
+    ("table", "expected"),
+    [
+        (
+            'skill_dirs = [".claude/skills"]',
+            "cfg.toml: 'skill_dirs' in [agents]: .claude/skills is checked automatically; remove it from the list",
+        ),
+        (
+            'skill_dirs = ["skills", ".agents/skills/"]',
+            "cfg.toml: 'skill_dirs' in [agents]: .agents/skills is checked automatically; remove it from the list",
+        ),
+        ('skill_dirs = "skills"', "cfg.toml: 'skill_dirs' in [agents] must be a list of non-empty strings"),
+        ('skill_dirs = ["../skills"]', "cfg.toml: 'skill_dirs' in [agents] must be a repository-relative path"),
+        ('strict = "yes"', "cfg.toml: 'strict' in [agents] must be true or false"),
+        ("colour = 1", "cfg.toml: unknown key 'colour' in [agents]"),
+    ],
+    ids=["conventional-root", "conventional-root-with-slash", "string", "outside", "strict-type", "unknown-key"],
+)
+def test_invalid_agents_values_name_the_key_and_the_file(table: str, expected: str) -> None:
+    assert error_of(f"{MINIMAL_CONFIG}\n[agents]\n{table}\n").startswith(expected)
+
+
+def test_agents_skill_dirs_count_a_directory_once() -> None:
+    cfg = parse(MINIMAL_CONFIG + '\n[agents]\nskill_dirs = ["skills", "skills/", "./skills"]\n')
+    assert cfg.agents == config.AgentsConfig(("skills",))
+
+
+@pytest.mark.parametrize("root", [".", "./"])
+def test_agents_skill_dirs_reject_the_repository_root(root: str) -> None:
+    assert error_of(f'{MINIMAL_CONFIG}\n[agents]\nskill_dirs = ["{root}"]\n') == (
+        "cfg.toml: 'skill_dirs' in [agents]: '.' is the repository root; list the directory holding the skills"
+    )
+
+
 # ── Partial configs ──────────────────────────────────────────────────────
 
 NOTHING = "cfg.toml: the config configures nothing: add at least one of [backend], [frontend], [docs] or [agents]"
@@ -505,7 +593,7 @@ NOTHING = "cfg.toml: the config configures nothing: add at least one of [backend
         (BACKEND_ONLY_CONFIG, ("backend", "docs")),
         (FRONTEND_ONLY_CONFIG, ("frontend", "docs")),
         (DOCS_ONLY_CONFIG, ("docs",)),
-        ('[agents]\nrules_dir = ".claude/rules"\nskills_dir = ".claude/skills"\n', ("agents",)),
+        ("[agents]\n", ("agents",)),
     ],
     ids=["backend-only", "frontend-only", "docs-only", "agents-only"],
 )
@@ -569,7 +657,9 @@ def test_require_names_every_missing_table_in_order() -> None:
         (DOCS_ONLY_CONFIG, "docs"),
         (BACKEND_ONLY_CONFIG, "backend, docs"),
         (FULL_CONFIG, "backend, frontend, docs, agents"),
+        ("[agents]\n", "agents"),
     ],
+    ids=["docs-only", "backend-only", "full", "empty-agents-table"],
 )
 def test_config_check_lists_the_configured_tables(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], text: str, tables: str

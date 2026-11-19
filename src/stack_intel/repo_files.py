@@ -155,7 +155,8 @@ class RepoFiles:
         without asking, because git would fail the whole batch on them: a path
         with a NUL (cannot be passed), an empty, absolute or ``..``-escaping
         path (outside the repository), and a path inside a submodule (git
-        refuses paths that cross into one). A path that is a work-tree symlink
+        refuses paths that cross into one). A path starting with ``:`` is a
+        path, not pathspec magic. A path that is a work-tree symlink
         with a trailing ``/``, or goes through one, is answered by asking about
         the symlink itself (see ``_symlink_in``), because git refuses to look
         beyond a symlink. Paths are normalized first, so a ``.`` or ``..``
@@ -165,10 +166,14 @@ class RepoFiles:
         asked = sorted(set(query.values()))
         if not asked:
             return frozenset()
-        payload = b"".join(p.encode("utf-8", "surrogateescape") + b"\0" for p in asked)
+        # git reads a leading ':' as pathspec magic (`:!x`) and fails the whole
+        # batch; check-ignore refuses --literal-pathspecs, but a `./` prefix
+        # makes it a plain path, and git echoes each path as it was sent.
+        sent = {f"./{p}" if p.startswith(":") else p: p for p in asked}
+        payload = b"".join(p.encode("utf-8", "surrogateescape") + b"\0" for p in sent)
         # Exit 1 means "nothing is ignored"; only >1 is a failure.
         out = _run_git(self.repo_root, "check_ignore", stdin=payload, ok=(0, 1))
-        answered = frozenset(_split_z(out))
+        answered = frozenset(sent.get(p, p) for p in _split_z(out))
         return frozenset(p for p, q in query.items() if q in answered)
 
     def _query_for(self, path: str) -> str:
