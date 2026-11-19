@@ -6,6 +6,10 @@ Releases up to 0.2.3 were published as `code-intel`, installed from git; the nam
 
 ## Unreleased
 
+### Changed
+
+- The README is now an overview with a quickstart; the full reference moved to `docs/`, unchanged.
+
 ## 0.2.3 - 2026-11-05
 
 ### Added

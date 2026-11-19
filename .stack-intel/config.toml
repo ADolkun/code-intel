@@ -1,0 +1,169 @@
+[docs]
+scope = ["README.md", "CHANGELOG.md", "docs/**/*.md"]
+
+[docs.reachability]
+root = "docs/README.md"
+include = ["docs/**/*.md"]
+exclude = []
+
+[[docs.ignore]]
+file = "README.md"
+kind = "path"
+text = ".stack-intel/requirements.txt"
+reason = "Names the version pin an analyzed repository keeps; this repository does not launch stack-intel through a pin."
+
+[[docs.ignore]]
+file = "docs/install.md"
+kind = "path"
+text = ".stack-intel/requirements.txt"
+reason = "Names the version pin an analyzed repository keeps; this repository does not launch stack-intel through a pin."
+
+[[docs.ignore]]
+file = "docs/analysis.md"
+kind = "path"
+text = ".stack-intel/requirements.txt"
+reason = "Names the version pin an analyzed repository keeps; this repository does not launch stack-intel through a pin."
+
+[[docs.ignore]]
+file = "docs/analysis.md"
+kind = "path"
+text = ".stack-intel/library-capture.json"
+reason = "Names the library capture file an analyzed repository commits; this repository has no backend to capture."
+
+[[docs.ignore]]
+file = "docs/commands.md"
+kind = "path"
+text = ".stack-intel/library-capture.json"
+reason = "Names the library capture file an analyzed repository commits; this repository has no backend to capture."
+
+[[docs.ignore]]
+file = "docs/configuration.md"
+kind = "path"
+text = ".stack-intel/library-capture.json"
+reason = "Names the library capture file an analyzed repository commits; this repository has no backend to capture."
+
+[[docs.ignore]]
+file = "docs/analysis.md"
+kind = "symbol"
+text = "get_app()"
+reason = "Names a function of an installed library, as an example of a library that adds routes; it is not code of this repository."
+
+[[docs.ignore]]
+file = "docs/configuration.md"
+kind = "path"
+text = "docs/imported.md"
+reason = "The full config example names an example repository's docs."
+
+[[docs.ignore]]
+file = "docs/configuration.md"
+kind = "path"
+text = "docs/guide.md"
+reason = "The full config example names an example repository's docs."
+
+[[docs.ignore]]
+file = "docs/configuration.md"
+kind = "path"
+text = ".github/skills"
+reason = "Names a conventional Agent Skills root of an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/tools.md"
+kind = "path"
+text = "docs/items.md:5"
+reason = "Sample doc_refs output from an example repository."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = "docs/items.md:7"
+reason = "Sample doc-check output from an example repository."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = ".github/instructions/**/*.instructions.md"
+reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = ".github/agents/**/*.md"
+reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = ".github/hooks/*.json"
+reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = ".github/mcp.json"
+reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = ".github/copilot-instructions.md"
+reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = ".github/agents"
+reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = ".github/instructions"
+reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = ".github/prompts"
+reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = ".github/skills"
+reason = "Names a conventional agent instruction file location the check reads in an analyzed repository; this repository has none."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = "src/api/**"
+reason = "An example frontmatter glob from an analyzed repository."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "path"
+text = "../"
+reason = "Names the `../` import prefix, not a path. It also resolves to the repository root, which the path check wrongly reports as missing."
+
+[[docs.ignore]]
+file = "CHANGELOG.md"
+kind = "script"
+text = "npm test"
+reason = "Names the npm command forms the check reads, not a command run in this repository. Its only package.json is the TypeScript helper's, under src/stack_intel/ts/, which without [frontend] the check counts for an unqualified script."
+
+[[docs.ignore]]
+file = "CHANGELOG.md"
+kind = "script"
+text = "npm start"
+reason = "Names the npm command forms the check reads, not a command run in this repository. Its only package.json is the TypeScript helper's, under src/stack_intel/ts/, which without [frontend] the check counts for an unqualified script."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "script"
+text = "npm test"
+reason = "Names the npm command forms the check reads, not a command run in this repository. Its only package.json is the TypeScript helper's, under src/stack_intel/ts/, which without [frontend] the check counts for an unqualified script."
+
+[[docs.ignore]]
+file = "docs/docs-check.md"
+kind = "script"
+text = "npm start"
+reason = "Names the npm command forms the check reads, not a command run in this repository. Its only package.json is the TypeScript helper's, under src/stack_intel/ts/, which without [frontend] the check counts for an unqualified script."

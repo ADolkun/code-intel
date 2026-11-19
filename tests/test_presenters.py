@@ -30,7 +30,7 @@ from stack_intel import doc_presenters, doc_queries, presenters, problems, queri
 from stack_intel.analysis_runtime import StatusSnapshot
 from stack_intel.protocol_match import ProtocolMatch
 
-README = Path(__file__).resolve().parent.parent / "README.md"
+TOOLS_DOC = Path(__file__).resolve().parent.parent / "docs" / "tools.md"
 
 
 # ── Envelope ─────────────────────────────────────────────────────────────
@@ -591,20 +591,20 @@ def test_status_counts_text_and_errors() -> None:
     assert "  Counts: not loaded: too old" in refused
 
 
-# ── README ───────────────────────────────────────────────────────────────
+# ── docs/tools.md ────────────────────────────────────────────────────────
 
 
-def test_readme_documents_every_registered_problem_kind() -> None:
-    """Every diagnostic and limitation kind an analyzer may emit is explained in the README."""
-    text = README.read_text(encoding="utf-8")
+def test_tools_doc_documents_every_registered_problem_kind() -> None:
+    """Every diagnostic and limitation kind an analyzer may emit is explained in docs/tools.md."""
+    text = TOOLS_DOC.read_text(encoding="utf-8")
     missing = [k for k in (*problems.DIAGNOSTIC_KINDS, *problems.LIMITATION_KINDS) if f"`{k}`" not in text]
     assert missing == []
 
 
-def test_readme_documents_every_error_code() -> None:
+def test_tools_doc_documents_every_error_code() -> None:
     from stack_intel.result_types import ERROR_FIELDS
 
-    text = README.read_text(encoding="utf-8")
+    text = TOOLS_DOC.read_text(encoding="utf-8")
     assert [code for code in ERROR_FIELDS if f"`{code}`" not in text] == []
 
 
