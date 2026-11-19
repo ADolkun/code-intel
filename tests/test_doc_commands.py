@@ -318,12 +318,12 @@ def test_variables_a_make_command_sets(text: str, overrides: set[str], verdict: 
 @pytest.mark.parametrize(
     ("text", "verdict"),
     [
-        ("npm run --loglevel warn build", "unproven"),
-        ("npm run --loglevel=warn build", "check"),
+        ("npm run --loglevel warn build", "unchecked"),
+        ("npm run --loglevel=warn build", "unchecked"),
         ("npm --silent run build", "check"),
-        ("npm run build --loglevel warn", "check"),
-        ("pnpm run --reporter silent build", "unproven"),
-        ("pnpm --workspace-concurrency 2 run build", "unproven"),
+        ("npm run build --loglevel warn", "unchecked"),
+        ("pnpm run --reporter silent build", "unchecked"),
+        ("pnpm --workspace-concurrency 2 run build", "unchecked"),
         ("pnpm run build --filter web", "unchecked"),
         ("pnpm run build -r", "unchecked"),
         ("npm_config_if_present=true npm run build", "unproven"),
@@ -333,6 +333,53 @@ def test_variables_a_make_command_sets(text: str, overrides: set[str], verdict: 
 )
 def test_options_and_variables_that_leave_a_name_uncertain(text: str, verdict: str) -> None:
     assert [m.verdict for m in command_mentions(text)] == [verdict]
+
+
+@pytest.mark.parametrize(
+    ("text", "environments"),
+    [
+        ("mise run deploy", set()),
+        ("MISE_ENV=production mise run deploy", {"production"}),
+        ("MISE_ENV=a,b mise run deploy", {"a", "b"}),
+        ("mise -E production run deploy", {"production"}),
+        ("mise --env=ci run deploy", {"ci"}),
+        ("MISE_ENV=staging mise -E production run deploy", {"production"}),
+    ],
+)
+def test_the_mise_environments_a_command_selects(text: str, environments: set[str]) -> None:
+    (mention,) = command_mentions(text)
+    assert (mention.verdict, mention.environments) == ("check", environments)
+
+
+def test_an_exported_mise_env_selects_the_environment_for_later_lines() -> None:
+    ((_, mention),) = fence_command_mentions(["export MISE_ENV=ci", "mise run deploy"])
+    assert mention.environments == {"ci"}
+
+
+@pytest.mark.parametrize("text", ["MISE_ENV=$TARGET mise run deploy", "mise -E $ENV run deploy"])
+def test_a_mise_environment_that_is_not_literal_is_unchecked(text: str) -> None:
+    assert [m.verdict for m in command_mentions(text)] == ["unchecked"]
+
+
+@pytest.mark.parametrize(
+    ("text", "directory"),
+    [("npm run wbuild -C web", "web"), ("npm -C web run wbuild", "web"), ("npm --prefix=web run wbuild", "web")],
+)
+def test_npm_reads_C_as_prefix(text: str, directory: str) -> None:
+    assert [(m.name, m.directory) for m in command_mentions(text)] == [("wbuild", directory)]
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [('make te"st"', "test"), ("make 'te'st", "test"), ('make "a b"c', "a bc"), ("make a\\ b", "a b")],
+)
+def test_quoted_segments_join_as_the_shell_joins_them(text: str, name: str) -> None:
+    assert [m.name for m in command_mentions(text)] == [name]
+
+
+def test_a_backslash_at_the_end_of_the_input_is_dropped() -> None:
+    assert [m.name for m in command_mentions("make all\\")] == ["all"]
+    assert [m.name for _, m in fence_command_mentions(["make lint", "make all\\"])] == ["lint", "all"]
 
 
 @pytest.mark.parametrize(

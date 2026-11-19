@@ -773,14 +773,24 @@ def has_skip_dir(path: str) -> bool:
     return any(seg in SKIP_DIRS for seg in path.split("/"))
 
 
-def expand_braces(path: str) -> list[str]:
-    """``a/{b,c}.py`` → ``["a/b.py", "a/c.py"]``, nested groups expanded in turn."""
-    match = _BRACES_RE.search(path)
-    if match is None:
-        return [path]
+MAX_BRACE_EXPANSIONS = 256
+
+
+def expand_braces(path: str, limit: int = MAX_BRACE_EXPANSIONS) -> list[str] | None:
+    """``a/{b,c}.py`` → ``["a/b.py", "a/c.py"]``, nested groups expanded in
+    turn; None past ``limit`` paths, since the count grows exponentially."""
     out: list[str] = []
-    for alternative in match.group(1).split(","):
-        out.extend(expand_braces(path[: match.start()] + alternative + path[match.end() :]))
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        match = _BRACES_RE.search(current)
+        if match is None:
+            out.append(current)
+            continue
+        head, tail = current[: match.start()], current[match.end() :]
+        pending.extend(reversed([head + alternative + tail for alternative in match.group(1).split(",")]))
+        if len(out) + len(pending) > limit:
+            return None
     return out
 
 

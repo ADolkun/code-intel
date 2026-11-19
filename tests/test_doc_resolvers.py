@@ -16,6 +16,7 @@ from doc_config import doc_config
 from fake_repo_files import FakeRepoFiles
 
 from stack_intel.code_words import CodeWords
+from stack_intel.definition_files import Unreadable
 from stack_intel.doc_commands import CommandMention, command_mentions
 from stack_intel.doc_report import route_rows, symbol_rows
 from stack_intel.doc_resolvers import (
@@ -135,10 +136,10 @@ def test_a_directory_lands_on_its_readme_before_its_index(tmp_path: Path) -> Non
 # ── Commands ─────────────────────────────────────────────────────────────
 
 
-def test_the_context_lists_tracked_package_json_directories_outside_vendored_code(tmp_path: Path) -> None:
+def test_the_context_lists_every_tracked_package_json_directory(tmp_path: Path) -> None:
     files = ["package.json", "web/package.json", "web/node_modules/dep/package.json", "scratch/package.json"]
     ctx = _context(tmp_path, files, untracked=("scratch/package.json",))
-    assert ctx.manifest_dirs == frozenset({"", "web"})
+    assert ctx.manifest_dirs == frozenset({"", "web", "web/node_modules/dep"})
 
 
 def test_the_context_indexes_makefiles_and_mise_files(tmp_path: Path) -> None:
@@ -156,7 +157,11 @@ def test_the_context_indexes_makefiles_and_mise_files(tmp_path: Path) -> None:
         "docs/mise.md",
     ]
     ctx = _context(tmp_path, files)
-    assert dict(ctx.makefiles) == {"": "GNUmakefile", "tools": "tools/makefile"}
+    assert dict(ctx.makefiles) == {
+        "": "GNUmakefile",
+        "tools": "tools/makefile",
+        "node_modules/x": "node_modules/x/Makefile",
+    }
     assert dict(ctx.mise_configs) == {
         "": ("mise.local.toml", "mise.toml"),
         "backend": ("backend/.config/mise/config.toml",),
@@ -166,11 +171,11 @@ def test_the_context_indexes_makefiles_and_mise_files(tmp_path: Path) -> None:
 
 def _resolver(
     ctx: ResolutionContext,
-    scripts: Mapping[str, frozenset[str] | None] | None = None,
-    make: Mapping[str, MakeTargets | None] | None = None,
-    mise: Mapping[str, MiseFile | None] | None = None,
+    scripts: Mapping[str, frozenset[str] | Unreadable] | None = None,
+    make: Mapping[str, MakeTargets | Unreadable] | None = None,
+    mise: Mapping[str, MiseFile | Unreadable] | None = None,
     read: list[str] | None = None,
-    npmrc: Mapping[str, bool] | None = None,
+    npmrc: Mapping[str, bool | Unreadable] | None = None,
 ) -> CommandResolver:
     def reader[T](table: Mapping[str, T] | None, default: T) -> Callable[[str], T]:
         def read_one(key: str) -> T:
@@ -181,7 +186,11 @@ def _resolver(
         return read_one
 
     return CommandResolver(
-        ctx, reader(scripts, frozenset()), reader(make, None), reader(mise, None), reader(npmrc, False)
+        ctx,
+        reader(scripts, frozenset()),
+        reader(make, MakeTargets(frozenset())),
+        reader(mise, MiseFile(frozenset())),
+        reader(npmrc, False),
     )
 
 
@@ -213,8 +222,14 @@ def test_a_script_is_ok_near_the_doc_and_not_checked_when_only_another_package_j
 
 def test_a_package_json_that_cannot_be_read_leaves_the_script_unchecked(tmp_path: Path) -> None:
     ctx = _context(tmp_path, ["frontend/package.json"])
-    draft = _command(_resolver(ctx, scripts={"frontend": None}), CommandMention("npm", "build", None, "npm run build"))
-    assert (draft.status, draft.checked) == ("skipped", False)
+    broken = Unreadable("frontend/package.json", "Expecting value: line 1 column 1 (char 0)")
+    resolver = _resolver(ctx, scripts={"frontend": broken})
+    draft = _command(resolver, CommandMention("npm", "build", None, "npm run build"))
+    assert (draft.status, draft.detail, draft.checked) == (
+        "not_checked",
+        "frontend/package.json could not be read: Expecting value: line 1 column 1 (char 0)",
+        False,
+    )
 
 
 def test_an_unproven_form_is_ok_when_defined_and_not_checked_otherwise(tmp_path: Path) -> None:

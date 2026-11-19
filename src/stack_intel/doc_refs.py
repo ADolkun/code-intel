@@ -32,8 +32,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from stack_intel.code_paths import FileStamp, content_digest, is_racy, read_bytes_with_digest
+from stack_intel.code_paths import (
+    FileStamp,
+    bytes_digest,
+    content_digest,
+    is_racy,
+    read_bytes_with_digest,
+    read_file_bytes,
+)
 from stack_intel.code_words import EMPTY, CodeWords, code_words_from_bytes, is_code_file, package_bindings_from_bytes
+from stack_intel.definition_files import Unreadable, unreadable
 from stack_intel.doc_commands import PACKAGE_MANIFEST, CommandMention, command_mentions, fence_command_mentions
 from stack_intel.doc_report import (
     ConfigFinding,
@@ -125,35 +133,32 @@ def _load_bindings(path: Path, rel: str) -> tuple[Any, str | None, list[Problem]
     return names, digest, problems, False
 
 
+def _load_definition(
+    path: Path, rel: str, parse: Callable[[str, bytes], Any]
+) -> tuple[Any, str | None, list[Problem], bool]:
+    """A definition file parsed by ``parse``; a file that cannot be read is
+    ``Unreadable`` (not cached: the failure can clear without a stamp change)."""
+    try:
+        data = read_file_bytes(path)
+    except OSError as exc:
+        return unreadable(rel, exc), None, [], True
+    return parse(rel, data), bytes_digest(data), [], False
+
+
 def _load_scripts(path: Path, rel: str) -> tuple[Any, str | None, list[Problem], bool]:
-    data, digest, problem = read_bytes_with_digest(path, rel, stage=STAGE)
-    if data is None:
-        return None, None, [problem] if problem is not None else [], True
-    scripts, problems = package_scripts_from_bytes(rel, data, stage=STAGE)
-    return scripts, digest, problems, False
+    return _load_definition(path, rel, package_scripts_from_bytes)
 
 
 def _load_npmrc(path: Path, rel: str) -> tuple[Any, str | None, list[Problem], bool]:
-    data, digest, problem = read_bytes_with_digest(path, rel, stage=STAGE)
-    if data is None:
-        return True, None, [problem] if problem is not None else [], True
-    return npmrc_sets_if_present(data), digest, [], False
+    return _load_definition(path, rel, npmrc_sets_if_present)
 
 
 def _load_make_targets(path: Path, rel: str) -> tuple[Any, str | None, list[Problem], bool]:
-    data, digest, problem = read_bytes_with_digest(path, rel, stage=STAGE)
-    if data is None:
-        return None, None, [problem] if problem is not None else [], True
-    targets, problems = make_targets_from_bytes(rel, data, stage=STAGE)
-    return targets, digest, problems, False
+    return _load_definition(path, rel, lambda _rel, data: make_targets_from_bytes(data))
 
 
 def _load_mise_file(path: Path, rel: str) -> tuple[Any, str | None, list[Problem], bool]:
-    data, digest, problem = read_bytes_with_digest(path, rel, stage=STAGE)
-    if data is None:
-        return None, None, [problem] if problem is not None else [], True
-    parsed, problems = mise_file_from_bytes(rel, data, stage=STAGE)
-    return parsed, digest, problems, False
+    return _load_definition(path, rel, mise_file_from_bytes)
 
 
 def _try_digest(path: Path) -> str | None:
@@ -207,21 +212,30 @@ class DocIndex:
         with self._lock:
             return self._cached(self._bindings, rel, _load_bindings, problems, frozenset())
 
-    def package_scripts(self, rel: str, problems: list[Problem]) -> frozenset[str] | None:
+    def package_scripts(self, rel: str) -> frozenset[str] | Unreadable:
         with self._lock:
-            return self._cached(self._scripts, rel, _load_scripts, problems, None)
+            return self._definition(self._scripts, rel, _load_scripts)
 
-    def make_targets(self, rel: str, problems: list[Problem]) -> MakeTargets | None:
+    def make_targets(self, rel: str) -> MakeTargets | Unreadable:
         with self._lock:
-            return self._cached(self._make_targets, rel, _load_make_targets, problems, None)
+            return self._definition(self._make_targets, rel, _load_make_targets)
 
-    def mise_file(self, rel: str, problems: list[Problem]) -> MiseFile | None:
+    def mise_file(self, rel: str) -> MiseFile | Unreadable:
         with self._lock:
-            return self._cached(self._mise_files, rel, _load_mise_file, problems, None)
+            return self._definition(self._mise_files, rel, _load_mise_file)
 
-    def npmrc_if_present(self, rel: str, problems: list[Problem]) -> bool:
+    def npmrc_if_present(self, rel: str) -> bool | Unreadable:
         with self._lock:
-            return self._cached(self._npmrc, rel, _load_npmrc, problems, True)
+            return self._definition(self._npmrc, rel, _load_npmrc)
+
+    def _definition(self, cache: dict[str, _Entry], rel: str, load: _Loader) -> Any:
+        """A definition file's parsed value, or ``Unreadable`` when it cannot
+        be read: a definition file is not a report problem."""
+        problems: list[Problem] = []
+        value = self._cached(cache, rel, load, problems, None)
+        if value is None:
+            return Unreadable(rel, problems[0].message.removeprefix(f"{rel}: "))
+        return value
 
     def prune(
         self,
@@ -378,7 +392,7 @@ class _Run:
         self.definitions_read: set[str] = set()
         self._facts: dict[str, DocFacts | None] = {}
         self._words: CodeWords | None = None
-        self._definitions: dict[str, Any] = {}
+        self._definitions: dict[tuple[Callable[[str], Any], str], Any] = {}
         self.links = LinkResolver(self.ctx, self.facts)
         self.paths = PathResolver(self.ctx)
         self.symbols = SymbolResolver(self.ctx, self.words)
@@ -398,23 +412,24 @@ class _Run:
     def words_used(self) -> bool:
         return self._words is not None
 
-    def _definition[T](self, rel: str, read: Callable[[str, list[Problem]], T]) -> T:
-        """A definition file read once per report, its problems collected once."""
-        if rel not in self._definitions:
+    def _definition[T](self, rel: str, read: Callable[[str], T]) -> T:
+        """A definition file read once per report by each reader that reads it."""
+        key = (read, rel)
+        if key not in self._definitions:
             self.definitions_read.add(rel)
-            self._definitions[rel] = read(rel, self.problems)
-        return self._definitions[rel]
+            self._definitions[key] = read(rel)
+        return self._definitions[key]
 
-    def package_scripts(self, directory: str) -> frozenset[str] | None:
+    def package_scripts(self, directory: str) -> frozenset[str] | Unreadable:
         return self._definition(posixpath.join(directory, PACKAGE_MANIFEST), self.index.package_scripts)
 
-    def npmrc_if_present(self, directory: str) -> bool:
+    def npmrc_if_present(self, directory: str) -> bool | Unreadable:
         return self._definition(posixpath.join(directory, ".npmrc"), self.index.npmrc_if_present)
 
-    def make_targets(self, rel: str) -> MakeTargets | None:
+    def make_targets(self, rel: str) -> MakeTargets | Unreadable:
         return self._definition(rel, self.index.make_targets)
 
-    def mise_file(self, rel: str) -> MiseFile | None:
+    def mise_file(self, rel: str) -> MiseFile | Unreadable:
         return self._definition(rel, self.index.mise_file)
 
     def code_files(self) -> list[str]:

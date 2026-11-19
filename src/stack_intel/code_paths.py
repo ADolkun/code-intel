@@ -271,7 +271,7 @@ def read_bytes_with_digest(
     except OSError as exc:
         name = rel if rel is not None else path.as_posix()
         return None, None, diagnostic("read_failed", stage=stage, step="read file", file=name, exc=exc)
-    return data, _digest(data), None
+    return data, bytes_digest(data), None
 
 
 def _read_python(
@@ -282,7 +282,7 @@ def _read_python(
         data = read_file_bytes(path)
     except OSError as exc:
         return None, None, diagnostic("read_failed", stage=stage, step="read file", file=name, exc=exc)
-    hashed = _digest(data) if digest else None
+    hashed = bytes_digest(data) if digest else None
     try:
         encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
         return data.decode(encoding), hashed, None
@@ -296,7 +296,7 @@ def read_file_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _digest(data: bytes) -> str:
+def bytes_digest(data: bytes) -> str:
     return hashlib.sha256(data, usedforsecurity=False).hexdigest()
 
 
@@ -313,7 +313,7 @@ def content_digest(path: Path) -> str:
     digest beside data derived from the file, take both from one read
     (``read_python_source_with_digest``, ``read_bytes_with_digest``), or take
     the digest before that read, so a later edit can only force a re-read."""
-    return _digest(read_file_bytes(path))
+    return bytes_digest(read_file_bytes(path))
 
 
 def fingerprint(files: Iterable[SourceFile]) -> str:

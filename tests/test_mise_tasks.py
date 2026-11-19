@@ -12,8 +12,17 @@ import pytest
 from doc_config import doc_config
 from fake_repo_files import repo_files_on_disk
 
+from stack_intel.definition_files import Unreadable
 from stack_intel.doc_refs import build_report
-from stack_intel.mise_tasks import MiseFile, config_owner, file_task_names, mise_file_from_bytes, task_dir_entry
+from stack_intel.mise_tasks import (
+    ConfigFile,
+    MiseFile,
+    config_file,
+    config_owner,
+    file_task_names,
+    mise_file_from_bytes,
+    task_dir_entry,
+)
 
 
 @pytest.mark.parametrize(
@@ -47,6 +56,31 @@ def test_config_owner(rel: str, owner: str | None) -> None:
 
 
 @pytest.mark.parametrize(
+    ("rel", "found"),
+    [
+        (".config/mise/mise.local.toml", ConfigFile("", None)),
+        (".config/mise/config.local.toml", ConfigFile("", None)),
+        (".mise/config.local.toml", ConfigFile("", None)),
+        ("mise.local.toml", ConfigFile("", None)),
+        (".config/mise/conf.d/x.prod.toml", ConfigFile("", None)),
+        ("mise.prod.toml", ConfigFile("", "prod")),
+        (".mise.prod.local.toml", ConfigFile("", "prod")),
+        ("mise.a.b.toml", ConfigFile("", "a.b")),
+        (".config/mise/config.prod.toml", ConfigFile("", "prod")),
+        (".config/mise.prod.local.toml", ConfigFile("", "prod")),
+        (".mise/config.prod.toml", ConfigFile("", "prod")),
+        ("backend/mise.ci.toml", ConfigFile("backend", "ci")),
+        (".config/mise/mise.prod.toml", ConfigFile(".config/mise", "prod")),
+        ("mise/mise.toml", ConfigFile("mise", None)),
+        (".mise/mise.toml", ConfigFile(".mise", None)),
+        (".rtx.toml", None),
+    ],
+)
+def test_config_file_names_the_directory_and_the_environment(rel: str, found: ConfigFile | None) -> None:
+    assert config_file(rel) == found
+
+
+@pytest.mark.parametrize(
     ("rel", "entry"),
     [
         ("mise-tasks/build", ("", "build")),
@@ -63,22 +97,25 @@ def test_task_dir_entry(rel: str, entry: tuple[str, str] | None) -> None:
 
 
 @pytest.mark.parametrize(
-    ("path", "names"),
+    ("path", "names", "maybe"),
     [
-        ("build", {"build"}),
-        ("build.sh", {"build.sh", "build"}),
-        ("db/migrate.sh", {"db:migrate.sh", "db:migrate"}),
-        ("a/b/c.sh", {"a:b:c.sh", "a:b:c"}),
-        ("test/_default", {"test:_default", "test"}),
+        ("build", {"build"}, set()),
+        ("build.sh", {"build.sh", "build"}, set()),
+        ("db/migrate.sh", {"db:migrate.sh", "db:migrate"}, set()),
+        ("a/b/c.sh", {"a:b:c.sh", "a:b:c"}, set()),
+        ("test/_default", {"test:_default", "test"}, set()),
+        ("README.md", {"README.md"}, set()),
+        ("x.tar.gz", {"x.tar.gz"}, set()),
+        ("deploy.unknownext", {"deploy.unknownext"}, {"deploy"}),
     ],
 )
-def test_file_task_names(path: str, names: set[str]) -> None:
-    assert file_task_names(path) == names
+def test_file_task_names(path: str, names: set[str], maybe: set[str]) -> None:
+    assert file_task_names(path) == (names, maybe)
 
 
 def _parse(text: str, rel: str = "mise.toml") -> MiseFile:
-    parsed, problems = mise_file_from_bytes(rel, text.encode())
-    assert parsed is not None, problems
+    parsed = mise_file_from_bytes(rel, text.encode())
+    assert isinstance(parsed, MiseFile), parsed
     return parsed
 
 
@@ -138,10 +175,26 @@ def test_opaque_reasons(text: str, reason: str) -> None:
     assert str(_parse(text).opaque).startswith(reason)
 
 
-def test_a_config_that_is_not_toml_is_a_parse_diagnostic() -> None:
-    parsed, problems = mise_file_from_bytes("mise.toml", b"[tasks\n")
-    assert parsed is None
-    assert [(p.kind, p.file) for p in problems] == [("parse_failed", "mise.toml")]
+@pytest.mark.parametrize(
+    ("data", "error"),
+    [
+        (b"[tasks\n", "Expected ']' at the end of a table declaration (at line 1, column 7)"),
+        (b"\xff = 1\n", "not UTF-8 (byte 0xff at offset 0)"),
+        (b"a = " + b"[" * 5000 + b"]" * 5000, "nested too deeply to parse"),
+        (
+            b'[tasks]\nbuild = {\n  run = "echo b",\n  description = "x",\n}\n',
+            "Invalid initial character for a key part (at line 2, column 10)",
+        ),
+    ],
+    ids=["not-toml", "not-utf8", "deep-nesting", "toml-1.1-inline-table"],
+)
+def test_a_config_that_cannot_be_parsed_is_unreadable(data: bytes, error: str) -> None:
+    assert mise_file_from_bytes("mise.toml", data) == Unreadable("mise.toml", error)
+
+
+def test_a_file_task_header_nested_too_deeply_is_unreadable() -> None:
+    header = b"#!/bin/sh\n#MISE a = " + b"[" * 5000 + b"]" * 5000 + b"\n"
+    assert mise_file_from_bytes("mise-tasks/t", header) == Unreadable("mise-tasks/t", "nested too deeply to parse")
 
 
 MONOREPO = {
@@ -191,24 +244,19 @@ def _results(tmp_path: Path, doc: str, text: str, files: Mapping[str, str] = MON
             "README.md",
             "mise backend:tset",
             "missing",
-            "no task 'tset' in backend/mise.toml and no task 'backend:tset' visible from the repository root",
+            "no task 'backend:tset' in mise.toml and no task 'tset' in backend/mise.toml",
         ),
         ("README.md", "mise //backend:tset", "missing", "no task 'tset' in backend/mise.toml"),
         ("README.md", "mise //frontend:test", "missing", "no task 'test' in frontend/mise.toml"),
-        ("README.md", "mise -C backend run build", "missing", "no task 'build' visible from backend"),
+        ("README.md", "mise -C backend run build", "missing", "no task 'build' in backend/mise.toml"),
         (
             "README.md",
             "mise run test",
             "not_checked",
             "defined only in backend/mise.toml; the doc names no directory",
         ),
-        ("README.md", "mise run nope", "missing", "no task 'nope' visible from the repository root"),
-        (
-            "docs/dev.md",
-            "mise run nope",
-            "missing",
-            "no task 'nope' visible from the repository root or docs",
-        ),
+        ("README.md", "mise run nope", "missing", "no task 'nope' in mise.toml"),
+        ("docs/dev.md", "mise run nope", "missing", "no task 'nope' in mise.toml"),
         ("README.md", "mise -C nowhere run test", "skipped", "no directory nowhere in the repository"),
         ("README.md", "mise //...:install", "skipped", "a wildcard or a placeholder"),
     ],
@@ -224,7 +272,7 @@ def test_without_config_roots_every_config_directory_counts(tmp_path: Path) -> N
     }
     assert _results(tmp_path, "README.md", "`mise //services/api:serve` `mise services/api:serve`\n", files) == [
         ("mise //services/api:serve", "ok", "defined in services/api/mise.toml"),
-        ("mise services/api:serve", "ok", "defined in services/api/mise.toml"),
+        ("mise services/api:serve", "missing", "no task 'services/api:serve' in mise.toml"),
     ]
 
 
@@ -236,7 +284,6 @@ def test_every_config_file_location_and_file_task_directory_counts(tmp_path: Pat
         ".config/mise.toml": '[tasks.d]\nrun = "x"\n',
         ".config/mise/config.toml": '[tasks.e]\nrun = "x"\n',
         "mise.local.toml": '[tasks.f]\nrun = "x"\n',
-        "mise.ci.toml": '[tasks.g]\nrun = "x"\n',
         ".config/mise/conf.d/extra.toml": '[tasks.h]\nrun = "x"\n',
         "mise-tasks/i.sh": "#!/bin/sh\n",
         ".mise-tasks/j": "#!/bin/sh\n",
@@ -245,7 +292,7 @@ def test_every_config_file_location_and_file_task_directory_counts(tmp_path: Pat
         ".config/mise/tasks/grp/m": "#!/bin/sh\n",
         "mise-tasks/more.toml": 'n = "echo n"\n',
     }
-    names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "grp:m", "n"]
+    names = ["a", "b", "c", "d", "e", "f", "h", "i", "j", "k", "l", "grp:m", "n"]
     text = " ".join(f"`mise run {name}`" for name in names) + "\n"
     assert {status for _, status, _ in _results(tmp_path, "README.md", text, files)} == {"ok"}
 
@@ -287,7 +334,11 @@ def test_an_opaque_config_leaves_a_missing_task_unchecked(tmp_path: Path, config
 def test_a_config_that_does_not_parse_leaves_its_tasks_unknown(tmp_path: Path) -> None:
     files = {"mise.toml": "[tasks\n"}
     assert _results(tmp_path, "README.md", "`mise run build`\n", files) == [
-        ("mise run build", "skipped", "mise.toml could not be read")
+        (
+            "mise run build",
+            "not_checked",
+            "mise.toml could not be read: Expected ']' at the end of a table declaration (at line 1, column 7)",
+        )
     ]
 
 
@@ -316,9 +367,8 @@ def test_a_file_task_header_declares_aliases(header: str, aliases: set[str], opa
     assert (set(parsed.tasks), parsed.opaque) == (aliases, opaque)
 
 
-def test_a_binary_file_task_is_read_without_a_diagnostic() -> None:
-    parsed, problems = mise_file_from_bytes("mise-tasks/tool", b"\x7fELF\xff\xfe\x00")
-    assert (parsed, problems) == (MiseFile(frozenset()), [])
+def test_a_binary_file_task_is_read_leniently() -> None:
+    assert mise_file_from_bytes("mise-tasks/tool", b"\x7fELF\xff\xfe\x00") == MiseFile(frozenset())
 
 
 def test_a_file_task_alias_resolves(tmp_path: Path) -> None:

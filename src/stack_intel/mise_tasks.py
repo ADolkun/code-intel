@@ -1,12 +1,13 @@
 """The tasks mise config files and task directories define, for the docs
 check's mise references.
 
-Which files count (from mise 2026.x): in every directory from the repository
-root down to the working directory, the config files ``config_owner`` knows
-(every ``mise.<env>.toml`` included, a lenient union over environments), the
-file tasks under the default task directories, and the TOML task files and
-task directories a config's ``[task_config] includes`` names. Files outside
-the repository and environment variables do not count: the docs check judges
+Which files count (checked against mise 2026.11): in each directory, the
+config files ``config_file`` knows, the file tasks under the default task
+directories (unless a config of that directory declares ``[task_config]
+includes``, which replaces them), and the TOML task files and task directories
+those includes name. An environment config (``mise.<env>.toml``) counts only
+for a command that selects the environment (``MISE_ENV`` or ``-E``). Files
+outside the repository and the environment do not count: the docs check judges
 a fresh checkout on a clean machine.
 
 A remote or templated include, ``[task_templates]`` and a task that
@@ -22,16 +23,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from stack_intel.doc_rules import STAGE
-from stack_intel.problems import Problem, diagnostic
+from stack_intel.definition_files import Unreadable, unreadable
 
+# For a prefix P: P.toml and P.local.toml always, P.<env>.toml and
+# P.<env>.local.toml for that environment; mise/mise.toml and .mise/mise.toml
+# configure the `mise` and `.mise` directories themselves.
 _CONFIG_RE = re.compile(
-    r"(?:^|/)("
-    r"\.?mise(?:\.[^/]+)?\.toml"
-    r"|\.config/mise(?:\.[^/]+)?\.toml"
-    r"|\.config/mise/mise\.toml"
-    r"|(?:\.?mise|\.config/mise)/config(?:\.[^/]+)?\.toml"
+    r"(?:^|/)(?P<file>"
+    r"\.config/mise/mise(?:\.local)?\.toml"
     r"|(?:\.?mise|\.config/mise)/conf\.d/[^/]+\.toml"
+    r"|(?:\.config/mise/config|\.config/mise|\.?mise/config|\.?mise)(?:\.(?P<env>[^/]+?))?\.toml"
     r")$"
 )
 TASK_DIRS: tuple[str, ...] = ("mise-tasks", ".mise-tasks", "mise/tasks", ".mise/tasks", ".config/mise/tasks")
@@ -41,15 +42,42 @@ _HEADER_RE = re.compile(r"^\s*(?:#|//|::|--)\s*(?:MISE|\[MISE\])(?:\s+(.*))?$")
 # Anything shaped like a header line under another comment marker.
 _HEADER_LIKE_RE = re.compile(r"^\s*[^\s\w]{1,3}\s*\[?MISE\]?(?:\s|$)")
 _NO_ALIASES: Mapping[str, str] = MappingProxyType({})
+# The file-task extensions mise drops from a task's name, and ones it keeps,
+# as mise 2026.11 does; any other extension may go either way.
+_STRIPPED_EXTENSIONS = frozenset(
+    "sh bash zsh fish ksh ps1 py js ts mjs cjs mts rb pl php lua cmd bat exe nu vbs".split()
+)
+_KEPT_EXTENSIONS = frozenset(
+    """md txt json yaml yml toml gz tar zip ex exs r go rs swift kts deno tsx jsx cts java psm1 awk tcl elv xsh
+    pwsh pyw ash dash csh tcsh coffee groovy ps xonsh jl dart scala kt hs ml mk make just bun sql cs fsx vb sed
+    perl ruby python node rake bb clj nim zig v d""".split()
+)
 
 
-def config_owner(rel: str) -> str | None:
-    """The directory a mise config file ``rel`` configures (``""`` for the
-    repository root), None when ``rel`` is not a config file name."""
+@dataclass(frozen=True)
+class ConfigFile:
+    """``owner``: the directory a config file configures (``""`` for the
+    repository root). ``env``: the environment it belongs to, None for one
+    mise always reads."""
+
+    owner: str
+    env: str | None
+
+
+def config_file(rel: str) -> ConfigFile | None:
+    """What ``rel`` is to mise as a config file, None when it is not one."""
     match = _CONFIG_RE.search(rel)
     if match is None:
         return None
-    return rel[: match.start(1)].rstrip("/")
+    env = match.group("env")
+    if env is not None:
+        env = None if env == "local" else env.removesuffix(".local")
+    return ConfigFile(rel[: match.start("file")].rstrip("/"), env)
+
+
+def config_owner(rel: str) -> str | None:
+    found = config_file(rel)
+    return None if found is None else found.owner
 
 
 def task_dir_entry(rel: str) -> tuple[str, str] | None:
@@ -61,27 +89,44 @@ def task_dir_entry(rel: str) -> tuple[str, str] | None:
     return rel[: match.start(1)].rstrip("/"), match.group(2)
 
 
-def file_task_names(path: str) -> frozenset[str]:
+def file_task_names(path: str) -> tuple[frozenset[str], frozenset[str]]:
     """The task names a file task at ``path`` (inside its task directory)
-    answers to: ``a/b/c.sh`` is ``a:b:c.sh`` and ``a:b:c``, ``a/_default`` is ``a``."""
+    answers to, and the names it may answer to. ``a/b/c.sh`` is ``a:b:c`` and
+    ``a:b:c.sh``; ``README.md`` is only ``README.md``; ``a/_default`` is also
+    ``a``. An extension mise is not known to drop or keep leaves the name
+    without it uncertain."""
     parts = path.split("/")
-    stem = posixpath.splitext(parts[-1])[0]
-    names = {":".join(parts), ":".join([*parts[:-1], stem])}
-    if stem == "_default" and len(parts) > 1:
+    stem, ext = posixpath.splitext(parts[-1])
+    ext = ext[1:]
+    names = {":".join(parts)}
+    maybe: set[str] = set()
+    if ext in _STRIPPED_EXTENSIONS:
+        names.add(":".join([*parts[:-1], stem]))
+    elif ext and ext.lower() not in _KEPT_EXTENSIONS:
+        maybe.add(":".join([*parts[:-1], stem]))
+    if len(parts) > 1 and (parts[-1] == "_default" or (stem == "_default" and ext in _STRIPPED_EXTENSIONS)):
         names.add(":".join(parts[:-1]))
-    return frozenset(name for name in names if name)
+    return frozenset(names), frozenset(maybe - names)
 
 
 @dataclass(frozen=True)
 class MiseFile:
     """``tasks``: the task names and aliases the file defines. ``includes``:
-    its local ``[task_config] includes`` entries. ``opaque``: why its task set
-    is not provable, None when it is. ``path_aliases``: ``[monorepo.path_aliases]``."""
+    its local ``[task_config] includes`` entries; ``declares_includes``: it
+    has the key at all, which replaces the default task directories.
+    ``opaque``: why its task set is not provable, None when it is.
+    ``path_aliases``: ``[monorepo.path_aliases]``. ``monorepo_root``: it sets
+    ``monorepo_root`` (or ``experimental_monorepo_root``). ``config_roots``:
+    ``[monorepo] config_roots``, None when absent or empty (mise then finds
+    the config roots itself)."""
 
     tasks: frozenset[str]
     includes: tuple[str, ...] = ()
     opaque: str | None = None
     path_aliases: Mapping[str, str] = field(default=_NO_ALIASES)
+    declares_includes: bool = False
+    monorepo_root: bool = False
+    config_roots: tuple[str, ...] | None = None
 
 
 def _task_names(table: Mapping[str, object], where: str) -> tuple[set[str], str | None]:
@@ -131,20 +176,27 @@ def read_mise_file(data: Mapping[str, object], rel: str, *, task_file: bool) -> 
     if "task_templates" in data:
         opaque = opaque or f"{rel} defines task templates"
     includes, include_opaque = _includes(data, rel)
+    task_config = data.get("task_config")
     monorepo = data.get("monorepo")
-    aliases = monorepo.get("path_aliases") if isinstance(monorepo, dict) else None
+    monorepo = monorepo if isinstance(monorepo, dict) else {}
+    aliases = monorepo.get("path_aliases")
     path_aliases = (
         {key: value for key, value in aliases.items() if isinstance(value, str)} if isinstance(aliases, dict) else {}
     )
+    roots = monorepo.get("config_roots")
+    config_roots = tuple(root for root in roots if isinstance(root, str)) if isinstance(roots, list) else ()
     return MiseFile(
         frozenset(names),
         includes,
         opaque or include_opaque,
         MappingProxyType(path_aliases) if path_aliases else _NO_ALIASES,
+        declares_includes=isinstance(task_config, dict) and "includes" in task_config,
+        monorepo_root=data.get("monorepo_root") is True or data.get("experimental_monorepo_root") is True,
+        config_roots=config_roots or None,
     )
 
 
-def file_task_header(rel: str, text: str) -> MiseFile:
+def file_task_header(rel: str, text: str) -> MiseFile | Unreadable:
     """The aliases a file task's ``#MISE`` header lines declare. A header that
     is not TOML, or one that ``extends`` another task, leaves them unknown."""
     lines: list[str] = []
@@ -159,21 +211,20 @@ def file_task_header(rel: str, text: str) -> MiseFile:
         header = tomllib.loads("\n".join(lines))
     except tomllib.TOMLDecodeError:
         return MiseFile(frozenset(), opaque=f"the #MISE header of {rel} is not TOML the docs check can read")
+    except RecursionError as exc:
+        return unreadable(rel, exc)
     names, opaque = _task_names({"": header}, rel)
     return MiseFile(frozenset(names - {""}), opaque=opaque and f"file task {rel} extends another task")
 
 
-def mise_file_from_bytes(rel: str, data: bytes, *, stage: str = STAGE) -> tuple[MiseFile | None, list[Problem]]:
+def mise_file_from_bytes(rel: str, data: bytes) -> MiseFile | Unreadable:
     """``rel`` read as a config file when its name is one, as a TOML task file
-    when it ends ``.toml``, else as a file task (its header); None with a
-    diagnostic when a TOML file is not UTF-8 or not TOML. A file task may be any
-    script or binary, so its bytes are read leniently and never fail."""
+    when it ends ``.toml``, else as a file task (its header). A file task may
+    be any script or binary, so its bytes are decoded leniently."""
     if config_owner(rel) is None and not rel.endswith(".toml"):
-        return file_task_header(rel, data.decode("utf-8", "replace")), []
+        return file_task_header(rel, data.decode("utf-8", "replace"))
     try:
         parsed = tomllib.loads(data.decode("utf-8"))
-    except UnicodeDecodeError as exc:
-        return None, [diagnostic("decode_failed", stage=stage, step="decode file", file=rel, exc=exc)]
-    except tomllib.TOMLDecodeError as exc:
-        return None, [diagnostic("parse_failed", stage=stage, step="parse file", file=rel, exc=exc)]
-    return read_mise_file(parsed, rel, task_file=config_owner(rel) is None), []
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+        return unreadable(rel, exc)
+    return read_mise_file(parsed, rel, task_file=config_owner(rel) is None)

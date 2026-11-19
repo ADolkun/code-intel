@@ -14,9 +14,14 @@ assigned) look at every line, tab-indented or not.
 
 A target name built from variables is expanded only when each variable it uses
 is assigned exactly once in the whole file, outside a conditional, before the
-rule, from literal text and such variables. ``MakeTargets.variables`` tells
-the caller that names depend on variables, which a command line or the
-environment may set.
+rule, from literal text and such variables, and only up to ``_MAX_EXPANSION``
+characters of expanded text in all: past that the file is opaque.
+``MakeTargets.variables`` tells the caller that names depend on variables,
+which a command line or the environment may set.
+
+Of the special targets only ``.PHONY`` makes its prerequisites goals make
+accepts without a rule. A target-specific variable line (``t: X = 1``)
+defines nothing unless a rule names the target too.
 """
 
 from __future__ import annotations
@@ -25,9 +30,6 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
-
-from stack_intel.doc_rules import STAGE
-from stack_intel.problems import Problem, diagnostic
 
 # GNU make's lookup order when no -f is given.
 MAKEFILE_NAMES: tuple[str, ...] = ("GNUmakefile", "makefile", "Makefile")
@@ -49,6 +51,7 @@ _MODIFIERS = frozenset({"export", "override", "private", "unexport"})
 _REFERENCE_RE = re.compile(r"\$(?:\(([A-Za-z0-9_.-]+)\)|\{([A-Za-z0-9_.-]+)\})")
 _VARIABLE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 _MAX_DEPTH = 20
+_MAX_EXPANSION = 100_000
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,7 @@ class _Variables:
     def __init__(self, assignments: dict[str, int]) -> None:
         self.values: dict[str, tuple[str, bool] | None] = {}
         self.assignments = assignments
+        self.budget = _MAX_EXPANSION
 
     def assign(self, name: str, op: str, value: str, conditional: bool) -> None:
         if conditional or op in ("+=", "!=") or name in self.values or self.assignments.get(name, 0) > 1:
@@ -161,8 +165,9 @@ class _Variables:
             self.values[name] = (expanded, False) if expanded is not None else None
 
     def expand(self, text: str, used: set[str], depth: int = 0) -> str | None:
-        """``text`` with every variable reference replaced, None when one is not known."""
-        if depth > _MAX_DEPTH:
+        """``text`` with every variable reference replaced, None when one is
+        not known or the expansion budget is spent."""
+        if depth > _MAX_DEPTH or self.budget < 0:
             return None
         out: list[str] = []
         position = 0
@@ -178,6 +183,9 @@ class _Variables:
                     return None
                 value = expanded
             used.add(name)
+            self.budget -= len(value)
+            if self.budget < 0:
+                return None
             out.append(text[position : match.start()])
             out.append(value)
             position = match.end()
@@ -230,6 +238,11 @@ class _Reader:
     def read(self, lines: list[tuple[int, str]]) -> MakeTargets:
         for number, raw in lines:
             self.line(number, raw)
+        return self.finish()
+
+    def finish(self) -> MakeTargets:
+        if self.variables.budget < 0:
+            self.opaque = "has variables too large to expand"
         return MakeTargets(frozenset(self.targets), self.opaque, frozenset(self.used))
 
     def line(self, number: int, raw: str) -> None:
@@ -277,7 +290,10 @@ class _Reader:
         prerequisites = rest.split(";", 1)[0]
         if names is None:
             return
-        if (split := _split(prerequisites)) is not None and split.kind == "rule" and "%" in prerequisites:
+        split = _split(prerequisites)
+        if split is not None and split.kind == "assign":
+            return
+        if split is not None and split.kind == "rule" and "%" in prerequisites:
             self.unknowable(number, "a static pattern rule")
         for name in names:
             if "%" in name:
@@ -286,8 +302,9 @@ class _Reader:
                 self.unknowable(number, "a .DEFAULT rule")
             elif name in _SPECIAL_TARGETS:
                 self.targets.add(name)
-                listed = self.expand(number, prerequisites.replace("|", " ")) if "=" not in prerequisites else []
-                self.targets.update(strip_dot_slash(item) for item in listed or ())
+                if name == ".PHONY":
+                    listed = self.expand(number, prerequisites.replace("|", " "))
+                    self.targets.update(strip_dot_slash(item) for item in listed or ())
             elif self.is_suffix_rule(name):
                 self.unknowable(number, f"an old-style suffix rule {name}")
             else:
@@ -316,10 +333,7 @@ def read_make_targets(text: str) -> MakeTargets:
     return _Reader(lines).read(lines)
 
 
-def make_targets_from_bytes(rel: str, data: bytes, *, stage: str = STAGE) -> tuple[MakeTargets | None, list[Problem]]:
-    """The targets of the Makefile ``rel``, or None with a diagnostic when it is not UTF-8."""
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        return None, [diagnostic("decode_failed", stage=stage, step="decode file", file=rel, exc=exc)]
-    return read_make_targets(text), []
+def make_targets_from_bytes(data: bytes) -> MakeTargets:
+    """The targets of a makefile. make reads bytes, so a byte that is not
+    UTF-8 (a Latin-1 comment) is kept as it is rather than failing the file."""
+    return read_make_targets(data.decode("utf-8", "surrogateescape"))

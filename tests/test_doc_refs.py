@@ -1416,10 +1416,14 @@ def test_a_script_npm_supplies_itself_is_not_proven_missing(
     assert [s for _, s in _script_results(_scripts(tmp_path, markdown, files))] == [status]
 
 
-def test_untracked_and_vendored_package_jsons_do_not_count(tmp_path: Path) -> None:
+def test_an_untracked_package_json_does_not_count_and_a_vendored_one_is_not_where_the_doc_runs(
+    tmp_path: Path,
+) -> None:
     manifests = {**FRONTEND_MANIFEST, "frontend/node_modules/dep/package.json": _manifest("deploy")}
     report = _scripts(tmp_path, "`npm run deploy`", manifests, untracked=["frontend/package.json"])
-    assert refs(report, kind="command") == []
+    assert [(r.status, r.detail) for r in refs(report, kind="command")] == [
+        ("not_checked", "defined only in frontend/node_modules/dep/package.json; the doc names no directory")
+    ]
 
 
 def test_a_frontend_root_at_the_repository_root_reads_every_package_json(tmp_path: Path) -> None:
@@ -1433,11 +1437,16 @@ def test_a_frontend_root_at_the_repository_root_reads_every_package_json(tmp_pat
 def test_a_package_json_without_scripts_defines_none(tmp_path: Path, content: str) -> None:
     report = _scripts(tmp_path, "`npm run build`", {"frontend/package.json": content})
     if content == "{not json":
-        assert [r.status for r in refs(report, kind="command")] == ["skipped"]
-        assert [(p.kind, p.file) for p in report.diagnostics] == [("parse_failed", "frontend/package.json")]
+        assert [(r.status, r.detail) for r in refs(report, kind="command")] == [
+            (
+                "not_checked",
+                "frontend/package.json could not be read: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+            )
+        ]
     else:
         assert _script_results(report) == [("npm run build", "missing")]
-        assert report.complete
+    assert report.complete
+    assert report.diagnostics == []
 
 
 def test_the_commands_check_can_be_left_out_of_a_docs_rule(tmp_path: Path) -> None:
@@ -1785,7 +1794,7 @@ REVIEWED_CASES = [
             ("make example", "skipped"),
             ("make foo...", "skipped"),
             ("make my-target", "skipped"),
-            ("make target-name", "missing"),
+            ("make target-name", "skipped"),
             ("make {target}", "skipped"),
             ("make …", "skipped"),
             ("mise run TASK", "skipped"),
@@ -1910,8 +1919,8 @@ def test_mise_tasks_in_a_readme_fence_resolve_through_the_monorepo(tmp_path: Pat
     ]
     (failure,) = ref_findings(report)
     assert failure.message == (
-        "command not found: mise backend:tset (no task 'tset' in backend/mise.toml and no task 'backend:tset' "
-        "visible from the repository root or docs)"
+        "command not found: mise backend:tset (no task 'backend:tset' in mise.toml "
+        "and no task 'tset' in backend/mise.toml)"
     )
 
 
@@ -2659,3 +2668,9 @@ def test_without_a_frontend_a_script_defined_only_in_another_package_is_not_chec
     status, reason = results["npm run build"]
     assert status == "not_checked"
     assert reason is not None and reason.startswith("defined only in web/package.json")
+
+
+def test_a_path_with_too_many_brace_alternatives_is_skipped(tmp_path: Path) -> None:
+    path = "backend/" + "{a,b}" * 22 + ".py"
+    (ref,) = [r for r in refs(build(tmp_path, {"docs/a.md": f"See `{path}`.\n"}), kind="path") if r.text == path]
+    assert (ref.status, ref.detail) == ("skipped", "a brace pattern with too many alternatives")

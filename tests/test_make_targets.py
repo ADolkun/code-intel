@@ -7,6 +7,7 @@ import textwrap
 
 import pytest
 
+from stack_intel.make_targets import _SPECIAL_TARGETS as _SPECIAL
 from stack_intel.make_targets import make_targets_from_bytes, read_make_targets
 
 
@@ -132,10 +133,21 @@ def test_only_known_suffixes_make_a_suffix_rule(text: str, opaque: bool) -> None
     assert (_read(text)[1] is not None) == opaque
 
 
-def test_target_specific_variables_and_special_target_prerequisites_count() -> None:
-    targets, opaque = _read(".PHONY: release docs\nrelease: VERSION = 1.0\nbuild: export X := 1\n")
-    assert targets == {".PHONY", "release", "docs", "build"}
+def test_only_phony_prerequisites_and_real_rules_define_targets() -> None:
+    text = (
+        ".PHONY: release docs\nrelease: VERSION = 1.0\nbuild: export X := 1\n"
+        ".PRECIOUS: prec\n.SECONDARY: sec\n.INTERMEDIATE: inter\n.NOTPARALLEL: np\n.SILENT: sil\n"
+        "varx: X = 1\nboth: X = 1\nboth:\n\t@true\n"
+    )
+    targets, opaque = _read(text)
+    assert targets - _SPECIAL == {"release", "docs", "both"}
     assert opaque is None
+
+
+def test_variables_that_expand_exponentially_make_the_makefile_opaque() -> None:
+    lines = ["A0 := x"] + [f"A{i} = " + f"$(A{i - 1})" * 8 for i in range(1, 13)] + ["$(A12)y:"]
+    found = read_make_targets("\n".join(lines) + "\n")
+    assert (found.targets, found.opaque) == (frozenset(), "has variables too large to expand")
 
 
 def test_a_target_name_from_variables_is_expanded_when_they_are_known() -> None:
@@ -190,7 +202,6 @@ def test_the_first_opaque_reason_is_kept() -> None:
     assert _read("include a.mk\n%.o: %.c\n")[1] == "has include (line 1)"
 
 
-def test_a_makefile_that_is_not_utf8_is_a_decode_diagnostic() -> None:
-    found, problems = make_targets_from_bytes("Makefile", b"lint:\n\t\xff\n")
-    assert found is None
-    assert [(p.kind, p.file) for p in problems] == [("decode_failed", "Makefile")]
+def test_a_latin1_byte_in_a_makefile_is_read_as_make_reads_bytes() -> None:
+    found = make_targets_from_bytes(b"# (c) 2020 M\xfcller\nall:\n\techo \xff\n")
+    assert (found.targets, found.opaque) == (frozenset({"all"}), None)

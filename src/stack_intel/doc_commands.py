@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import posixpath
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -50,6 +50,8 @@ class CommandMention:
     ``-C``, ``--dir``, ``--cwd`` or ``--cd`` names (``""`` for the repository
     root), None when it names none or the name is not a repository path (``..``,
     ``~/x``, ``$APP``). ``overrides``: the variables a make command line sets.
+    ``environments``: the mise environments the command selects (``-E`` or
+    ``MISE_ENV``).
     """
 
     runner: Runner
@@ -59,6 +61,7 @@ class CommandMention:
     verdict: Verdict = "check"
     reason: str | None = None
     overrides: frozenset[str] = field(default=frozenset())
+    environments: frozenset[str] = field(default=frozenset())
 
 
 _QUOTES = "\"'"
@@ -79,9 +82,35 @@ _LOST = "\0"
 
 
 def _unquote(token: str) -> str:
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in _QUOTES:
-        return token[1:-1]
-    return token
+    """``token`` as the shell passes it on: quotes removed wherever they sit
+    (``te"st"`` is ``test``), and backslash escapes resolved."""
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(token):
+        char = token[index]
+        escaped = token[index + 1 : index + 2]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                out.append(char)
+        elif char == quote:
+            quote = None
+        elif char == "\\" and escaped and (quote is None or escaped in '"\\$`'):
+            out.append(escaped)
+            index += 1
+        elif quote is None and char in _QUOTES:
+            quote = char
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _end_of_input(line: str) -> str:
+    """A backslash that ends the input continues nothing, and bash drops it."""
+    return line[:-1] if line.endswith("\\") and not line.endswith("\\\\") else line
 
 
 def _repo_dir(raw: str) -> str | None:
@@ -134,7 +163,7 @@ def _separator_at(line: str, index: int) -> str | None:
 
 def _scan(line: str) -> Iterator[tuple[str, int, int] | str]:
     """The words of ``line`` as ``(word, start, end)`` and its separators as
-    strings. Quotes and ``$(...)`` keep spaces and separators inside one word;
+    strings. Quotes, ``$(...)`` and a backslash keep spaces and separators inside one word;
     an unquoted ``#`` that starts a word ends the line."""
     index = 0
     start: int | None = None
@@ -149,6 +178,10 @@ def _scan(line: str) -> Iterator[tuple[str, int, int] | str]:
         if char == "$" and line[index + 1 : index + 2] in ("(", "{"):
             start = index if start is None else start
             index = _closing(line, index + 1) + 1
+            continue
+        if char == "\\" and index + 1 < len(line):
+            start = index if start is None else start
+            index += 2
             continue
         separator = _separator_at(line, index)
         if char.isspace() or separator is not None:
@@ -190,11 +223,12 @@ def _closing(line: str, index: int) -> int:
 @dataclass
 class _LineState:
     """What a line's commands change for the commands after them: the
-    directory (None: the reader's own), the variables exported, and whether
-    the line changed directory at all."""
+    directory (None: the reader's own), the variables exported (with their
+    values, None when not set on the line), and whether the line changed
+    directory at all."""
 
     cwd: str | None = None
-    env: set[str] = field(default_factory=set)
+    env: dict[str, str | None] = field(default_factory=dict)
     moved: bool = False
 
 
@@ -220,7 +254,7 @@ def _commands(line: str, state: _LineState) -> Iterator[_Command]:
             cwd = _join_dir(cwd, words[1]) if len(words) == 2 and words[0] != "popd" else _LOST
             state.moved = True
         elif words and words[0] == "export":
-            state.env.update(word.split("=", 1)[0] for word in words[1:] if not word.startswith("-"))
+            state.env.update(_assignment(word) for word in words[1:] if not word.startswith("-"))
         elif words:
             yield _Command(words, spans, line, cwd)
         words, spans = [], []
@@ -230,13 +264,18 @@ def _commands(line: str, state: _LineState) -> Iterator[_Command]:
             cwd = stack.pop() if stack else cwd
 
 
-def _runner_at(words: Sequence[str]) -> tuple[int, set[str]] | None:
+def _assignment(word: str) -> tuple[str, str | None]:
+    name, equals, value = word.partition("=")
+    return name, _unquote(value) if equals else None
+
+
+def _runner_at(words: Sequence[str]) -> tuple[int, dict[str, str | None]] | None:
     """The index of the runner word, when the command runs one (after a prompt,
     variable assignments and wrappers such as ``sudo``), and the variables
     those assignments set."""
     index = 1 if words and words[0] in _PROMPTS else 0
     wrapped = False
-    assigned: set[str] = set()
+    assigned: dict[str, str | None] = {}
     while index < len(words):
         word = words[index]
         if word in _PARSERS:
@@ -244,7 +283,7 @@ def _runner_at(words: Sequence[str]) -> tuple[int, set[str]] | None:
         if word in _WRAPPERS:
             wrapped = True
         elif _ASSIGNMENT_RE.match(word):
-            assigned.add(word.split("=", 1)[0])
+            assigned.update([_assignment(word)])
         elif not (wrapped and word.startswith("-")):
             return None
         index += 1
@@ -292,6 +331,8 @@ _NPM_BUILT_IN_SCRIPTS = frozenset({"restart", "env"})
 _NPM_WORKSPACE_VALUED = frozenset({"-w", "--workspace"})
 _NPM_WORKSPACE_FLAGS = frozenset({"--workspaces", "-ws", "--include-workspace-root"})
 _NPM_FLAGS = frozenset({"-s", "--silent", "-q", "--quiet", "-d", "-dd", "-ddd", "--verbose", "--foreground-scripts"})
+# npm reads `-C` as `--prefix`.
+_NPM_PREFIX = frozenset({"--prefix", "-C"})
 _PNPM_FLAGS = frozenset({"-s", "--silent", "--stream", "--parallel", "--sequential", "--aggregate-output"})
 
 
@@ -305,8 +346,15 @@ def _unknown_option(word: str, known: frozenset[str]) -> bool:
     return word.startswith("-") and "=" not in word and word not in known
 
 
+def _long_option_reason(option: str) -> str:
+    return (
+        f"{option} is an option the docs check does not know, and the runner reads an unambiguous "
+        "abbreviation as the option it starts (--if-pres is --if-present)"
+    )
+
+
 def _npm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMention]:
-    command = name = unknown = None
+    command = name = unknown = unknown_long = None
     directory = cwd
     workspace = if_present = False
     index = 0
@@ -323,11 +371,13 @@ def _npm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMentio
             workspace = True
         elif flag == "--if-present":
             if_present = True
-        elif flag == "--prefix":
-            value, index = _option_value(words, index, "--prefix")
+        elif flag in _NPM_PREFIX:
+            value, index = _option_value(words, index, flag)
             if value is not None:
                 directory = _join_dir(cwd, value)
             continue
+        elif word.startswith("--") and flag not in _NPM_FLAGS:
+            unknown_long = unknown_long or flag
         elif word.startswith("-"):
             if name is None and unknown is None and _unknown_option(word, _NPM_FLAGS):
                 unknown = word
@@ -344,6 +394,8 @@ def _npm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMentio
         return []
     if workspace:
         return [_named("npm", name, directory, text, "unchecked", "runs in the workspaces' own package.json files")]
+    if unknown_long is not None:
+        return [_named("npm", name, directory, text, "unchecked", _long_option_reason(unknown_long))]
     if if_present:
         return [_named("npm", name, directory, text, "unproven", "--if-present passes when the script is missing")]
     if unknown is not None:
@@ -368,7 +420,7 @@ _PNPM_COMMANDS = frozenset(
 def _pnpm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMention]:
     directory = cwd
     selected = if_present = False
-    command = unknown = None
+    command = unknown = unknown_long = None
     index = 0
     while index < len(words):
         word = words[index]
@@ -386,6 +438,9 @@ def _pnpm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMenti
             continue
         if flag == "--if-present":
             if_present = True
+        elif word.startswith("--") and flag not in _PNPM_FLAGS:
+            if unknown_long is None:
+                unknown_long = flag
         elif word.startswith("-"):
             if unknown is None and _unknown_option(word, _PNPM_FLAGS):
                 unknown = word
@@ -397,6 +452,8 @@ def _pnpm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMenti
             later = words[index + 1 :]
             selected = selected or any(w.split("=", 1)[0] in _PNPM_SELECTORS for w in later)
             mention = _pnpm_mention(word, directory, text, selected, if_present)
+            if unknown_long is not None and mention.verdict != "skipped":
+                return [replace(mention, verdict="unchecked", reason=_long_option_reason(unknown_long))]
             if unknown is not None and mention.verdict == "check":
                 return [replace(mention, verdict="unproven", reason=_option_reason(unknown))]
             return [mention]
@@ -407,6 +464,8 @@ def _pnpm(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMenti
         return []
     if selected:
         return [_named("pnpm", command, directory, text, "unchecked", "runs in the selected workspace projects")]
+    if unknown_long is not None:
+        return [_named("pnpm", command, directory, text, "unchecked", _long_option_reason(unknown_long))]
     if command in _PNPM_TEST:
         return [_named("pnpm", "test", directory, text, "unproven", "pnpm test does not report a missing script")]
     if unknown is not None:
@@ -643,6 +702,14 @@ class _MiseArgs:
     def __init__(self, cwd: str | None) -> None:
         self.directory = cwd
         self.option: str | None = None
+        self.environments: frozenset[str] = frozenset()
+
+    def _environments(self, value: str | None) -> None:
+        envs = _mise_environments(value)
+        if envs is None:
+            self.option = self.option or "-E"
+        else:
+            self.environments = envs
 
     def option_at(self, words: Sequence[str], index: int) -> int | None:
         """The index after the option at ``index``, None when it is not an option."""
@@ -658,11 +725,28 @@ class _MiseArgs:
         if flag.startswith("-C") and not flag.startswith("--"):
             self.directory = _join_dir(self.directory, word[2:])
             return index + 1
+        if flag in ("-E", "--env"):
+            value, after = _option_value(words, index, flag)
+            self._environments(value)
+            return after
+        if flag.startswith("-E") and not flag.startswith("--"):
+            self._environments(word[2:])
+            return index + 1
         if flag in _MISE_QUIET or (not flag.startswith("--") and set(flag[1:]) <= _MISE_SHORT_QUIET):
             return index + 1
         if self.option is None:
             self.option = flag
         return index + 1
+
+
+def _mise_environments(value: str | None) -> frozenset[str] | None:
+    """The environments a ``MISE_ENV`` or ``-E`` value names, None when it is not literal."""
+    if value is None:
+        return None
+    value = _unquote(value)
+    if any(ch in value for ch in "$`*?"):
+        return None
+    return frozenset(env for env in value.split(",") if env)
 
 
 def _is_task_shorthand(word: str) -> bool:
@@ -681,7 +765,7 @@ def _mise_task(name: str, args: _MiseArgs, text: str) -> CommandMention:
         return _named(
             "mise", name, args.directory, text, "unchecked", f"{args.option} is an option the docs check does not know"
         )
-    return _named("mise", name, args.directory, text)
+    return replace(_named("mise", name, args.directory, text), environments=args.environments)
 
 
 def _mise(words: Sequence[str], cwd: str | None, text: str) -> list[CommandMention]:
@@ -733,19 +817,27 @@ _PARSERS: dict[str, Callable[[Sequence[str], str | None, str], list[CommandMenti
 }
 
 
-def _in_environment(mention: CommandMention, env: set[str], listing: bool) -> CommandMention:
+def _in_environment(mention: CommandMention, env: Mapping[str, str | None], listing: bool) -> CommandMention:
     """``mention`` once the variables the command line exports are known, and
     whether its line may be a listing (an unprompted fence line)."""
     if mention.verdict in ("unchecked", "skipped"):
         return mention
     if mention.runner == "make":
-        overrides = mention.overrides | env
+        overrides = mention.overrides | env.keys()
         if set_here := sorted(overrides & _MAKE_ENVIRONMENT):
             return replace(mention, verdict="unchecked", reason=f"the command sets {set_here[0]}")
         mention = replace(mention, overrides=frozenset(overrides))
     elif mention.runner == "mise":
         if set_here := sorted(name for name in env if name.startswith("MISE_") and name != "MISE_ENV"):
             return replace(mention, verdict="unchecked", reason=f"the command sets {set_here[0]}")
+        # `-E` takes precedence over MISE_ENV.
+        if "MISE_ENV" in env and not mention.environments:
+            envs = _mise_environments(env["MISE_ENV"])
+            if envs is None:
+                return replace(
+                    mention, verdict="unchecked", reason="the command sets MISE_ENV to a value it cannot read"
+                )
+            mention = replace(mention, environments=envs)
     elif set_here := sorted(name for name in env if name.lower().startswith("npm_config_")):
         return replace(mention, verdict="unproven", reason=f"the command sets {set_here[0]}")
     if listing and mention.verdict == "check":
@@ -764,13 +856,13 @@ def _line_mentions(line: str, state: _LineState, *, fence: bool) -> list[Command
         parse = _PARSERS[command.words[index]]
         mentions = parse(command.words[index + 1 :], command.cwd, command.text_from(index))
         listing = fence and command.words[index] in ("make", "gmake") and len(mentions) > 1
-        out.extend(_in_environment(mention, state.env | assigned, listing) for mention in mentions)
+        out.extend(_in_environment(mention, {**state.env, **assigned}, listing) for mention in mentions)
     return out
 
 
 def command_mentions(text: str) -> list[CommandMention]:
     """Every script, target or task a code span runs."""
-    return _line_mentions(text, _LineState(), fence=False)
+    return _line_mentions(_end_of_input(text), _LineState(), fence=False)
 
 
 def _joined(lines: Sequence[str]) -> Iterator[tuple[int, str]]:
@@ -783,7 +875,7 @@ def _joined(lines: Sequence[str]) -> Iterator[tuple[int, str]]:
             index += 1
             line = line[:-1].rstrip() + " " + lines[index].lstrip()
         index += 1
-        yield start, line
+        yield start, _end_of_input(line) if index == len(lines) else line
 
 
 def fence_command_mentions(lines: Sequence[str]) -> list[tuple[int, CommandMention]]:
@@ -796,7 +888,7 @@ def fence_command_mentions(lines: Sequence[str]) -> list[tuple[int, CommandMenti
     joined = list(_joined(lines))
     prompted = any(prompt.match(line) for _, line in joined)
     out: list[tuple[int, CommandMention]] = []
-    env: set[str] = set()
+    env: dict[str, str | None] = {}
     moved = False
     heredocs: list[str] = []
     for offset, line in joined:
