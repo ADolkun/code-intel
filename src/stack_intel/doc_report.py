@@ -24,7 +24,7 @@ from stack_intel.result_types import library_text
 class Reference:
     """One thing a doc names.
 
-    ``kind``: link, path, route or symbol. ``text``: as written (an ignore
+    ``kind``: link, path, route, symbol or command. ``text``: as written (an ignore
     entry matches it exactly). ``context``: the block it sits in (``prose``,
     ``heading``, ``table``, ``html``, or ``fence`` for a line of a code block;
     a code span carries its block's context). ``target``: the repository path, live route
@@ -195,7 +195,7 @@ _MESSAGE_HEADS: Mapping[tuple[str, str], str] = {
     ("route", "method_differs"): "route method differs",
     ("route", "unmounted"): "route not mounted",
     ("symbol", "missing"): "symbol not found",
-    ("script", "missing"): "script not found",
+    ("command", "missing"): "command not found",
 }
 
 
