@@ -3,7 +3,7 @@
 Files: every git-visible ``CLAUDE.md`` and ``AGENTS.md``, ``.claude/CLAUDE.md``
 and ``.github/copilot-instructions.md``. Tokens come from Markdown text only
 (code spans, fences and table cells are not scanned): ``@`` at the start of a
-text run or after whitespace, not escaped as ``\@``, then a path whose last
+text run or after whitespace, not escaped as ``\\@``, then a path whose last
 segment ends in ``.md``, or that starts with ``./`` or ``../`` and names a
 Markdown or text file or has no extension. A ``#fragment`` is dropped.
 Quoted, absolute and ``~`` paths, other extensions (Claude Code skips
