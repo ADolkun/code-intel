@@ -14,7 +14,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from fixture_repo import MINIMAL_CONFIG, git_init, make_repo, write
+from fixture_repo import DOCS_ONLY_CONFIG, MINIMAL_CONFIG, git_init, make_repo, write
 from test_dependency_resolver import DEPS, FakeResolver, FakeSources
 
 from stack_intel import cli, di_map, problems
@@ -556,3 +556,12 @@ def test_text_report_leads_with_banners_and_json_carries_limitations(monkeypatch
     out = capsys.readouterr().out
     assert out.lstrip().startswith("⚠ INCOMPLETE")
     assert "ⓘ 1 analysis limitation(s)" in out
+
+
+def test_cli_without_a_backend_table_says_so_and_exits_1(tmp_path, capsys) -> None:
+    write(tmp_path / ".stack-intel" / "config.toml", DOCS_ONLY_CONFIG)
+    assert _dump_di("--repo-root", tmp_path) == 1
+    assert capsys.readouterr().err == (
+        "stack-intel: dump di needs the [backend] table, and .stack-intel/config.toml has none. "
+        "Fix: add [backend] with root, package and app.\n"
+    )

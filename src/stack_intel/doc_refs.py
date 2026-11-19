@@ -76,7 +76,7 @@ from stack_intel.make_targets import MakeTargets, make_targets_from_bytes
 from stack_intel.markdown_facts import DocFacts, read_doc_facts
 from stack_intel.mise_tasks import MiseFile, mise_file_from_bytes
 from stack_intel.package_manifest import npmrc_sets_if_present, package_scripts_from_bytes
-from stack_intel.problems import Problem, diagnostic
+from stack_intel.problems import Problem, diagnostic, limitation
 from stack_intel.repo_files import RepoFiles
 
 # A limitation, not the `frontend_unavailable` diagnostic: existence still
@@ -480,7 +480,12 @@ class _Run:
                 if self.config.in_orphan_scope(rel) and is_markdown(rel) and rel not in reachable
             )
         )
-        problems: list[Problem] = [*self.repo.submodule_limitations(STAGE), *self.problems, *extra_problems]
+        problems: list[Problem] = [
+            *self.repo.submodule_limitations(STAGE),
+            *self.problems,
+            *extra_problems,
+            *self._not_configured(scope),
+        ]
         if not frontend_available:
             problems.append(
                 Problem(
@@ -509,6 +514,38 @@ class _Run:
             config=self.config,
             package_bindings=self.ctx.package_bindings,
         )
+
+    def _not_configured(self, scope: Sequence[str]) -> list[Problem]:
+        """One limitation per side the config lacks, when some doc in ``scope``
+        runs a check that side would feed."""
+        config = self.config
+        checks = {check for doc in scope for check in config.checks_for(doc)}
+        notes: list[tuple[str, str]] = []
+        if not config.backend_configured and "routes" in checks:
+            notes.append(
+                (
+                    "backend",
+                    "route references are not checked against backend routes, and Python definitions are not indexed",
+                )
+            )
+        if config.frontend_root is None and checks & {"routes", "symbols"}:
+            notes.append(
+                (
+                    "frontend",
+                    "frontend pages and TypeScript definitions are not indexed; "
+                    "frontend names still resolve through tracked code",
+                )
+            )
+        return [
+            limitation(
+                "not_configured",
+                stage=STAGE,
+                file=config.path,
+                line=None,
+                message=f"no [{side}] table in {config.path}: {what}",
+            )
+            for side, what in notes
+        ]
 
     def _doc_drafts(self, doc: str, facts: DocFacts, checks: tuple[str, ...], routes: RouteResolver) -> list[Draft]:
         out: list[Draft] = []

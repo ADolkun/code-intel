@@ -54,11 +54,11 @@ def config_of(repo: Path) -> Config:
 
 
 def model_of(repo: Path) -> Any:
-    return route_map.build_backend_model(repo, config_of(repo).backend)
+    return route_map.build_backend_model(repo, config_of(repo).require_backend())
 
 
 def di_of(repo: Path) -> Any:
-    return di_map.compute(repo, config_of(repo).backend)
+    return di_map.compute(repo, config_of(repo).require_backend())
 
 
 def limitations(result: Any, kind: str) -> list[str]:
@@ -432,7 +432,7 @@ def test_a_file_that_is_not_json_is_a_parse_failed_diagnostic(captured: Path) ->
 
 
 def test_the_view_reads_what_static_checks_can_and_applies_nothing_it_cannot(captured: Path) -> None:
-    config = config_of(captured).backend
+    config = config_of(captured).require_backend()
     view = library_view.read(captured, CAPTURE_FILE, app=config.app, lock=config.lock)
     assert view.capture is not None and view.problems == ()
     assert view.include("backend/pkg/main.py", "extlib.make_status_router()", 1) is not None
@@ -470,7 +470,7 @@ def write_case(repo: Path, case: LibraryCase) -> None:
 
 
 def runtime_of(repo: Path) -> dict[str, Any]:
-    backend = config_of(repo).backend
+    backend = config_of(repo).require_backend()
     assert backend.capture is not None
     return runner.run_oracle(
         Path(sys.executable), runtime_check.oracle_arguments(repo, backend, [], None), dict(backend.capture.env)

@@ -30,6 +30,7 @@ from typing import Literal
 
 from stack_intel.cli import Context
 from stack_intel.code_paths import JSX_SUFFIXES, SourceFile, is_test_path, iter_source_files
+from stack_intel.config import NotConfigured
 from stack_intel.problems import Problem, diagnostic, partition
 from stack_intel.provision import find_toolchain
 from stack_intel.repo_files import RepoFilesError, list_repo_files
@@ -283,7 +284,11 @@ def _document(diagnostics: list[Problem], limitations: list[Problem], key: str, 
 
 def run(args: argparse.Namespace, context: Context) -> int:
     repo_root = context.repo_root
-    frontend_root = context.config.frontend.root
+    try:
+        frontend_root = context.config.require_frontend().root
+    except NotConfigured as exc:
+        print(f"stack-intel: {exc.describe('dump jsx')}", file=sys.stderr)
+        return 2
     missing = frontend_not_found_problem(repo_root, frontend_root)
     if missing is not None:
         return _unavailable(missing, as_json=args.json)

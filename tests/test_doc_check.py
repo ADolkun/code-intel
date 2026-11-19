@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from fixture_repo import hermetic_git
+from fixture_repo import BACKEND_ONLY_CONFIG, DOCS_ONLY_CONFIG, hermetic_git
 from mcp_fixtures import (
     CONFIG_FILE,
     E2E_LAYOUT,
@@ -556,3 +556,121 @@ def test_the_command_is_listed_by_the_cli() -> None:
     parser = build_parser()
     args = parser.parse_args(["doc-check", "--json"])
     assert (args.command, args.json) == ("doc-check", True)
+
+
+# ── Partial configs ──────────────────────────────────────────────────────
+
+NO_SUCH_ROUTE = "\nThe other service answers `GET /api/x`.\n"
+
+
+def docs_only_repo(root: Path) -> Path:
+    fixture_repo(root)
+    write(root / CONFIG_FILE, DOCS_ONLY_CONFIG)
+    return root
+
+
+def test_docs_only_a_clean_doc_exits_0_without_any_code_analysis(tmp_path: Path) -> None:
+    repo = docs_only_repo(tmp_path / "repo")
+    fakes = FakeAnalyzers()
+    runtime = make_runtime(repo, fakes)
+    out, err = io.StringIO(), io.StringIO()
+    assert doc_check.check(runtime, out, err) == 0, err.getvalue()
+    assert out.getvalue() == ""
+    assert runtime.toolchain_state["probes"] == 0
+    assert not {"build_backend_model", "build_di", "python_symbols", "typescript_decls", "make_pages"} & set(
+        fakes.calls
+    )
+
+
+def test_docs_only_a_broken_link_exits_1_with_its_line(tmp_path: Path) -> None:
+    repo = docs_only_repo(tmp_path / "repo")
+    append(repo / "docs" / "a.md", "\nSee [x](b.md#nope).\n")
+    code, out, _ = check(repo, FakeAnalyzers())
+    assert (code, out.splitlines()) == (1, ["docs/a.md:9: broken anchor: b.md#nope (no heading or id in docs/b.md)"])
+
+
+def test_docs_only_a_route_is_not_checked_and_says_why(tmp_path: Path) -> None:
+    repo = docs_only_repo(tmp_path / "repo")
+    append(repo / "docs" / "a.md", NO_SUCH_ROUTE)
+    code, out, err = check(repo, FakeAnalyzers(), as_json=True)
+    assert code == 0, err
+    assert json.loads(out)["reference_counts"]["route"] == {"not_checked": 2}
+    code, out, err = check(repo, FakeAnalyzers())
+    assert (code, out) == (0, "")
+    assert "ⓘ 2 analysis limitation(s)" in err
+    assert (
+        "[not_configured] .stack-intel/config.toml: no [backend] table in .stack-intel/config.toml: route references "
+        "are not checked against backend routes" in err
+    )
+
+
+def test_a_full_config_fails_on_the_same_route(repo: Path) -> None:
+    append(repo / "docs" / "a.md", NO_SUCH_ROUTE)
+    code, out, _ = check(repo, fixture_fakes())
+    assert (code, out.splitlines()) == (
+        1,
+        ["docs/a.md:9: route not found: GET /api/x (not in the analyzed backend routes)"],
+    )
+
+
+def test_an_agents_only_config_checks_the_agent_files(tmp_path: Path) -> None:
+    root = agent_repo(tmp_path / "repo")
+    write(root / CONFIG_FILE, AGENTS_TABLE)
+    code, out, err = check(root, FakeAnalyzers())
+    assert (code, out) == (0, ""), err
+    assert err.splitlines()[-1] == "doc-check: 0 findings in 0 docs (0 references, 0 checked); docs not configured"
+    write(root / ".claude" / "rules" / "api.md", API_RULE.replace("backend/**", "backend/gone/**"))
+    code, out, _ = check(root, FakeAnalyzers())
+    assert code == 1
+    assert out.splitlines()[0] == ".claude/rules/api.md:3: paths glob 'backend/gone/**' matches no git-visible file"
+
+
+def test_nothing_to_check_exits_2(repo: Path) -> None:
+    write(repo / CONFIG_FILE, BACKEND_ONLY_CONFIG.split("[docs]")[0])
+    code, out, err = check(repo, fixture_fakes())
+    assert (code, out) == (2, "")
+    assert err == "doc-check: .stack-intel/config.toml has no [docs] table and there are no agent files to check\n"
+
+
+@pytest.mark.usefixtures("_hermetic_git")
+def test_end_to_end_a_docs_only_checkout_needs_no_toolchain(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    write(root / CONFIG_FILE, DOCS_ONLY_CONFIG)
+    write(root / "docs" / "README.md", "# Docs\n\nSee [the guide](guide.md); the API is `GET /api/x`.\n")
+    write(root / "docs" / "guide.md", "# Guide\n")
+    git(root, "init", "-q")
+    git(root, "add", "-A")
+    code, out, err = run_cli(root)
+    assert (code, out) == (0, ""), err
+    assert "not_configured" in err and "frontend_definitions_unavailable" not in err
+    write(root / "docs" / "guide.md", "# Guide\n\n[gone](gone.md)\n")
+    code, out, _ = run_cli(root)
+    assert code == 1 and out.startswith("docs/guide.md:3: ")
+
+
+def test_an_agents_only_json_report_says_the_docs_were_not_checked(tmp_path: Path) -> None:
+    root = agent_repo(tmp_path / "repo")
+    write(root / CONFIG_FILE, AGENTS_TABLE)
+    code, out, _ = check(root, FakeAnalyzers(), as_json=True)
+    body = json.loads(out)
+    assert code == 0
+    assert [(lim["kind"], lim["file"], lim["message"]) for lim in body["analysis_limitations"]] == [
+        (
+            "not_configured",
+            ".stack-intel/config.toml",
+            "no [docs] table in .stack-intel/config.toml: no docs were checked, only the agent files",
+        )
+    ]
+
+
+def test_a_missing_table_other_than_docs_is_not_taken_for_one(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from stack_intel.analysis_runtime import AnalysisRuntime
+    from stack_intel.config import NotConfigured
+
+    def needs_backend(self: AnalysisRuntime) -> None:
+        raise NotConfigured(("backend",), ".stack-intel/config.toml")
+
+    monkeypatch.setattr(AnalysisRuntime, "get_doc_report", needs_backend)
+    code, out, err = check(repo, fixture_fakes())
+    assert (code, out) == (2, "")
+    assert "internal error: NotConfigured: .stack-intel/config.toml has no [backend] table" in err

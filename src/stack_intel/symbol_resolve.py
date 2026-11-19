@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import ast
 import fnmatch
+import functools
 import json
 import os
 import re
@@ -54,8 +55,8 @@ from stack_intel.code_paths import (
     read_python_source_with_digest,
     split_source_lines,
 )
-from stack_intel.config import Config
-from stack_intel.problems import Problem, diagnostic, partition
+from stack_intel.config import Config, NotConfigured
+from stack_intel.problems import Problem, diagnostic, limitation, partition
 from stack_intel.protocol_match import BaseRef, ClassRec, ClassTable, MemberRec, ProtocolMatch
 from stack_intel.provision import find_toolchain
 from stack_intel.py_sources import module_name_for, resolve_relative
@@ -191,20 +192,27 @@ class SymbolLayout:
 
     ``primary_prefixes`` are repository-relative path prefixes; a file under the
     backend or frontend root but under none of them ranks second. A backend
-    root of ``.`` is the whole repository.
+    root of ``.`` is the whole repository. A root is None when the config has
+    no table for that side: the side has no symbols.
     """
 
-    backend_root: str
-    frontend_root: str
+    backend_root: str | None
+    frontend_root: str | None
     primary_prefixes: tuple[str, ...]
 
     @classmethod
     def from_config(cls, config: Config) -> SymbolLayout:
-        return cls(config.backend.root, config.frontend.root, config.symbols.primary_prefixes)
+        backend, frontend = config.backend, config.frontend
+        return cls(
+            None if backend is None else backend.root,
+            None if frontend is None else frontend.root,
+            config.symbols.primary_prefixes,
+        )
 
     @property
     def secondary_prefixes(self) -> tuple[str, ...]:
-        return tuple("" if root == "." else f"{root}/" for root in (self.frontend_root, self.backend_root))
+        roots = (root for root in (self.frontend_root, self.backend_root) if root is not None)
+        return tuple("" if root == "." else f"{root}/" for root in roots)
 
 
 @dataclass
@@ -677,6 +685,29 @@ def normalize_kind_filter(kind_filter: str | None) -> str | None:
     return kind_filter
 
 
+def configured_side(config: Config, side: str) -> tuple[str, Problem | None]:
+    """The side a ``side`` search covers under ``config``, and the
+    `not_configured` limitation when ``both`` narrowed to the one side
+    configured. Raises `NotConfigured` when no side it names is configured."""
+    if side != "both":
+        config.require(side)
+        return side, None
+    missing = config.missing("backend", "frontend")
+    if not missing:
+        return side, None
+    if len(missing) == 2:
+        raise NotConfigured(missing, config.display)
+    searched, what = ("frontend", "Python") if missing == ("backend",) else ("backend", "TypeScript")
+    note = limitation(
+        "not_configured",
+        stage=STAGE,
+        file=config.display,
+        line=None,
+        message=f"no [{missing[0]}] table in {config.display}: {what} definitions were not searched",
+    )
+    return searched, note
+
+
 # ── Index ────────────────────────────────────────────────────────────────
 
 
@@ -699,12 +730,9 @@ class SymbolIndex:
         self._py: dict[str, _PyEntry] = {}
 
     @property
-    def backend_root(self) -> Path:
-        return self.repo_root / self.layout.backend_root
-
-    @property
-    def frontend_root(self) -> Path:
-        return self.repo_root / self.layout.frontend_root
+    def backend_root(self) -> Path | None:
+        root = self.layout.backend_root
+        return None if root is None else self.repo_root / root
 
     def _visible_files(self) -> frozenset[str]:
         """The files git sees, so ignored build output never ranks. Raises ``RepoFilesError``."""
@@ -746,6 +774,8 @@ class SymbolIndex:
 
     def _python_files(self, problems: list[Problem]) -> list[tuple[SourceFile, _PyEntry]]:
         root = self.backend_root
+        if root is None:
+            return []
         files = iter_source_files(
             root, PY_SUFFIXES, self.repo_root, problems, stage=STAGE, visible=self._visible_files()
         )
@@ -775,7 +805,8 @@ class SymbolIndex:
         function-local class shares it with a module-level one.
         """
         if entry.classes is None:
-            module = module_name_for(source.path, self.backend_root) or source.rel
+            backend_root = self.backend_root
+            module = (module_name_for(source.path, backend_root) if backend_root is not None else None) or source.rel
             is_package = source.path.name == "__init__.py"
             symbols = [symbol for group in entry.by_name.values() for symbol in group]
             classes = sorted(
@@ -873,10 +904,13 @@ class SymbolIndex:
     # TypeScript ------------------------------------------------------------
 
     def _typescript_files(self, problems: list[Problem]) -> list[tuple[SourceFile, tuple[TsDecl, ...]]]:
-        missing_root = frontend_not_found_problem(self.repo_root, self.layout.frontend_root)
+        frontend_root = self.layout.frontend_root
+        if frontend_root is None:
+            return []
+        missing_root = frontend_not_found_problem(self.repo_root, frontend_root)
         if missing_root is not None:
             raise ToolchainUnavailable(missing_root)
-        root = self.frontend_root
+        root = self.repo_root / frontend_root
         files = iter_source_files(
             root,
             TS_SUFFIXES,
@@ -1027,24 +1061,28 @@ def _dump_body(problems: list[Problem], key: str, rows: list[dict]) -> dict:
     return _envelope(problems, counts=dict(sorted(counts.items())), **{key: rows})
 
 
-def _cli_body(args: argparse.Namespace, index: SymbolIndex) -> tuple[dict, list[Problem]]:
+def _cli_body(args: argparse.Namespace, index: SymbolIndex, config: Config) -> tuple[dict, list[Problem]]:
     """The JSON body for the CLI arguments and the problems found building it."""
     problems: list[Problem] = []
     if args.dump_ts:
+        config.require_frontend()
         rows = [
             {"file": rel, **asdict(decl), "is_test": is_test_path(rel)}
             for rel, decl in index.typescript_decls(problems)
         ]
         return _dump_body(problems, "decls", rows), problems
     if args.dump_py:
+        config.require_backend()
         rows = [
             {"file": rel, **asdict(symbol), "is_test": is_test_path(rel)}
             for rel, symbol in index.python_symbols(problems)
         ]
         rows.sort(key=lambda r: (r["file"], r["line"], r["column"], r["name"]))
         return _dump_body(problems, "symbols", rows), problems
-    result = index.resolve(args.name, side=args.side, kind_filter=args.kind, file_hint=args.file_hint)
-    return _envelope(result.problems, candidates=[asdict(c) for c in result.candidates]), result.problems
+    side, note = configured_side(config, args.side)
+    result = index.resolve(args.name, side=side, kind_filter=args.kind, file_hint=args.file_hint)
+    found = [*result.problems, *([note] if note is not None else [])]
+    return _envelope(found, candidates=[asdict(c) for c in result.candidates]), found
 
 
 def _print_text(body: dict, problems: list[Problem], *, dump: bool) -> None:
@@ -1062,10 +1100,14 @@ def _print_text(body: dict, problems: list[Problem], *, dump: bool) -> None:
 
 def run(args: argparse.Namespace, context: Context) -> int:
     repo_root = context.repo_root
-    toolchain = find_toolchain(repo_root)
-    index = SymbolIndex(repo_root, FactsCache(repo_root, lambda: toolchain), SymbolLayout.from_config(context.config))
+    config = context.config
+    toolchain = functools.cache(functools.partial(find_toolchain, repo_root))
+    index = SymbolIndex(repo_root, FactsCache(repo_root, toolchain), SymbolLayout.from_config(config))
     try:
-        body, problems = _cli_body(args, index)
+        body, problems = _cli_body(args, index, config)
+    except NotConfigured as exc:
+        print(f"stack-intel: {exc.describe('dump symbols')}", file=sys.stderr)
+        return 2
     except ToolchainUnavailable as exc:
         print(f"stack-intel: frontend toolchain unavailable: {exc}", file=sys.stderr)
         return 2

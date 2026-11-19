@@ -12,8 +12,7 @@ Checks:
   resolves there; for a route installed code defines it holds the
   ``include_router`` call that mounts it;
 - the library capture file equals what ``stack-intel capture`` records now (it
-  starts the app, like ``capture`` and ``runtime-check``; skipped without
-  ``[backend.capture]``);
+  starts the app, like ``capture`` and ``runtime-check``);
 - the dependency map and the routes scan list the same routes;
 - the JSX elements and TypeScript declarations equal the AST oracles
   (``oracles/jsx_oracle.cjs``, ``oracles/decl_oracle.cjs``);
@@ -25,11 +24,14 @@ Checks:
   live route, the symbol index agrees with the code words, and the lookups
   agree with the report.
 
+A check whose config tables are missing (``Check.needs``) is skipped, never
+run against an empty side, so none passes vacuously.
+
 Output is one line per check; a failing check lists up to 20 offending rows.
 
 Exit codes: 0 every check passed or was skipped, 1 a check failed, 2 a check
 could not run (an old interpreter, a missing frontend toolchain, an analyzer
-error) and none failed.
+error) and none failed, or every check was skipped.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ from urllib.parse import quote
 
 from stack_intel import code_paths, problems
 from stack_intel.analysis_runtime import AnalysisFailed, AnalysisRuntime, FrontendFailed, InvalidRoot
-from stack_intel.config import Config, ConfigFile
+from stack_intel.config import Config, ConfigFile, NotConfigured, table_names
 from stack_intel.oracles import compare_facts
 from stack_intel.ts_bridge import HelperError, Toolchain, ToolchainUnavailable, incomplete_toolchain_problem
 
@@ -403,7 +405,7 @@ class Subject:
 
     @cached_property
     def backend_dir(self) -> Path:
-        return self.repo_root / self.config.backend.root
+        return self.repo_root / self.config.require_backend().root
 
     @cached_property
     def visible(self) -> frozenset[str]:
@@ -436,8 +438,6 @@ class Subject:
 
     @cached_property
     def report(self) -> Any:
-        if self.config.docs is None:
-            raise CannotRun("the config has no [docs] table")
         return self.runtime.get_doc_report().report
 
     def read_line(self, rel: str, line: int) -> str:
@@ -504,9 +504,8 @@ def check_matched_backends_are_live(s: Subject) -> Verdict:
 def check_library_capture(s: Subject) -> Verdict:
     from stack_intel import capture, runner
 
-    backend = s.config.backend
-    configured = backend.capture
-    assert configured is not None  # run_check skips the check without the table
+    backend = s.config.require_backend()
+    configured = s.config.require_capture()
     try:
         python = runner.interpreter(None, configured, s.repo_root)
     except runner.OracleRunError as exc:
@@ -552,7 +551,7 @@ def check_jsx_oracle(s: Subject) -> Verdict:
     from stack_intel import jsx_usage
 
     toolchain = s.toolchain
-    frontend_root = s.config.frontend.root
+    frontend_root = s.config.require_frontend().root
     found: list[problems.Problem] = []
     facts = s.runtime.facts_cache()
     try:
@@ -599,7 +598,7 @@ def check_jsx_oracle(s: Subject) -> Verdict:
 
 def check_declaration_oracle(s: Subject) -> Verdict:
     toolchain = s.toolchain
-    frontend_root = s.config.frontend.root
+    frontend_root = s.config.require_frontend().root
     found: list[problems.Problem] = []
     try:
         decls = s.runtime.symbol_index().typescript_decls(found)
@@ -719,37 +718,43 @@ def check_docs_lookups(s: Subject) -> Verdict:
 class Check:
     name: str
     run: Callable[[Subject], Verdict]
-    needs_docs: bool = False
-    needs_capture: bool = False
+    needs: tuple[str, ...] = ()  # config tables, `backend.capture` included
 
+
+BACKEND = ("backend",)
+BOTH_SIDES = ("backend", "frontend")
+FRONTEND = ("frontend",)
+DOCS = ("docs",)
+# The two docs checks that compare the report with the backend analysis.
+DOCS_AND_BACKEND = ("docs", "backend")
 
 CHECKS: tuple[Check, ...] = (
-    Check("backend-content", check_backend_content),
-    Check("handler-locations", check_handler_locations),
-    Check("python-index", check_python_index),
-    Check("routes-content", check_routes_content),
-    Check("di-matches-routes", check_di_matches_routes),
-    Check("call-sites", check_call_sites),
-    Check("matched-backends-are-live", check_matched_backends_are_live),
-    Check("library-capture", check_library_capture, needs_capture=True),
-    Check("jsx-oracle", check_jsx_oracle),
-    Check("declaration-oracle", check_declaration_oracle),
-    Check("docs-content", check_docs_content, needs_docs=True),
-    Check("docs-reference-lines", check_docs_reference_lines, needs_docs=True),
-    Check("docs-failure-messages", check_docs_failure_messages, needs_docs=True),
-    Check("docs-routes-are-live", check_docs_routes_are_live, needs_docs=True),
-    Check("docs-code-words", check_docs_code_words, needs_docs=True),
-    Check("docs-lookups", check_docs_lookups, needs_docs=True),
+    Check("backend-content", check_backend_content, BACKEND),
+    Check("handler-locations", check_handler_locations, BACKEND),
+    Check("python-index", check_python_index, BACKEND),
+    Check("routes-content", check_routes_content, BOTH_SIDES),
+    Check("di-matches-routes", check_di_matches_routes, BOTH_SIDES),
+    Check("call-sites", check_call_sites, BOTH_SIDES),
+    Check("matched-backends-are-live", check_matched_backends_are_live, BOTH_SIDES),
+    Check("library-capture", check_library_capture, ("backend.capture",)),
+    Check("jsx-oracle", check_jsx_oracle, FRONTEND),
+    Check("declaration-oracle", check_declaration_oracle, FRONTEND),
+    Check("docs-content", check_docs_content, DOCS),
+    Check("docs-reference-lines", check_docs_reference_lines, DOCS),
+    Check("docs-failure-messages", check_docs_failure_messages, DOCS),
+    Check("docs-routes-are-live", check_docs_routes_are_live, DOCS_AND_BACKEND),
+    Check("docs-code-words", check_docs_code_words, DOCS_AND_BACKEND),
+    Check("docs-lookups", check_docs_lookups, DOCS),
 )
 
 
 def run_check(check: Check, subject: Subject) -> Outcome:
     try:
-        if check.needs_docs and subject.config.docs is None:
-            return Outcome(check.name, "skipped", "the config has no [docs] table")
-        if check.needs_capture and subject.config.backend.capture is None:
-            return Outcome(check.name, "skipped", "the config has no [backend.capture] table")
+        if missing := subject.config.missing(*check.needs):
+            return Outcome(check.name, "skipped", f"the config has no {table_names(missing, 'or')} table")
         verdict = check.run(subject)
+    except NotConfigured as exc:
+        return Outcome(check.name, "skipped", f"the config has no {table_names(exc.tables, 'or')} table")
     except CannotRun as exc:
         return Outcome(check.name, "error", str(exc))
     except FrontendFailed as exc:
@@ -768,7 +773,7 @@ def verify(runtime: AnalysisRuntime, checks: Sequence[Check] = CHECKS) -> list[O
 
 def exit_code(outcomes: Iterable[Outcome]) -> int:
     statuses = {o.status for o in outcomes}
-    return 1 if "fail" in statuses else 2 if "error" in statuses else 0
+    return 1 if "fail" in statuses else 2 if "error" in statuses or statuses == {"skipped"} else 0
 
 
 def render(outcomes: Sequence[Outcome]) -> str:
@@ -808,4 +813,6 @@ def run(args: argparse.Namespace, context: Context) -> int:
         return 2
     outcomes = verify(runtime, [known[name] for name in args.only] or CHECKS)
     print(render(outcomes))
+    if outcomes and all(outcome.status == "skipped" for outcome in outcomes):
+        print("verify: no check applies to this config", file=sys.stderr)
     return exit_code(outcomes)

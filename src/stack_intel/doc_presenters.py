@@ -92,7 +92,7 @@ def _definition_line(result: doc_queries.DocRefs, row: Mapping[str, Any]) -> str
 def _doc_refs_definitions(result: doc_queries.DocRefs) -> list[str]:
     rows = result.definitions
     if rows is None:
-        return []
+        return [] if result.not_analyzed is None else [result.not_analyzed, ""]
     if not rows.total:
         if result.kind == "route":
             return [f"No live route matches {result.query_text}.", ""]

@@ -657,7 +657,12 @@ class RouteResolver:
     route limitations when there are any). ``declared_roots`` are the roots
     the route-checked docs name with an un-gated ``METHOD /path``
     (``declared_root``): they pass the bare-path gate with the context's own,
-    so a root keeps being checked after its last live route is deleted."""
+    so a root keeps being checked after its last live route is deleted.
+
+    Without ``[backend]`` (``DocRefsConfig.backend_configured``) the routes
+    are unknown, so only a page match resolves; every other verdict, failing
+    or not, would be a guess about a backend that lives elsewhere and becomes
+    ``not_checked``."""
 
     def __init__(self, ctx: ResolutionContext, hint: str = "", declared_roots: frozenset[str] = frozenset()) -> None:
         self.ctx = ctx
@@ -683,8 +688,13 @@ class RouteResolver:
         if (bare or mention.gated) and (tail is not None or self._root(mention.path) not in self.gate_roots):
             return draft.set("skipped", "not under a backend or frontend route root", checked=False)
         if tail is not None:
-            return self.match_tail(draft, mention.method, tail)
-        return self.match(draft, mention.method, mention.path)
+            draft = self.match_tail(draft, mention.method, tail)
+        else:
+            draft = self.match(draft, mention.method, mention.path)
+        if not self.ctx.config.backend_configured and draft.status != "frontend":
+            draft.target, draft.defined_in = None, ()
+            return draft.set("not_checked", "no [backend] table", checked=False)
+        return draft
 
     @staticmethod
     def declared_root(mention: RouteMention, *, bare: bool, prefixes: Sequence[str]) -> str | None:

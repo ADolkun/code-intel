@@ -4,7 +4,8 @@ One section per analyzer, each rendered on its own: a section that fails
 prints a ``Failed`` row naming the analyzer and the error in its place, so the
 other sections are kept (and the exit code is 1). A section that cannot run
 for a missing frontend toolchain prints an ``Unavailable`` row with its fix,
-and one that does not apply to the config prints ``Skipped``.
+and one that does not apply to the config (its table is missing, or the
+interpreter is older than the backend's) prints ``Skipped``.
 
 The output is meant for a job summary::
 
@@ -21,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from stack_intel import code_paths, problems, queries
 from stack_intel.analysis_runtime import AnalysisFailed, AnalysisRuntime, FrontendFailed
-from stack_intel.config import ConfigFile
+from stack_intel.config import ConfigFile, NotConfigured, table_names
 from stack_intel.ts_bridge import HelperError, ToolchainUnavailable, incomplete_toolchain_problem
 
 if TYPE_CHECKING:
@@ -143,7 +144,7 @@ def frontend_facts_section(runtime: AnalysisRuntime) -> Rows:
     if not toolchain.available:
         raise ToolchainUnavailable(incomplete_toolchain_problem(toolchain))
     repo_root = runtime.repo_root
-    frontend_root = runtime.config("summary").frontend.root
+    frontend_root = runtime.config("summary").require_frontend().root
     walk: list[problems.Problem] = []
     files = code_paths.iter_source_files(
         repo_root / frontend_root,
@@ -190,8 +191,6 @@ def python_symbols_section(runtime: AnalysisRuntime) -> Rows:
 def docs_section(runtime: AnalysisRuntime) -> Rows:
     from stack_intel import doc_queries
 
-    if runtime.config("summary").docs is None:
-        raise Skipped("the config has no [docs] table")
     started = time.perf_counter()
     report = runtime.get_doc_report().report
     result = doc_queries.doc_check(report, runtime.get_agent_findings())
@@ -216,6 +215,19 @@ SECTIONS: tuple[tuple[str, str, Callable[[AnalysisRuntime], Rows], bool], ...] =
     ("Docs", "doc_refs", docs_section, True),
 )
 
+# The config tables each section's analyzer reads; a section without them is skipped.
+SECTION_TABLES: Mapping[str, tuple[str, ...]] = {
+    "di_map": ("backend",),
+    "route_map": ("backend", "frontend"),
+    "ts_facts": ("frontend",),
+    "symbol_resolve": ("backend",),
+    "doc_refs": ("docs",),
+}
+
+
+def _skipped(missing: tuple[str, ...]) -> Rows:
+    return [("Skipped", f"the config has no {table_names(missing, 'or')} table")]
+
 
 def render(title: str, rows: Rows) -> str:
     lines = [f"### {title}", "", "| Metric | Value |", "| --- | --- |"]
@@ -228,6 +240,8 @@ def section_rows(runtime: AnalysisRuntime, analyzer: str, section: Callable[[Ana
         return section(runtime)
     except Skipped as exc:
         return [("Skipped", str(exc))]
+    except NotConfigured as exc:
+        return _skipped(exc.tables)
     except AnalysisFailed as exc:
         return [("Failed", exc.message.splitlines()[0])]
     except ToolchainUnavailable as exc:
@@ -244,11 +258,14 @@ def section_rows(runtime: AnalysisRuntime, analyzer: str, section: Callable[[Ana
 def summarize(runtime: AnalysisRuntime) -> tuple[str, bool]:
     """The Markdown and whether every section rendered without a ``Failed`` row."""
     running, required = runtime.runtime_versions()
+    config = runtime.config("summary")
     parts = ["## Stack-intel analysis\n"]
     failed = False
     for title, analyzer, section, needs_backend_floor in SECTIONS:
-        if needs_backend_floor and not runtime.runtime_compatible():
-            rows: Rows = [("Skipped", f"Python {running} is older than the backend's {required}")]
+        if missing := config.missing(*SECTION_TABLES[analyzer]):
+            rows: Rows = _skipped(missing)
+        elif needs_backend_floor and not runtime.runtime_compatible():
+            rows = [("Skipped", f"Python {running} is older than the backend's {required}")]
         else:
             rows = section_rows(runtime, analyzer, section)
         failed = failed or any(name == "Failed" for name, _ in rows)
