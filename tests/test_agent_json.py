@@ -81,6 +81,11 @@ def test_a_valid_mcp_json_has_no_findings(tmp_path: Path) -> None:
     assert lines(tmp_path) == []
 
 
+NO_SERVERS = (
+    ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object; Claude Code finds no servers in it"
+)
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
@@ -92,12 +97,11 @@ def test_a_valid_mcp_json_has_no_findings(tmp_path: Path) -> None:
             '{\n  "mcpServers": {\n    "a": {"command": "x"},\n  }\n}\n',
             ".mcp.json:3: invalid JSON: Illegal trailing comma before end of object; Claude Code cannot read the file",
         ),
-        ("[]", ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
-        ("{}", ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
-        ('{"mcpServers": []}', ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
-        ('{"servers": {}}', ".mcp.json:1: the file must be a JSON object with an 'mcpServers' object"),
+        ("[]", NO_SERVERS),
+        ('{"mcpServers": []}', NO_SERVERS),
+        ('{"servers": {}}', NO_SERVERS),
     ],
-    ids=["unclosed", "trailing-comma", "array", "no-servers-key", "servers-not-an-object", "vscode-key"],
+    ids=["unclosed", "trailing-comma", "array", "servers-not-an-object", "vscode-key"],
 )
 def test_an_mcp_json_that_is_not_an_object_with_servers_is_reported(tmp_path: Path, text: str, expected: str) -> None:
     write(tmp_path / ".mcp.json", text)
@@ -215,10 +219,6 @@ def test_a_valid_vscode_mcp_json_has_no_findings(tmp_path: Path) -> None:
         ('{\n  "mcpServers": {}\n}', ".vscode/mcp.json:2: VS Code reads servers from 'servers', not 'mcpServers'"),
         ('{\n  "servers": []\n}', ".vscode/mcp.json:2: 'servers' must be an object"),
         (
-            '{\n  "servers": {\n    "a": {"command": "x"}\n  }\n}',
-            ".vscode/mcp.json:3: MCP server 'a' has no type; VS Code requires one",
-        ),
-        (
             '{\n  "servers": {\n    "a": {"type": "stdio", "command": "x", "env": {"T": "${input:token}"}}\n  }\n}',
             ".vscode/mcp.json:3: MCP server 'a' uses ${input:token} but 'inputs' has no entry with id 'token'",
         ),
@@ -235,7 +235,6 @@ def test_a_valid_vscode_mcp_json_has_no_findings(tmp_path: Path) -> None:
     ids=[
         "mcp-servers-key",
         "servers-not-an-object",
-        "no-type",
         "undeclared-input",
         "http-without-url",
         "array",
@@ -249,6 +248,41 @@ def test_a_broken_vscode_mcp_json_is_reported(tmp_path: Path, text: str, expecte
 
 def test_a_vscode_file_without_servers_is_not_reported(tmp_path: Path) -> None:
     write(tmp_path / ".vscode/mcp.json", '{"inputs": []}')
+    assert lines(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['{"servers": {"a": {"command": "x"}, "b": {"url": "https://example.com/mcp"}}}'],
+)
+def test_vscode_infers_a_missing_type(tmp_path: Path, text: str) -> None:
+    write(tmp_path / ".vscode/mcp.json", text)
+    assert lines(tmp_path) == []
+
+
+@pytest.mark.parametrize("rel", [".mcp.json", ".vscode/mcp.json", ".github/mcp.json"])
+@pytest.mark.parametrize("text", ["", "  \n\t\n"])
+def test_a_blank_mcp_file_is_not_reported(tmp_path: Path, rel: str, text: str) -> None:
+    write(tmp_path / rel, text)
+    assert lines(tmp_path) == []
+
+
+def test_an_mcp_json_with_no_keys_is_not_reported(tmp_path: Path) -> None:
+    write(tmp_path / ".mcp.json", "{}")
+    assert lines(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("rel", "text"),
+    [
+        (".github/hooks/h.json", '{"version": ' + "9" * 5001 + ', "hooks": {}}'),
+        (".mcp.json", '{"mcpServers": {"a": {"command": "x", "args": ' + "[" * 100_000 + "]" * 100_000 + "}}}"),
+        (".vscode/mcp.json", "[" * 100_000 + "]" * 100_000),
+    ],
+    ids=["huge-integer", "deep-args", "deep-vscode"],
+)
+def test_json_the_parser_cannot_hold_is_skipped_without_a_crash(tmp_path: Path, rel: str, text: str) -> None:
+    write(tmp_path / rel, text)
     assert lines(tmp_path) == []
 
 

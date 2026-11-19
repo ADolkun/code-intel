@@ -2,11 +2,13 @@
 
 Files: every git-visible ``CLAUDE.md`` and ``AGENTS.md``, ``.claude/CLAUDE.md``
 and ``.github/copilot-instructions.md``. Tokens come from Markdown text only
-(code spans and fences are skipped by both tools): ``@`` at the start of a
-text run or after whitespace or ``(``, then a path whose last segment ends in
-``.md``, or that starts with ``./`` or ``../`` and ends in a name character.
-Quoted, absolute and ``~`` paths and every other ``@word`` (``@types/node``,
-mentions) are not imports this check can prove.
+(code spans, fences and table cells are not scanned): ``@`` at the start of a
+text run or after whitespace, not escaped as ``\@``, then a path whose last
+segment ends in ``.md``, or that starts with ``./`` or ``../`` and names a
+Markdown or text file or has no extension. A ``#fragment`` is dropped.
+Quoted, absolute and ``~`` paths, other extensions (Claude Code skips
+non-text files) and every other ``@word`` (``@types/node``, mentions) are
+not imports this check can prove.
 
 A target resolves when it is a git-visible file or directory relative to the
 importing file (Claude Code) or to the repository root (Copilot's base is
@@ -30,8 +32,9 @@ from stack_intel.repo_files import RepoFiles
 
 _FIXED_FILES = (".claude/CLAUDE.md", ".github/copilot-instructions.md")
 _ANY_DEPTH = ("CLAUDE.md", "AGENTS.md")
-_TOKEN = re.compile(r"(?:^|(?<=[\s(]))@((?:\\ |\S)+)")
+_TOKEN = re.compile(r"(?:^|(?<=\s))@((?:\\ |\S)+)")
 _NAME_END = re.compile(r"[\w/-]$")
+_TEXT_SUFFIXES = frozenset({"", ".md", ".mdx", ".markdown", ".txt"})
 
 
 def import_files(visible: Collection[str]) -> list[str]:
@@ -41,12 +44,13 @@ def import_files(visible: Collection[str]) -> list[str]:
 def import_path(token: str) -> str | None:
     """The path ``token`` (the text after ``@``) imports, or None when it is not
     an import this check can prove."""
-    path = token.replace("\\ ", " ")
-    if path[:1] in ('"', "'", "/", "~"):
+    path = token.replace("\\ ", " ").partition("#")[0]
+    if path[:1] in ('"', "'", "/", "~") or not path:
         return None
     if posixpath.basename(path).lower().endswith(".md"):
         return path
-    if path.startswith(("./", "../")) and _NAME_END.search(path):
+    suffix = posixpath.splitext(posixpath.basename(path))[1].lower()
+    if path.startswith(("./", "../")) and _NAME_END.search(path) and suffix in _TEXT_SUFFIXES:
         return path
     return None
 
@@ -73,10 +77,14 @@ def _imports(rel: str, text: str) -> list[_Import]:
     if facts is None:
         return []
     found = []
+    source_lines = text.splitlines()
     for run in facts.text_runs:
+        if run.context == "table":
+            continue
+        raw = source_lines[run.line - 1] if run.line <= len(source_lines) else ""
         for match in _TOKEN.finditer(run.text):
             path = import_path(match.group(1))
-            if path is None:
+            if path is None or "\\@" + match.group(1) in raw:
                 continue
             candidates = _candidates(rel, path)
             if candidates:

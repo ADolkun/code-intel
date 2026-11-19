@@ -1,21 +1,22 @@
-"""Whether an agent file's glob matches a git-visible file, as its readers match it.
+"""Whether an agent file's glob matches a git-visible path under any reading.
 
-Claude Code (``paths`` in ``.claude/rules``): relative to the repository root,
-a leading ``/`` anchors, a pattern with no other ``/`` matches at any depth,
-``*`` stays within a segment, ``**`` crosses segments, ``?`` is one character,
-``{a,b}`` expands and ``[...]`` is a character class; a ``[`` with no closing
-``]``, or a class the matcher cannot compile (``[z-a]``), makes the pattern
-invalid.
+"Matches no git-visible file" is a claim about every reader, so a glob is
+tried under the most lenient matching a known reader uses:
 
-Copilot (``applyTo``): relative to the repository root, ``*``, ``**`` and
-``?`` as above, and a string is split on commas.
+- case-insensitive (Claude Code and VS Code);
+- ``**/`` prepended unless the pattern starts with ``/`` or ``**/`` (VS Code;
+  for Claude Code a pattern without ``/`` matches at any depth, which this
+  covers);
+- a trailing ``/**`` also matches the directory itself (Claude Code strips it);
+- ``./`` stripped, brace options trimmed (``{ js, ts }``);
+- ``[...]`` tried both as a class and literally (Next.js ``[id]`` directories);
+- dot files match.
 
-A glob matches no file only when it matches no file or directory under every
-reading its readers may use: ``[`` is tried both as a class and as a literal
-(Next.js ``[id]`` directories), and dot files match. Constructs whose reading
-is not modelled (negation, extglobs, escapes, POSIX classes, brace ranges, and
-braces or brackets in a comma-split string) are ``unmodelled``: their
-existence check is skipped.
+Constructs whose reading is not modelled are ``unmodelled`` and skip the
+check: negation, extglobs, backslash escapes, POSIX classes, brace ranges, a
+comma inside braces or brackets of a comma-split value, and globs past the
+work bound (long patterns, many wildcards), so the regex never backtracks
+for long.
 """
 
 from __future__ import annotations
@@ -25,11 +26,15 @@ import re
 from collections.abc import Collection
 from typing import Literal
 
-Verdict = Literal["matches", "no_match", "invalid", "unmodelled"]
+Verdict = Literal["matches", "no_match", "unmodelled"]
 
 _BRACES = re.compile(r"\{([^{}]*)\}")
 _EXTGLOB = re.compile(r"[@!+*?]\(")
-_MAX_EXPANSIONS = 1000
+_REPEATED_GLOBSTAR = re.compile(r"(?:\*\*/)+")
+_MAX_EXPANSIONS = 64
+_MAX_LENGTH = 256
+_MAX_GLOBSTARS = 4
+_MAX_STARS_PER_SEGMENT = 4
 
 
 def split_globs(value: str) -> list[str]:
@@ -50,34 +55,53 @@ def split_globs(value: str) -> list[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
-def _unmodelled(glob: str, *, split: bool) -> bool:
+GlobGroup = tuple[str, tuple[tuple[str, bool], ...]]
+
+
+def _split(value: str) -> tuple[tuple[str, bool], ...]:
+    """``(glob, unmodelled)`` per comma-split piece; a piece holding a comma
+    of a split that braces or brackets prevented is unmodelled, since how a
+    reader splits it is unknown."""
+    globs = split_globs(value)
+    nested_comma = len(globs) < len([part for part in value.split(",") if part.strip()])
+    return tuple((glob, nested_comma and "," in glob) for glob in globs)
+
+
+def _strings(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [text for item in value for text in _strings(item)]
+    return [value] if isinstance(value, str) else []
+
+
+def glob_groups(value: object) -> list[GlobGroup]:
+    """A ``paths`` or ``applyTo`` value as ``(text, pieces)`` groups, each
+    reported as one glob. A string value is comma-split into a group per
+    glob, as the readers document. In a list (flattened recursively,
+    non-strings dropped) each string is one group, comma-split only as the
+    most lenient reading, so it matches when any piece does."""
+    if isinstance(value, str):
+        return [(glob, ((glob, unmodelled),)) for glob, unmodelled in _split(value)]
+    return [(text.strip(), pieces) for text in _strings(value) if (pieces := _split(text))]
+
+
+def _unmodelled(glob: str) -> bool:
+    collapsed = _REPEATED_GLOBSTAR.sub("**/", glob)
     return (
         glob.startswith("!")
         or "\\" in glob
         or _EXTGLOB.search(glob) is not None
         or "[[:" in glob
         or any(".." in match.group(1) for match in _BRACES.finditer(glob))
-        or (split and ("{" in glob or "[" in glob))
+        or len(glob) > _MAX_LENGTH
+        or collapsed.count("**") > _MAX_GLOBSTARS
+        or any(segment.count("*") > _MAX_STARS_PER_SEGMENT for segment in collapsed.split("/") if segment != "**")
     )
 
 
-def has_unclosed_bracket(glob: str) -> bool:
-    """An unescaped ``[`` that no ``]`` closes (a ``]`` right after ``[`` or
-    ``[!`` is a member)."""
-    i = 0
-    while i < len(glob):
-        if glob[i] == "\\":
-            i += 2
-            continue
-        if glob[i] == "[" and _class_end(glob, i) is None:
-            return True
-        i += 1
-    return False
-
-
 def _expand_braces(pattern: str) -> list[str] | None:
-    """``a/*.{ts,tsx}`` as ``a/*.ts`` and ``a/*.tsx``, innermost braces first;
-    a single-option brace is kept literally too. None past the budget."""
+    """``a/*.{ts, tsx}`` as ``a/*.ts`` and ``a/*.tsx`` (options trimmed),
+    innermost braces first; a single-option brace is kept literally too.
+    None past the budget."""
     out: list[str] = []
     pending = [pattern]
     while pending:
@@ -87,13 +111,23 @@ def _expand_braces(pattern: str) -> list[str] | None:
             out.append(current)
         else:
             head, tail = current[: match.start()], current[match.end() :]
-            options = match.group(1).split(",")
+            options = [option.strip() for option in match.group(1).split(",")]
             if len(options) == 1:
-                pending.append(head + "\0" + options[0] + "\1" + tail)
+                pending.append(head + "\0" + match.group(1) + "\1" + tail)
             pending.extend(head + option + tail for option in options)
         if len(out) + len(pending) > _MAX_EXPANSIONS:
             return None
     return [p.replace("\0", "{").replace("\1", "}") for p in out]
+
+
+def _class_end(pattern: str, start: int) -> int | None:
+    i = start + 1
+    if i < len(pattern) and pattern[i] in "!^":
+        i += 1
+    if i < len(pattern) and pattern[i] == "]":
+        i += 1
+    end = pattern.find("]", i)
+    return None if end < 0 else end
 
 
 def _class_members(body: str) -> str:
@@ -128,64 +162,42 @@ def _regex(pattern: str, classes: bool) -> re.Pattern[str]:
         else:
             out.append(re.escape(pattern[i]))
             i += 1
-    return re.compile("".join(out))
+    return re.compile("".join(out), re.IGNORECASE)
 
 
-def _class_end(pattern: str, start: int) -> int | None:
-    i = start + 1
-    if i < len(pattern) and pattern[i] in "!^":
-        i += 1
-    if i < len(pattern) and pattern[i] == "]":
-        i += 1
-    end = pattern.find("]", i)
-    return None if end < 0 else end
+def _readings(alternative: str) -> list[str]:
+    bare = _REPEATED_GLOBSTAR.sub("**/", alternative.strip())
+    while bare.startswith("./"):
+        bare = bare[2:]
+    if bare.startswith("/"):
+        forms = [bare.lstrip("/")]
+    else:
+        forms = [bare] if bare.startswith("**/") else [bare, "**/" + bare]
+    out: list[str] = []
+    for form in forms:
+        out.append(form)
+        if form.endswith("/**"):
+            out.append(form[:-3])
+        elif form.endswith("/"):
+            out += [form + "**", form.rstrip("/")]
+    return [form for form in out if form]
 
 
-def _any_match(alternatives: list[str], paths: Collection[str]) -> bool:
-    regexes = [_regex(alt, classes) for alt in alternatives for classes in (True, False)]
-    return any(regex.fullmatch(rel) is not None for rel in paths for regex in regexes)
-
-
-def _claude_form(alternative: str) -> str:
-    if alternative.startswith("/"):
-        return alternative.lstrip("/")
-    alternative = alternative.removeprefix("./")
-    return alternative if "/" in alternative.rstrip("/") else "**/" + alternative
-
-
-def claude_glob(glob: str, paths: Collection[str], *, split: bool = False) -> Verdict:
-    """``glob`` from a ``.claude/rules`` ``paths`` value against the git-visible
-    files and directories; ``split`` when it came from a comma-separated string."""
-    if _unmodelled(glob, split=split):
-        return "unmodelled"
-    if has_unclosed_bracket(glob):
-        return "invalid"
-    expanded = _expand_braces(glob)
-    if expanded is None:
-        return "unmodelled"
-    alternatives = [_claude_form(alt) + ("**" if alt.endswith("/") else "") for alt in expanded]
-    try:
-        return "matches" if _any_match(alternatives, paths) else "no_match"
-    except re.error:
-        return "invalid"
-
-
-def copilot_glob(glob: str, paths: Collection[str], *, split: bool = False) -> Verdict:
-    """``glob`` from an ``applyTo`` value against the git-visible files and
-    directories; ``split`` when it came from a string."""
-    if _unmodelled(glob, split=split):
+def glob_verdict(glob: str, paths: Collection[str]) -> Verdict:
+    """``glob`` against the git-visible files and directories, under every reading."""
+    if _unmodelled(glob):
         return "unmodelled"
     expanded = _expand_braces(glob)
     if expanded is None:
         return "unmodelled"
-    alternatives: list[str] = []
-    for alt in expanded:
-        bare = alt.removeprefix("./").lstrip("/")
-        alternatives.append(bare + ("**" if bare.endswith("/") else ""))
-    try:
-        return "matches" if _any_match(alternatives, paths) else "no_match"
-    except re.error:
-        return "unmodelled"
+    regexes: list[re.Pattern[str]] = []
+    for form in dict.fromkeys(reading for alternative in expanded for reading in _readings(alternative)):
+        for classes in (True, False):
+            try:
+                regexes.append(_regex(form, classes))
+            except re.error:
+                continue
+    return "matches" if any(regex.fullmatch(rel) for rel in paths for regex in regexes) else "no_match"
 
 
 _GLOB_CHARS = re.compile(r"[*?\[{\\!]")

@@ -2,12 +2,13 @@
 
 - ``.mcp.json`` (Claude Code, Copilot CLI): an object with an ``mcpServers`` object.
 - ``.github/mcp.json`` (Copilot CLI): ``mcpServers``, or a bare map of servers.
-- ``.vscode/mcp.json`` (VS Code, JSONC): a ``servers`` object, every server
-  with a ``type``, every ``${input:ID}`` declared in ``inputs``.
+- ``.vscode/mcp.json`` (VS Code, JSONC): a ``servers`` object, every
+  ``${input:ID}`` declared in ``inputs``; a server without ``type`` is
+  local with a ``command``, remote otherwise.
 - ``.github/hooks/*.json`` (Copilot CLI and cloud): ``version`` 1 and a
   ``hooks`` object of arrays; Copilot rejects the whole file otherwise.
 
-Every server is an object; a typeless or ``stdio``/``local`` one needs a
+A blank MCP file means no servers. Every server is an object; a typeless or ``stdio``/``local`` one needs a
 ``command``, a typeless one with only a ``url`` is read as stdio and skipped,
 a remote one needs a ``url``; ``args`` is a list of strings and ``env`` and
 ``headers`` are objects (VS Code also takes numbers and null as values). An
@@ -143,13 +144,23 @@ class _Source:
         return self.lines.get(path, 1)
 
 
-def _load(rel: str, text: str, findings: list[Finding], *, jsonc: bool, reader: str) -> tuple[object, _Source] | None:
+def _load(
+    rel: str, text: str, findings: list[Finding], *, jsonc: bool, reader: str, blank_ok: bool = False
+) -> tuple[object, _Source] | None:
+    """The parsed file, or None. ``blank_ok``: a blank file means no servers
+    (Claude Code, VS Code). JSON that Python cannot hold (an integer past its
+    digit limit, nesting past its recursion limit) is valid for the readers,
+    so it is not checked rather than reported."""
+    if blank_ok and not text.strip():
+        return None
     parsed = strip_jsonc(text) if jsonc else text
     try:
         return json.loads(parsed), _Source(rel, _key_lines(parsed))
     except json.JSONDecodeError as exc:
         findings.append(finding(rel, exc.lineno, rel, f"invalid JSON: {exc.msg}; {reader} cannot read the file"))
-        return None
+    except ValueError, RecursionError:
+        pass
+    return None
 
 
 def _is_string_list(value: object) -> bool:
@@ -160,7 +171,7 @@ def _check_server(
     source: _Source, name: str, server: object, line: int, findings: list[Finding], *, typeless_url: str | None
 ) -> None:
     """``typeless_url``: why a typeless server with only a ``url`` is skipped,
-    or None where a missing ``type`` is reported on its own."""
+    or None for VS Code, which takes a typeless server with a ``url`` as remote."""
     rel = source.rel
 
     def report(message: str) -> None:
@@ -171,9 +182,11 @@ def _check_server(
         return
     kind = server.get("type")
     if "type" not in server:
-        if "url" in server and is_blank(server.get("command")):
-            if typeless_url is not None:
-                report(f'has a url but no type; {typeless_url} (add "type": "http")')
+        if typeless_url is None:
+            if is_blank(server.get("command")) and is_blank(server.get("url")):
+                report("needs a non-blank string 'command' or 'url'")
+        elif "url" in server and is_blank(server.get("command")):
+            report(f'has a url but no type; {typeless_url} (add "type": "http")')
         elif is_blank(server.get("command")):
             report("needs a non-blank string 'command'")
     elif kind in _LOCAL_TYPES:
@@ -197,22 +210,23 @@ def _check_servers(
 
 
 def check_claude_mcp(text: str, findings: list[Finding]) -> None:
-    loaded = _load(CLAUDE_MCP, text, findings, jsonc=False, reader="Claude Code")
+    loaded = _load(CLAUDE_MCP, text, findings, jsonc=False, reader="Claude Code", blank_ok=True)
     if loaded is None:
         return
     data, source = loaded
+    if data == {}:
+        return
     servers = data.get("mcpServers") if isinstance(data, dict) else None
     if not isinstance(servers, dict):
-        findings.append(
-            finding(CLAUDE_MCP, 1, "mcpServers", "the file must be a JSON object with an 'mcpServers' object")
-        )
+        message = "the file must be a JSON object with an 'mcpServers' object; Claude Code finds no servers in it"
+        findings.append(finding(CLAUDE_MCP, source.line("mcpServers"), "mcpServers", message))
         return
     reason = "Claude Code reads it as a stdio server and skips it"
     _check_servers(source, servers, "mcpServers", findings, reason)
 
 
 def check_copilot_mcp(text: str, findings: list[Finding]) -> None:
-    loaded = _load(COPILOT_MCP, text, findings, jsonc=False, reader="Copilot CLI")
+    loaded = _load(COPILOT_MCP, text, findings, jsonc=False, reader="Copilot CLI", blank_ok=True)
     if loaded is None:
         return
     data, source = loaded
@@ -239,7 +253,7 @@ def _input_refs(value: object) -> list[str]:
 
 
 def check_vscode_mcp(text: str, findings: list[Finding]) -> None:
-    loaded = _load(VSCODE_MCP, text, findings, jsonc=True, reader="VS Code")
+    loaded = _load(VSCODE_MCP, text, findings, jsonc=True, reader="VS Code", blank_ok=True)
     if loaded is None:
         return
     data, source = loaded
@@ -268,8 +282,6 @@ def check_vscode_mcp(text: str, findings: list[Finding]) -> None:
         _check_server(source, name, server, line, findings, typeless_url=None)
         if not isinstance(server, dict):
             continue
-        if "type" not in server:
-            findings.append(finding(VSCODE_MCP, line, name, f"MCP server {name!r} has no type; VS Code requires one"))
         for ref in dict.fromkeys(_input_refs(server)):
             if ref not in declared:
                 findings.append(

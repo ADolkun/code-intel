@@ -16,6 +16,9 @@ DEFAULT = AgentsConfig()
 STRICT = AgentsConfig(strict=True)
 
 
+BROKEN = "---\nname: deploy\ndescription: x\nallowed-tools:\n  - **\n---\n"
+
+
 def skill(name: str = "deploy", description: str = "Ship a release.") -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n\n# Skill\n"
 
@@ -72,14 +75,9 @@ def lines(root: Path, agents: AgentsConfig = DEFAULT) -> list[str]:
         ),
         (
             ".claude/skills/deploy/SKILL.md",
-            "---\nname: [deploy\n---\n",
-            ".claude/skills/deploy/SKILL.md:2: invalid YAML frontmatter: expected ',' or ']', but got '<stream end>'; "
-            "Claude Code loads the skill without it",
-        ),
-        (
-            ".claude/skills/deploy/SKILL.md",
-            "---\nname: deploy\ndescription: a\nname: deploy\n---\n",
-            ".claude/skills/deploy/SKILL.md:4: frontmatter key 'name' is repeated (first at line 2)",
+            BROKEN,
+            ".claude/skills/deploy/SKILL.md:5: invalid YAML frontmatter: expected alphabetic or numeric character, "
+            "but found '*'; Claude Code loads the skill without it",
         ),
     ],
     ids=[
@@ -91,7 +89,6 @@ def lines(root: Path, agents: AgentsConfig = DEFAULT) -> list[str]:
         "angle-bracket",
         "zero-width",
         "invalid-yaml",
-        "repeated-key",
     ],
 )
 def test_a_skill_claude_code_does_not_load_is_reported(tmp_path: Path, rel: str, text: str, expected: str) -> None:
@@ -108,8 +105,21 @@ def test_a_skill_claude_code_does_not_load_is_reported(tmp_path: Path, rel: str,
         "---\nname: deploy\n---\n",
         "---\nname: deploy\nwhen_to_use: x\nallowed-tools: Read\ncustom: 1\n---\n",
         skill("x" * 100),
+        skill(description="Deploys: builds, then ships"),
+        skill(description="[WIP] ships a release"),
+        "---\nname: deploy\ndescription: a\nname: deploy\n---\n",
     ],
-    ids=["name-differs-from-directory", "title-case-name", "no-frontmatter", "no-description", "unknown-keys", "long"],
+    ids=[
+        "name-differs-from-directory",
+        "title-case-name",
+        "no-frontmatter",
+        "no-description",
+        "unknown-keys",
+        "long",
+        "colon-in-description",
+        "leading-bracket",
+        "repeated-key",
+    ],
 )
 def test_a_claude_only_skill_is_not_held_to_the_agent_skills_rules(tmp_path: Path, text: str) -> None:
     write(tmp_path / ".claude/skills/deploy/SKILL.md", text)
@@ -121,19 +131,21 @@ def test_a_claude_only_skill_is_not_held_to_the_agent_skills_rules(tmp_path: Pat
 # ── Agent Skills roots ───────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("root", [".agents/skills", ".github/skills", "skills"])
+@pytest.mark.parametrize(
+    ("root", "agents"),
+    [("skills", AgentsConfig(skill_dirs=("skills",))), (".agents/skills", STRICT), (".github/skills", STRICT)],
+    ids=["configured", "agents-strict", "github-strict"],
+)
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
         (
             skill("Deploy"),
-            "SKILL.md:2: skill name 'Deploy' must be lowercase letters, digits and hyphens "
-            "(Agent Skills; VS Code does not load it)",
+            "SKILL.md:2: skill name 'Deploy' must be lowercase letters, digits and hyphens (Agent Skills)",
         ),
         (
             skill("de_ploy"),
-            "SKILL.md:2: skill name 'de_ploy' must be lowercase letters, digits and hyphens "
-            "(Agent Skills; VS Code does not load it)",
+            "SKILL.md:2: skill name 'de_ploy' must be lowercase letters, digits and hyphens (Agent Skills)",
         ),
         (skill("x" * 65), f"SKILL.md:2: skill name {'x' * 65!r} must be at most 64 characters (Agent Skills)"),
         (
@@ -150,8 +162,7 @@ def test_a_claude_only_skill_is_not_held_to_the_agent_skills_rules(tmp_path: Pat
         ),
         (
             skill("release"),
-            "SKILL.md:2: skill name 'release' does not match its directory 'deploy' "
-            "(Agent Skills; VS Code does not load it)",
+            "SKILL.md:2: skill name 'release' does not match its directory 'deploy' (Agent Skills)",
         ),
         ("---\ndescription: x\n---\n", "SKILL.md:1: frontmatter 'name' must be a non-blank string (Agent Skills)"),
         (
@@ -169,11 +180,6 @@ def test_a_claude_only_skill_is_not_held_to_the_agent_skills_rules(tmp_path: Pat
             "SKILL.md:1: missing YAML frontmatter: an Agent Skills SKILL.md opens with a --- line, "
             "then name and description",
         ),
-        (
-            "---\nname: [deploy\n---\n",
-            "SKILL.md:2: invalid YAML frontmatter: expected ',' or ']', but got '<stream end>'; "
-            "its name and description cannot be read",
-        ),
     ],
     ids=[
         "upper-case",
@@ -189,15 +195,52 @@ def test_a_claude_only_skill_is_not_held_to_the_agent_skills_rules(tmp_path: Pat
         "blank-description",
         "long-description",
         "no-frontmatter",
-        "invalid-yaml",
     ],
 )
-def test_an_agent_skills_violation_is_reported(tmp_path: Path, root: str, text: str, expected: str) -> None:
+def test_an_agent_skills_violation_is_reported(
+    tmp_path: Path, root: str, agents: AgentsConfig, text: str, expected: str
+) -> None:
     write(tmp_path / root / "deploy" / "SKILL.md", text)
-    agents = AgentsConfig(skill_dirs=("skills",)) if root == "skills" else DEFAULT
-    if root != ".github/skills":
-        expected = expected.replace("(Agent Skills; VS Code does not load it)", "(Agent Skills)")
     assert lines(tmp_path, agents) == [f"{root}/deploy/{expected}"]
+
+
+@pytest.mark.parametrize("root", [".agents/skills", ".github/skills"])
+@pytest.mark.parametrize("text", [skill("Deploy"), skill("release"), "---\nname: deploy\n---\n", "# Deploy\n"])
+def test_the_agent_skills_rules_are_not_default_findings_for_the_conventional_roots(
+    tmp_path: Path, root: str, text: str
+) -> None:
+    write(tmp_path / root / "deploy" / "SKILL.md", text)
+    assert lines(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("root", "agents", "reader"),
+    [
+        (".agents/skills", DEFAULT, "VS Code skips the skill"),
+        (".github/skills", DEFAULT, "VS Code skips the skill"),
+        (
+            "skills",
+            AgentsConfig(skill_dirs=("skills",)),
+            "the Agent Skills reader cannot read its name and description",
+        ),
+    ],
+)
+def test_frontmatter_that_does_not_parse_is_reported_for_every_root(
+    tmp_path: Path, root: str, agents: AgentsConfig, reader: str
+) -> None:
+    write(tmp_path / root / "deploy" / "SKILL.md", BROKEN)
+    assert lines(tmp_path, agents) == [
+        f"{root}/deploy/SKILL.md:5: invalid YAML frontmatter: expected alphabetic or numeric character, "
+        f"but found '*'; {reader}"
+    ]
+
+
+@pytest.mark.parametrize("root", [".agents/skills", ".github/skills"])
+def test_frontmatter_claude_codes_retry_reads_is_not_reported_for_the_conventional_roots(
+    tmp_path: Path, root: str
+) -> None:
+    write(tmp_path / root / "deploy" / "SKILL.md", skill(description="Ships: `npm run release`"))
+    assert lines(tmp_path) == []
 
 
 def test_a_valid_agent_skill_is_not_reported(tmp_path: Path) -> None:
@@ -254,5 +297,5 @@ def test_an_unquoted_glob_in_a_skills_paths_is_reported_only_under_strict(tmp_pa
     assert lines(tmp_path) == []
     assert lines(tmp_path, STRICT) == [
         ".claude/skills/deploy/SKILL.md:4: invalid YAML frontmatter: expected alphabetic or numeric character, "
-        "but found '*'; Claude Code loads the skill without it"
+        "but found '*'; Claude Code recovers by quoting the value"
     ]

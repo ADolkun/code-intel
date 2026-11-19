@@ -2,17 +2,22 @@
 
 A ``SKILL.md`` deeper down (a template under ``references/``) is not a skill.
 
-- ``.claude/skills`` (Claude Code; Copilot CLI): frontmatter, when present,
-  parses with no repeated key; the directory is not ``synced`` and the
-  effective name (``name``, else the directory) is not ``anthropic-skills`` or
-  ``anthropic-skills:*`` and has no ``<``, control, zero-width, bidi or
-  private-use character, because Claude Code does not load those.
-- Agent Skills roots (``.agents/skills``, ``.github/skills``, the configured
-  ``skill_dirs``, and ``.claude/skills`` under ``strict``): frontmatter is
-  present and parses; ``name`` is 1-64 lowercase letters, digits and single
-  inner hyphens and equals the directory; ``description`` is a non-blank
-  string of at most 1024 characters.
-- ``strict``: every directory directly under a root holds a ``SKILL.md``.
+- ``.claude/skills`` (Claude Code): frontmatter that Claude Code cannot read
+  even after its retry; a ``synced`` directory, an effective name (``name``,
+  else the directory) of ``anthropic-skills`` or ``anthropic-skills:*``, or
+  one with a ``<``, control, zero-width, bidi or private-use character, which
+  Claude Code does not load.
+- ``.agents/skills`` and ``.github/skills`` (VS Code): only frontmatter that
+  does not parse, which makes VS Code skip the skill. VS Code loads a skill
+  with a missing, mismatched or upper-case name under its folder name and
+  cuts long names and descriptions, so the Agent Skills rules are not
+  default findings there.
+- The Agent Skills rules apply to configured ``skill_dirs`` and, under
+  ``strict``, to every root: frontmatter present; ``name`` 1-64 lowercase
+  letters, digits and single inner hyphens, equal to the directory;
+  ``description`` a non-blank string of at most 1024 characters.
+- ``strict`` also requires a ``SKILL.md`` in every directory directly under a
+  root, and reports repeated keys and frontmatter that is not clean YAML.
 """
 
 from __future__ import annotations
@@ -22,7 +27,14 @@ import unicodedata
 from collections.abc import Collection
 from pathlib import Path
 
-from stack_intel.agent_frontmatter import Frontmatter, finding, is_blank, parse_frontmatter, read_text
+from stack_intel.agent_frontmatter import (
+    Frontmatter,
+    finding,
+    is_blank,
+    parse_frontmatter,
+    read_text,
+    strict_parse_findings,
+)
 from stack_intel.doc_report import Finding
 
 CLAUDE_SKILLS = ".claude/skills"
@@ -75,25 +87,24 @@ def _check_claude(rel: str, directory: str, meta: Frontmatter | None, findings: 
         )
 
 
-def _name_problem(name: str, unloaded: str) -> str | None:
+def _name_problem(name: str) -> str | None:
     if len(name) > _MAX_NAME:
         return f"must be at most {_MAX_NAME} characters (Agent Skills)"
     if any(c != "-" and (not c.isalnum() or c.isupper()) for c in name):
-        return f"must be lowercase letters, digits and hyphens ({unloaded})"
+        return "must be lowercase letters, digits and hyphens (Agent Skills)"
     if name.startswith("-") or name.endswith("-") or "--" in name:
         return "must not start or end with a hyphen or hold '--' (Agent Skills)"
     return None
 
 
-def _check_spec(rel: str, directory: str, meta: Frontmatter, vscode: bool, findings: list[Finding]) -> None:
-    unloaded = "Agent Skills; VS Code does not load it" if vscode else "Agent Skills"
+def _check_spec(rel: str, directory: str, meta: Frontmatter, findings: list[Finding]) -> None:
     name = meta.data.get("name")
     if is_blank(name):
         findings.append(
             finding(rel, meta.line("name"), "name", "frontmatter 'name' must be a non-blank string (Agent Skills)")
         )
     elif isinstance(name, str):
-        if (problem := _name_problem(name, unloaded)) is not None:
+        if (problem := _name_problem(name)) is not None:
             findings.append(finding(rel, meta.line("name"), name, f"skill name {name!r} {problem}"))
         elif name != directory:
             findings.append(
@@ -101,7 +112,7 @@ def _check_spec(rel: str, directory: str, meta: Frontmatter, vscode: bool, findi
                     rel,
                     meta.line("name"),
                     name,
-                    f"skill name {name!r} does not match its directory {directory!r} ({unloaded})",
+                    f"skill name {name!r} does not match its directory {directory!r} (Agent Skills)",
                 )
             )
     description = meta.data.get("description")
@@ -145,22 +156,29 @@ def check_root(
     spec: bool,
     strict: bool,
 ) -> list[str]:
-    """Check the skills under ``root``; returns the ``SKILL.md`` files read.
-    Only ``.github/skills`` findings name VS Code, the reader of that root."""
-    vscode = root == GITHUB_SKILLS
+    """Check the skills under ``root``: ``claude`` for ``.claude/skills``,
+    ``spec`` for the Agent Skills rules. Returns the ``SKILL.md`` files read."""
     files = skill_files(root, visible)
     for rel in files:
         text = read_text(repo_root, rel, findings)
         if text is None:
             continue
         directory = posixpath.basename(posixpath.dirname(rel))
-        read = parse_frontmatter(text)
-        if (error := read.failure(strict=strict)) is not None:
-            reader = "Claude Code loads the skill without it" if claude else "its name and description cannot be read"
-            findings.append(finding(rel, error.line, "frontmatter", f"{error.message}; {reader}"))
+        read = parse_frontmatter(text, claude=claude, retry=True)
+        if read.error is not None:
+            reader = (
+                "Claude Code loads the skill without it"
+                if claude
+                else "the Agent Skills reader cannot read its name and description"
+                if root not in SPEC_ROOTS
+                else "VS Code skips the skill"
+            )
+            findings.append(finding(rel, read.error.line, "frontmatter", f"{read.error.message}; {reader}"))
         meta = read.meta
-        if meta is not None:
-            findings.extend(meta.repeat_findings(rel))
+        if strict:
+            findings.extend(strict_parse_findings(rel, read))
+            if meta is not None:
+                findings.extend(meta.repeat_findings(rel))
         if claude:
             _check_claude(rel, directory, meta, findings)
         if spec:
@@ -175,7 +193,7 @@ def check_root(
                     )
                 )
             elif meta is not None:
-                _check_spec(rel, directory, meta, vscode, findings)
+                _check_spec(rel, directory, meta, findings)
     if strict:
         _missing_skill_files(root, visible, findings)
     return files

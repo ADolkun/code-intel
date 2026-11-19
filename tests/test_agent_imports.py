@@ -34,7 +34,11 @@ def repo(tmp_path: Path) -> Path:
         ("docs/setup.md", "docs/setup.md"),
         ("AGENTS.md", "AGENTS.md"),
         ("docs/README.MD", "docs/README.MD"),
-        ("./scripts/run.sh", "./scripts/run.sh"),
+        ("./scripts/run.sh", None),
+        ("./docs/setup", "./docs/setup"),
+        ("./docs/setup#intro", "./docs/setup"),
+        ("docs/setup.md#intro", "docs/setup.md"),
+        ("./notes.txt", "./notes.txt"),
         ("../shared/x", "../shared/x"),
         ("docs/My\\ Notes.md", "docs/My Notes.md"),
         ("./docs/", "./docs/"),
@@ -57,11 +61,11 @@ def test_what_counts_as_an_import(token: str, path: str | None) -> None:
 def test_a_missing_import_is_reported_at_its_line(repo: Path) -> None:
     write(
         repo / "AGENTS.md",
-        "# Agents\n\nRead @docs/setup.md first.\n\nThen @docs/gone.md and (@docs/old.md for history)\n",
+        "# Agents\n\nRead @docs/setup.md first.\n\nThen @docs/gone.md and\n@docs/old.md for history\n",
     )
     assert lines(repo) == [
         "AGENTS.md:5: @docs/gone.md imports a file that does not exist",
-        "AGENTS.md:5: @docs/old.md imports a file that does not exist",
+        "AGENTS.md:6: @docs/old.md imports a file that does not exist",
     ]
 
 
@@ -101,6 +105,11 @@ def test_every_import_file_is_read(repo: Path, rel: str) -> None:
         "mail me at me@example.md\n",
         "Read @docs/gone.md, then go.\n",
         "<!-- @docs/gone.md -->\n",
+        "Read the guide (@docs/missing.md and the FAQ).\n",
+        "| Doc | Use |\n| --- | --- |\n| @docs/missing.md | setup |\n",
+        "Write \\@docs/missing.md literally.\n",
+        "@../docs/setup.md#intro\n",
+        "@./scripts/gone.sh\n",
     ],
     ids=[
         "from-the-root",
@@ -120,11 +129,22 @@ def test_every_import_file_is_read(repo: Path, rel: str) -> None:
         "email",
         "trailing-punctuation",
         "html-comment",
+        "after-a-parenthesis",
+        "table-cell",
+        "escaped-at",
+        "fragment-after-md",
+        "non-text-extension",
     ],
 )
 def test_an_import_that_resolves_or_cannot_be_proven_is_not_reported(repo: Path, text: str) -> None:
     write(repo / "web" / "CLAUDE.md", text)
     assert lines(repo) == []
+
+
+def test_a_fragment_is_dropped_from_the_target(repo: Path) -> None:
+    write(repo / "docs" / "setup", "Setup\n")
+    write(repo / "CLAUDE.md", "@./docs/setup#intro\n@./docs/gone#intro\n")
+    assert lines(repo) == ["CLAUDE.md:2: @./docs/gone#intro imports a file that does not exist"]
 
 
 def test_a_target_git_ignores_is_not_reported(repo: Path) -> None:

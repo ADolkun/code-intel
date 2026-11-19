@@ -173,37 +173,12 @@ def test_a_file_git_does_not_see_is_not_checked(repo: Path) -> None:
         (
             "---\npaths:\n  - src/api/**\n",
             ".claude/rules/api.md:1: YAML frontmatter is not closed by a --- line; "
-            "Claude Code ignores it and loads the rule for every file",
+            "Claude Code ignores the frontmatter and loads the rule for every file",
         ),
         (
-            "---\n- a\n---\n",
-            ".claude/rules/api.md:1: YAML frontmatter must be a mapping; "
-            "Claude Code ignores it and loads the rule for every file",
-        ),
-        (
-            "---\npaths: [src/api/**\n---\n",
-            ".claude/rules/api.md:2: invalid YAML frontmatter: expected ',' or ']', but got '<stream end>'; "
-            "Claude Code ignores it and loads the rule for every file",
-        ),
-        (
-            '---\npaths: ""\n---\n',
-            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings",
-        ),
-        (
-            '---\npaths:\n  - "src/api/**"\n  - " "\n---\n',
-            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings",
-        ),
-        (
-            "---\npaths:\n  - 3\n---\n",
-            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings",
-        ),
-        (
-            "---\npaths: {a: b}\n---\n",
-            ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings",
-        ),
-        (
-            '---\npaths:\n  - "src/api/**"\npaths:\n  - "src/ui/**"\n---\n',
-            ".claude/rules/api.md:4: frontmatter key 'paths' is repeated (first at line 2)",
+            "---\npaths:\n  - **/*.py\n---\n",
+            ".claude/rules/api.md:3: invalid YAML frontmatter: expected alphabetic or numeric character, "
+            "but found '*'; Claude Code ignores the frontmatter and loads the rule for every file",
         ),
         (
             '---\npaths:\n  - "src/api/**"\n  - "src/renamed/**"\n---\n',
@@ -215,23 +190,14 @@ def test_a_file_git_does_not_see_is_not_checked(repo: Path) -> None:
         ),
         (
             '---\npaths:\n  - "src/api/[id"\n---\n',
-            ".claude/rules/api.md:3: paths glob 'src/api/[id' has an invalid bracket expression; "
-            "Claude Code matches no file with it",
+            ".claude/rules/api.md:3: paths glob 'src/api/[id' matches no git-visible file",
+        ),
+        (
+            "---\npaths: [src/api/**\n---\n",
+            ".claude/rules/api.md:2: paths glob '[src/api/**' matches no git-visible file",
         ),
     ],
-    ids=[
-        "unclosed",
-        "not-a-mapping",
-        "invalid-yaml",
-        "blank-string",
-        "blank-item",
-        "non-string-item",
-        "mapping",
-        "repeated-key",
-        "no-match-item",
-        "no-match-comma-string",
-        "unclosed-bracket",
-    ],
+    ids=["unclosed", "block-list-item", "no-match-item", "no-match-comma-string", "unclosed-bracket", "recovered"],
 )
 def test_a_broken_rule_is_reported_by_default(repo: Path, text: str, expected: str) -> None:
     put(repo, ".claude/rules/api.md", text)
@@ -246,15 +212,27 @@ def test_a_broken_rule_is_reported_by_default(repo: Path, text: str, expected: s
         "---\n---\n",
         "---\npaths:\n---\n",
         "---\npaths: []\n---\n",
+        "---\n- a\n---\n",
+        '---\npaths: ""\n---\n',
+        '---\npaths:\n  - "src/api/**"\n  - " "\n---\n',
+        "---\npaths:\n  - 3\n---\n",
+        "---\npaths: {a: b}\n---\n",
+        '---\npaths:\n  - "src/renamed/**"\npaths:\n  - "src/api/**"\n---\n',
         '---\npaths: "src/api/**, src/ui/**"\n---\n',
         '---\napplyTo: "src/**"\npaths:\n  - "src/api/**"\n---\n',
         '---\napplyTo: "src/**"\n---\n',
         "---\npaths: **/*.py\n---\n",
-        "---\npaths:\n  - *.tsx\n---\n",
         '---\npaths: ["*.py"]\nunknown: 1\nalwaysApply: true\n---\n',
         '---\npaths: ["!src/**", "src/@(a|b)/**", "src/\\\\[x\\\\]", "src/{1..3}/**"]\n---\n',
         '---\npaths: "src/**/*.{ts,js}, src/api/**"\n---\n',
         '---\npaths: ["/src/api/handler.py", "view.tsx", "src/ui/[vw]iew.tsx"]\n---\n',
+        '---\ndescription: API rules: keep handlers thin\npaths:\n  - "src/api/**"\n---\n',
+        '---\ndescription: `npm test` runner\npaths:\n  - "src/api/**"\n---\n',
+        '---\npaths: ["src/**/*.py, lib/**/*.ts"]\n---\n',
+        '---\npaths: ["src/ui/*.{ tsx, ts }"]\n---\n',
+        '---\npaths: [["src/**"], 3]\n---\n',
+        '---\npaths: ["**/*.PY", "SRC/API/HANDLER.PY"]\n---\n',
+        '---\npaths: ["src/**"]\n-----\n',
     ],
     ids=[
         "no-frontmatter",
@@ -262,20 +240,87 @@ def test_a_broken_rule_is_reported_by_default(repo: Path, text: str, expected: s
         "empty-frontmatter",
         "null-paths",
         "empty-list",
+        "not-a-mapping",
+        "blank-string",
+        "blank-item",
+        "non-string-item",
+        "mapping",
+        "repeated-key-last-wins",
         "comma-string",
         "apply-to-beside-paths",
         "apply-to-alone",
-        "unquoted-glob",
-        "unquoted-glob-item",
+        "recovered-unquoted-glob",
         "unknown-keys",
         "unmodelled-globs",
         "braces-in-a-comma-string",
         "anchored-any-depth-and-class",
+        "colon-in-description",
+        "backtick-description",
+        "comma-in-an-item",
+        "spaced-brace-options",
+        "nested-list-and-number",
+        "case-insensitive",
+        "five-dash-close",
     ],
 )
 def test_a_rule_the_readers_accept_is_not_reported_by_default(repo: Path, text: str) -> None:
     put(repo, ".claude/rules/api.md", text)
     assert lines(repo, DEFAULT) == []
+
+
+@pytest.mark.parametrize(
+    ("paths", "file"),
+    [
+        ('["src/**"]', "packages/web/src/a.ts"),
+        ('["**/*.TS"]', "src/a.ts"),
+        ('["README.MD"]', "readme.md"),
+        ('["src/components/*.tsx"]', "web/src/components/a.tsx"),
+        ('["src/**/*.ts, lib/**/*.ts"]', "src/a.ts"),
+        ('["src/*.{ js, ts }"]', "src/a.ts"),
+        ('[["src/**"], 3]', "src/a.ts"),
+    ],
+)
+def test_a_rule_glob_matching_under_a_lenient_reading_is_not_reported(tmp_path: Path, paths: str, file: str) -> None:
+    put(tmp_path, file, "x\n")
+    put(tmp_path, ".claude/rules/api.md", f"---\npaths: {paths}\n---\n")
+    assert lines(tmp_path, DEFAULT) == []
+
+
+def test_a_flow_list_the_retry_quotes_is_one_glob_matching_nothing(repo: Path) -> None:
+    put(repo, ".claude/rules/api.md", '---\ndescription: API rules: keep handlers thin\npaths: ["src/api/**"]\n---\n')
+    assert lines(repo, DEFAULT) == [".claude/rules/api.md:3: paths glob '[\"src/api/**\"]' matches no git-visible file"]
+
+
+def test_a_comma_in_a_list_item_is_reported_only_when_no_piece_matches(tmp_path: Path) -> None:
+    put(tmp_path, "src/a.ts", "x\n")
+    put(tmp_path, ".claude/rules/api.md", '---\npaths: ["lib/**, docs/**"]\n---\n')
+    assert lines(tmp_path, DEFAULT) == [
+        ".claude/rules/api.md:2: paths glob 'lib/**, docs/**' matches no git-visible file"
+    ]
+
+
+def test_a_five_dash_line_closes_a_rules_frontmatter(tmp_path: Path) -> None:
+    put(tmp_path, "src/a.ts", "x\n")
+    put(tmp_path, ".claude/rules/api.md", '---\npaths: ["lib/**"]\n-----\n# API\n')
+    assert lines(tmp_path, DEFAULT) == [".claude/rules/api.md:2: paths glob 'lib/**' matches no git-visible file"]
+
+
+def test_a_latin_1_rule_is_read_with_replacement_characters(tmp_path: Path) -> None:
+    write(tmp_path / "src/a.ts", "x\n")
+    (tmp_path / ".claude/rules").mkdir(parents=True)
+    (tmp_path / ".claude/rules/api.md").write_bytes('---\npaths: ["src/**"]\n---\n# Caf\u00e9\n'.encode("latin-1"))
+    (tmp_path / "CLAUDE.md").write_bytes("# R\u00e9sum\u00e9 of the rules\n".encode("latin-1"))
+    assert lines(tmp_path, DEFAULT) == []
+
+
+def test_a_symlinked_rules_directory_is_followed(tmp_path: Path) -> None:
+    put(tmp_path, "src/a.ts", "x\n")
+    put(tmp_path, "shared/rules/api.md", '---\npaths: ["lib/**"]\n---\n')
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude/rules").symlink_to("../shared/rules", target_is_directory=True)
+    put(tmp_path, MAP_FILE, "# Agents\n\n## Scoped instruction map\n\n- `api`: `lib/**`\n")
+    found = lines(tmp_path, AgentsConfig(instruction_map=InstructionMap(MAP_FILE, "Scoped instruction map")))
+    assert found == [".claude/rules/api.md:2: paths glob 'lib/**' matches no git-visible file"]
 
 
 def test_a_glob_is_matched_against_git_visible_files_only(repo: Path) -> None:
@@ -345,9 +390,9 @@ def test_strict_accepts_a_comma_string(repo: Path) -> None:
             f".claude/agents/review.md:2: subagent name {'r' * 40!r}... is longer than 256 characters (Claude Code)",
         ),
         (
-            "---\nname: [review\n---\n",
-            ".claude/agents/review.md:2: invalid YAML frontmatter: expected ',' or ']', but got '<stream end>'; "
-            "Claude Code skips the subagent",
+            "---\nname: review\ndescription: x\ntools:\n  - **\n---\n",
+            ".claude/agents/review.md:5: invalid YAML frontmatter: expected alphabetic or numeric character, "
+            "but found '*'; Claude Code skips the subagent",
         ),
         (
             "---\nname: review\n",
@@ -370,6 +415,14 @@ def test_a_subagent_name_used_twice_is_reported_at_the_second(tmp_path: Path) ->
     ]
 
 
+def test_a_subagent_claude_code_skips_does_not_count_as_a_duplicate(tmp_path: Path) -> None:
+    put(tmp_path, ".claude/agents/a/review.md", "---\nname: review\n---\n")
+    put(tmp_path, ".claude/agents/review.md", "---\nname: review\ndescription: y\n---\n")
+    assert lines(tmp_path, DEFAULT) == [
+        ".claude/agents/a/review.md:1: subagent 'review' has no description; Claude Code skips it"
+    ]
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -377,8 +430,31 @@ def test_a_subagent_name_used_twice_is_reported_at_the_second(tmp_path: Path) ->
         "---\ndescription: no name, so documentation\n---\n",
         "---\nname: r\ndescription: x\ntools: Read, Grep\nmodel: sonnet\ncustomKey: 1\n---\n",
         f"---\nname: {'r' * 256}\ndescription: x\n---\n",
+        "---\nname: r\ndescription: Use this agent when: the user asks for a review\n---\n",
+        "---\nname: r\ndescription: [WIP] reviews diffs\n---\n",
+        "---\nname: r\ndescription: @reviewer checks diffs\n---\n",
+        "---\nname: r\ndescription: `review` the diff\n---\n",
+        "---\nname: r\ndescription: x\ntools:\n\t- Read\n\t- Grep\n---\n",
+        "---\nname: r\ndescription: Reviews. Examples:\\n\\n<example>\\nContext: a diff\n---\n",
+        "---\nThese files define the project's subagents.\n",
+        "---\n\n# Subagents\n\nOne file per subagent.\n\n---\n\nMore notes.\n",
+        "---\nname: [review\ndescription: x\n---\n",
     ],
-    ids=["readme", "no-name", "unknown-keys", "256-characters"],
+    ids=[
+        "readme",
+        "no-name",
+        "unknown-keys",
+        "256-characters",
+        "colon-in-description",
+        "leading-bracket",
+        "leading-at",
+        "leading-backtick",
+        "tab-indented-list",
+        "examples-on-one-line",
+        "rule-line-readme",
+        "rule-lines-readme",
+        "recovered-name",
+    ],
 )
 def test_a_valid_subagent_or_a_readme_is_not_reported(tmp_path: Path, text: str) -> None:
     put(tmp_path, ".claude/agents/sub/dir/review.md", text)
@@ -394,28 +470,20 @@ INSTRUCTIONS = ".github/instructions/py.instructions.md"
     ("text", "expected"),
     [
         (
-            "---\napplyTo: 3\n---\n",
-            f"{INSTRUCTIONS}:2: frontmatter 'applyTo' must be a string or a list of non-blank strings",
-        ),
-        (
-            '---\napplyTo: ["src/**", ""]\n---\n',
-            f"{INSTRUCTIONS}:2: frontmatter 'applyTo' must be a string or a list of non-blank strings",
-        ),
-        (
             '---\napplyTo: "src/**, lib/**"\n---\n',
             f"{INSTRUCTIONS}:2: applyTo glob 'lib/**' matches no git-visible file",
         ),
-        ('---\napplyTo:\n  - "*.py"\n---\n', f"{INSTRUCTIONS}:3: applyTo glob '*.py' matches no git-visible file"),
+        ('---\napplyTo:\n  - "*.rs"\n---\n', f"{INSTRUCTIONS}:3: applyTo glob '*.rs' matches no git-visible file"),
         (
-            '---\napplyTo: "**"\nexcludeAgent: coding-agent\n---\n',
-            f"{INSTRUCTIONS}:3: excludeAgent 'coding-agent' must be 'code-review' or 'cloud-agent'",
+            '---\napplyTo: "**"\nexcludeAgent: reviewer\n---\n',
+            f"{INSTRUCTIONS}:3: excludeAgent 'reviewer' must be 'code-review', 'cloud-agent' or 'coding-agent' (Copilot)",
         ),
         (
             '---\napplyTo: "**"\napplyTo: "lib/**"\n---\n',
             f"{INSTRUCTIONS}:3: applyTo glob 'lib/**' matches no git-visible file",
         ),
     ],
-    ids=["number", "blank-item", "comma-string", "star-is-the-root-only", "exclude-agent", "repeated-key-last-wins"],
+    ids=["comma-string", "no-match-item", "exclude-agent", "repeated-key-last-wins"],
 )
 def test_broken_copilot_instructions_are_reported(repo: Path, text: str, expected: str) -> None:
     put(repo, INSTRUCTIONS, text)
@@ -435,6 +503,11 @@ def test_broken_copilot_instructions_are_reported(repo: Path, text: str, expecte
         '---\napplyTo: "  "\n---\n',
         "---\napplyTo:\nexcludeAgent:\n---\n",
         '---\nexcludeAgent: ["code-review"]\n---\n',
+        "---\napplyTo: 3\n---\n",
+        '---\napplyTo: ["src/**", ""]\n---\n',
+        '---\napplyTo:\n  - "*.py"\n---\n',
+        '---\napplyTo: "**"\nexcludeAgent: coding-agent\n---\n',
+        '---\napplyTo: "**"\nexcludeAgent: cloud-agent\n---\n',
     ],
     ids=[
         "no-frontmatter",
@@ -447,12 +520,34 @@ def test_broken_copilot_instructions_are_reported(repo: Path, text: str, expecte
         "blank",
         "null-keys",
         "exclude-agent-list",
+        "number",
+        "blank-item",
+        "star-at-any-depth",
+        "exclude-coding-agent",
+        "exclude-cloud-agent",
     ],
 )
 def test_copilot_instructions_the_readers_accept_are_not_reported(repo: Path, text: str) -> None:
     put(repo, INSTRUCTIONS, text)
     put(repo, ".github/instructions/sub/dir/x.instructions.md", "# Nested\n")
     assert lines(repo, DEFAULT) == []
+
+
+@pytest.mark.parametrize(
+    ("apply_to", "file"),
+    [("'*.py'", "src/a.py"), ("'src/**/*.ts'", "packages/a/src/x.ts")],
+)
+def test_vscode_prepends_a_globstar_to_apply_to(tmp_path: Path, apply_to: str, file: str) -> None:
+    put(tmp_path, file, "x\n")
+    put(tmp_path, INSTRUCTIONS, f"---\napplyTo: {apply_to}\n---\n")
+    assert lines(tmp_path, DEFAULT) == []
+
+
+def test_instruction_type_problems_are_reported_only_under_strict(repo: Path) -> None:
+    put(repo, INSTRUCTIONS, "---\napplyTo: 3\n---\n")
+    assert lines(repo, AgentsConfig(strict=True)) == [
+        f"{INSTRUCTIONS}:2: frontmatter 'applyTo' must be a string or a list of non-blank strings (strict)"
+    ]
 
 
 # ── Copilot custom agents ────────────────────────────────────────────────
@@ -560,7 +655,7 @@ def test_a_missing_map_file_is_reported(repo: Path) -> None:
 def test_a_rule_with_unreadable_paths_is_reported_once_not_also_as_a_map_mismatch(repo: Path) -> None:
     put(repo, ".claude/rules/api.md", "---\npaths: 3\n---\n")
     assert lines(repo) == [
-        ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings"
+        ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings (strict)"
     ]
 
 
@@ -664,86 +759,93 @@ def test_no_glob_crashes_the_check(repo: Path, glob: str) -> None:
 
 
 @pytest.mark.parametrize("glob", ["src/[z-a].ts", "src/[a-[]"])
-def test_a_class_the_matcher_cannot_compile_is_an_invalid_pattern(repo: Path, glob: str) -> None:
+def test_a_class_the_matcher_cannot_compile_is_read_literally(repo: Path, glob: str) -> None:
     assert rule_lines(repo, f"[{glob!r}]") == [
-        f".claude/rules/api.md:2: paths glob {glob!r} has an invalid bracket expression; "
-        "Claude Code matches no file with it"
+        f".claude/rules/api.md:2: paths glob {glob!r} matches no git-visible file"
     ]
-    put(repo, ".claude/rules/api.md", API_RULE)
-    put(repo, INSTRUCTIONS, f"---\napplyTo: [{glob!r}]\n---\n")
-    assert lines(repo, DEFAULT) == []
 
 
 # ── Frontmatter that does not parse ──────────────────────────────────────
-
-
-def test_a_yaml_error_outside_a_glob_value_is_reported(repo: Path) -> None:
-    put(repo, ".claude/rules/api.md", '---\ndescription: `npm test` runner\npaths: ["src/api/**"]\n---\n')
-    assert lines(repo, DEFAULT) == [
-        ".claude/rules/api.md:2: invalid YAML frontmatter: found character '`' that cannot start any token; "
-        "Claude Code ignores it and loads the rule for every file"
-    ]
-
-
-@pytest.mark.parametrize(
-    "text", ["---\npaths: **/*.py\n---\n", "---\npaths:\n  - *.py\n---\n", "---\npaths: {src,lib}/**\n---\n"]
-)
-def test_an_unquoted_glob_value_is_reported_only_under_strict(repo: Path, text: str) -> None:
-    put(repo, ".claude/rules/api.md", text)
-    assert lines(repo, DEFAULT) == []
-    (finding,) = [line for line in lines(repo, AgentsConfig(strict=True)) if "invalid YAML" in line]
-    assert finding.startswith(".claude/rules/api.md:")
-    assert finding.endswith("; Claude Code ignores it and loads the rule for every file")
 
 
 @pytest.mark.parametrize(
     ("rel", "text"),
     [
         (".claude/agents/r.md", "---\nname: r\ndescription: *Use proactively* for reviews\n---\n"),
+        (".claude/agents/r.md", "---\nname: r\ndescription: `npm test` runner\n---\n"),
+        (".claude/agents/r.md", "---\nname: r\ndescription: @mention\n---\n"),
+        (".claude/agents/r.md", "---\nname: r\ndescription: %x\n---\n"),
+        (".claude/agents/r.md", "---\nname: r\ndescription: {a,b}/**\n---\n"),
         (".claude/skills/s/SKILL.md", "---\nname: s\ndescription: *Important* skill\n---\n"),
-        (".claude/rules/api.md", "---\npaths: **/*.ts\ndescription: *x*\n---\n"),
-        (".claude/rules/api.md", "---\npaths: [**/*.ts]\n---\n"),
-        (".claude/rules/api.md", "---\n  paths: **/*.ts\n---\n"),
-        (".claude/rules/api.md", '---\npaths: [**/*.ts, "src/**", {src,lib}/**]\n---\n'),
-        (".claude/rules/api.md", "---\npaths:\n  - {src,lib}/**\n  - *.md\n---\n"),
+        (".claude/rules/api.md", "---\npaths: **/*.py\ndescription: *x*\n---\n"),
+        (".claude/rules/api.md", "---\npaths: {src,lib}/**\n---\n"),
     ],
     ids=[
-        "subagent-description",
-        "skill-description",
+        "subagent-star",
+        "subagent-backtick",
+        "subagent-at",
+        "subagent-percent",
+        "subagent-brace",
+        "skill-star",
         "rule-two-values",
-        "flow-list",
-        "indented",
-        "mixed-flow",
-        "items",
+        "rule-braces",
     ],
 )
-def test_an_unquoted_star_value_is_reported_only_under_strict(tmp_path: Path, rel: str, text: str) -> None:
-    put(tmp_path, rel, text)
-    assert lines(tmp_path, DEFAULT) == []
-    (finding,) = [line for line in lines(tmp_path, AgentsConfig(strict=True)) if "invalid YAML" in line]
+def test_a_value_claude_codes_retry_quotes_is_reported_only_under_strict(repo: Path, rel: str, text: str) -> None:
+    put(repo, rel, text)
+    assert lines(repo, DEFAULT) == []
+    (finding,) = [line for line in lines(repo, AgentsConfig(strict=True)) if "invalid YAML" in line]
     assert finding.startswith(f"{rel}:")
+    assert finding.endswith("; Claude Code recovers by quoting the value")
 
 
 @pytest.mark.parametrize(
-    ("value", "reason"),
-    [
-        ("`npm test` runner", "found character '`' that cannot start any token"),
-        ("@mention", "found character '@' that cannot start any token"),
-        ("%x", "found character '%' that cannot start any token"),
-        ("{a,b}/**", "expected <block end>, but found '<scalar>'"),
-    ],
+    "text",
+    ["---\npaths:\n  - *.py\n---\n", "---\npaths:\n  - {src,lib}/**\n---\n", "---\n  paths: **/*.py\n---\n"],
+    ids=["block-item", "block-item-braces", "indented-key"],
 )
-def test_other_reserved_characters_are_reported_by_default(tmp_path: Path, value: str, reason: str) -> None:
-    put(tmp_path, ".claude/agents/r.md", f"---\nname: r\ndescription: {value}\n---\n")
-    (finding,) = lines(tmp_path, DEFAULT)
-    assert finding.startswith(f".claude/agents/r.md:3: invalid YAML frontmatter: {reason}")
+def test_a_value_the_retry_does_not_quote_breaks_the_rule(repo: Path, text: str) -> None:
+    put(repo, ".claude/rules/api.md", text)
+    (finding,) = lines(repo, DEFAULT)
+    assert finding.startswith(".claude/rules/api.md:")
+    assert finding.endswith("; Claude Code ignores the frontmatter and loads the rule for every file")
 
 
-def test_repeated_instruction_keys_are_reported_only_under_strict(repo: Path) -> None:
-    put(repo, INSTRUCTIONS, '---\napplyTo: "lib/**"\napplyTo: "**"\n---\n')
+@pytest.mark.parametrize("rel", [".claude/rules/api.md", ".claude/skills/deploy/SKILL.md", INSTRUCTIONS])
+def test_repeated_keys_are_reported_only_under_strict(repo: Path, rel: str) -> None:
+    put(repo, rel, '---\nname: deploy\ndescription: x\npaths: "lib/**"\npaths: "src/**"\napplyTo: "**"\n---\n')
     assert lines(repo, DEFAULT) == []
-    assert lines(repo, AgentsConfig(strict=True)) == [
-        f"{INSTRUCTIONS}:3: frontmatter key 'applyTo' is repeated (first at line 2)"
+    assert f"{rel}:5: frontmatter key 'paths' is repeated (first at line 4); the last value wins" in lines(
+        repo, AgentsConfig(strict=True)
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "created: 2024-13-45",
+        "x: 2024-02-30",
+        "x: !!float abc",
+        "x: !!timestamp foo",
+        "x: !!bool maybe",
+        "x: " + "9" * 5001,
+        "x: " + "[" * 3000,
+    ],
+    ids=["month-13", "february-30", "float-tag", "timestamp-tag", "bool-tag", "huge-integer", "deep-nesting"],
+)
+@pytest.mark.parametrize("rel", [".claude/rules/api.md", ".claude/agents/r.md", ".claude/skills/deploy/SKILL.md"])
+def test_frontmatter_the_yaml_library_cannot_load_is_not_a_finding(repo: Path, rel: str, line: str) -> None:
+    put(repo, rel, f'---\nname: deploy\ndescription: x\npaths: ["src/api/**"]\n{line}\n---\n')
+    assert lines(repo, DEFAULT) == []
+    assert all("could not be checked" in found or "invalid YAML" in found for found in lines(repo, STRICT))
+
+
+def test_dates_are_read_as_strings(tmp_path: Path) -> None:
+    put(tmp_path, ".claude/agents/a.md", "---\nname: 2024-01-02\ndescription: x\n---\n")
+    put(tmp_path, ".claude/agents/b.md", "---\nname: 2024-01-02\ndescription: y\n---\n")
+    assert lines(tmp_path, DEFAULT) == [
+        ".claude/agents/b.md:2: subagent name '2024-01-02' is also used by .claude/agents/a.md; "
+        "Claude Code loads only one of them"
     ]
 
 

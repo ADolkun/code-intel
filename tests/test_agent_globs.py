@@ -1,18 +1,13 @@
-"""Glob matching as Claude Code reads ``paths`` and Copilot reads ``applyTo``:
-a verdict is ``no_match`` only when no reading matches a file."""
+"""Glob matching under the most lenient reading any known reader uses: a
+verdict is ``no_match`` only when no reading matches a file or directory."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from stack_intel.agent_globs import (
-    claude_glob,
-    copilot_glob,
-    has_unclosed_bracket,
-    literal_directory,
-    sample_paths,
-    split_globs,
-)
+from stack_intel.agent_globs import glob_groups, glob_verdict, literal_directory, sample_paths, split_globs
 
 FILES = frozenset(
     {
@@ -24,148 +19,133 @@ FILES = frozenset(
         "src/ui/view.ts",
         "app/[id]/page.tsx",
         ".github/workflows/ci.yml",
+        "packages/web/src/a.ts",
+        "web/src/components/a.tsx",
     }
 )
-
-
-@pytest.mark.parametrize(
-    ("glob", "verdict"),
-    [
-        ("*.md", "matches"),
-        ("guide.md", "matches"),
-        ("notes.md", "matches"),
-        ("*.rs", "no_match"),
-        ("/*.md", "matches"),
-        ("/guide.md", "no_match"),
-        ("/docs/guide.md", "matches"),
-        ("docs/*.md", "matches"),
-        ("docs/*/notes.md", "matches"),
-        ("src/*.py", "no_match"),
-        ("src/**/*.py", "matches"),
-        ("src/**", "matches"),
-        ("src/**/handler.py", "matches"),
-        ("docs/**/guide.md", "matches"),
-        ("src/ui/view.?s", "matches"),
-        ("src/ui/view.??x", "matches"),
-        ("src/ui/*.{ts,tsx}", "matches"),
-        ("src/ui/*.{js,jsx}", "no_match"),
-        ("src/{api,web}/*.py", "matches"),
-        ("src/{web,lib}/**", "no_match"),
-        ("src/{api}/handler.py", "matches"),
-        ("src/[au]pi/handler.py", "matches"),
-        ("src/[!a]pi/**", "no_match"),
-        ("src/[^u]i/**", "no_match"),
-        ("src/u[a-j]/**", "matches"),
-        ("app/[id]/page.tsx", "matches"),
-        ("app/[xy]/page.tsx", "no_match"),
-        ("src/api/[id", "invalid"),
-        ("src/ui/", "matches"),
-        ("./docs/*.md", "matches"),
-        (".github/**", "matches"),
-        ("**/*.yml", "matches"),
-    ],
-)
-def test_claude_code_semantics(glob: str, verdict: str) -> None:
-    assert claude_glob(glob, FILES) == verdict
+DIRS = frozenset({"docs", "docs/deep", "src", "src/api", "src/ui", "app", "app/[id]", "packages/web/src"})
+PATHS = FILES | DIRS
 
 
 @pytest.mark.parametrize(
     "glob",
-    ["!src/**", "src/@(api|ui)/**", "src/+(api)/**", "src/\\*.py", "src/[[:alpha:]]pi/**", "src/{1..3}/**"],
+    [
+        "*.md",
+        "guide.md",
+        "/*.md",
+        "/docs/guide.md",
+        "docs/*/notes.md",
+        "src/**/*.py",
+        "src/**",
+        "src/ui/view.?s",
+        "src/ui/*.{ts,tsx}",
+        "src/ui/*.{ js, ts }",
+        "src/{api,web}/*.py",
+        "src/{api}/handler.py",
+        "src/[au]pi/handler.py",
+        "src/u[a-j]/**",
+        "app/[id]/page.tsx",
+        "src/ui/",
+        "./docs/*.md",
+        "././docs/*.md",
+        "**/*.yml",
+        "**/*.TS",
+        "README.MD",
+        "SRC/API/**",
+        "src/api",
+        "src/components/*.tsx",
+        "*.py",
+        "*",
+        "**",
+        "**/*",
+        "**/**/**/*.md",
+    ],
+)
+def test_globs_some_reader_matches(glob: str) -> None:
+    assert glob_verdict(glob, PATHS) == "matches"
+
+
+@pytest.mark.parametrize(
+    "glob",
+    [
+        "*.rs",
+        "/guide.md",
+        "/src/*.ts",
+        "src/ui/*.{js,jsx}",
+        "src/{web,lib}/**",
+        "src/[!a]pi/**",
+        "app/[xy]/page.tsx",
+        "src/renamed/**",
+        "src/api/[id",
+        "src/[z-a]/handler.py",
+        "lib",
+    ],
+)
+def test_globs_no_reader_matches(glob: str) -> None:
+    assert glob_verdict(glob, PATHS) == "no_match"
+
+
+def test_a_trailing_globstar_matches_the_directory_itself() -> None:
+    assert glob_verdict("empty/**", frozenset({"empty"})) == "matches"
+    assert glob_verdict("src/**", frozenset({"packages/web/src/a.ts"})) == "matches"
+
+
+@pytest.mark.parametrize(
+    "glob",
+    ["!src/**", "src/@(api|ui)/**", "src/+(api)/**", "src/\\*.py", "src/[[:alpha:]]pi/**", "src/{1..3}/**", "x" * 300],
 )
 def test_unmodelled_constructs_skip_the_existence_check(glob: str) -> None:
-    assert claude_glob(glob, FILES) == "unmodelled"
-    assert copilot_glob(glob, FILES) == "unmodelled"
-
-
-def test_braces_from_a_comma_split_string_are_unmodelled() -> None:
-    assert claude_glob("nowhere/*.{a,b}", FILES, split=True) == "unmodelled"
-    assert copilot_glob("nowhere/*.{a,b}", FILES, split=True) == "unmodelled"
-    assert copilot_glob("nowhere/*.{a,b}", FILES) == "no_match"
+    assert glob_verdict(glob, PATHS) == "unmodelled"
 
 
 @pytest.mark.parametrize(
-    ("glob", "verdict"),
+    "glob",
+    ["a/**/b/**/c/**/d/**/e/**/zz", "*a*b*c*d*e*/zz", "x/" + "{a,b,c,d}" * 4],
+)
+def test_globs_past_the_work_bound_are_unmodelled(glob: str) -> None:
+    assert glob_verdict(glob, PATHS) == "unmodelled"
+
+
+def test_repeated_globstars_collapse_and_stay_fast() -> None:
+    deep = "/".join(f"d{i}" for i in range(17)) + "/file"
+    started = time.perf_counter()
+    assert glob_verdict("**/" * 25 + "zz", frozenset({deep})) == "no_match"
+    assert time.perf_counter() - started < 1
+
+
+@pytest.mark.parametrize(
+    "glob", ["src/[z-a].ts", "src/[a-[]", "[", "]", "[]]", "[!]", "a[--z]", "x[a&&b]", "y[a~~b]", "[^]", "{,}", "{"]
+)
+def test_no_glob_raises(glob: str) -> None:
+    assert glob_verdict(glob, PATHS) in ("matches", "no_match", "unmodelled")
+
+
+@pytest.mark.parametrize(
+    ("value", "groups"),
     [
-        ("**", "matches"),
-        ("*.md", "matches"),
-        ("*.py", "no_match"),
-        ("guide.md", "no_match"),
-        ("**/*.py", "matches"),
-        ("src/**/*.py", "matches"),
-        ("src/*.py", "no_match"),
-        ("/src/**", "matches"),
-        ("src/ui/*.{ts,tsx}", "matches"),
-        ("app/[id]/page.tsx", "matches"),
-        ("lib/**", "no_match"),
+        ("src/**, lib/**", [("src/**", (("src/**", False),)), ("lib/**", (("lib/**", False),))]),
+        ("src/**,,lib/**, ", [("src/**", (("src/**", False),)), ("lib/**", (("lib/**", False),))]),
+        (
+            "src/*.{ts,tsx}, lib/**",
+            [("src/*.{ts,tsx}", (("src/*.{ts,tsx}", True),)), ("lib/**", (("lib/**", False),))],
+        ),
+        ("src/[a,b].ts", [("src/[a,b].ts", (("src/[a,b].ts", True),))]),
+        ("src/*.{ts}", [("src/*.{ts}", (("src/*.{ts}", False),))]),
+        (
+            ["src/**/*.ts, lib/**/*.ts "],
+            [("src/**/*.ts, lib/**/*.ts", (("src/**/*.ts", False), ("lib/**/*.ts", False)))],
+        ),
+        ([["src/**"], 3, None, " "], [("src/**", (("src/**", False),))]),
+        (3, []),
+        (None, []),
     ],
 )
-def test_copilot_semantics(glob: str, verdict: str) -> None:
-    assert copilot_glob(glob, FILES) == verdict
+def test_glob_groups_flatten_split_and_drop(value: object, groups: list[object]) -> None:
+    assert glob_groups(value) == groups
 
 
-def test_an_unclosed_bracket_is_not_invalid_for_copilot() -> None:
-    assert copilot_glob("src/api/[id", FILES) == "no_match"
-    assert copilot_glob("app/[id", frozenset({"app/[id"})) == "matches"
-
-
-@pytest.mark.parametrize(
-    ("glob", "unclosed"),
-    [("a[b", True), ("a[]", True), ("a[!]", True), ("a[]]", False), ("a[!]]", False), ("a[b]c[", True), ("abc", False)],
-)
-def test_unclosed_brackets(glob: str, unclosed: bool) -> None:
-    assert has_unclosed_bracket(glob) is unclosed
-
-
-@pytest.mark.parametrize(
-    ("value", "globs"),
-    [
-        ("src/**, lib/**", ["src/**", "lib/**"]),
-        ("src/**,,lib/**, ", ["src/**", "lib/**"]),
-        ("src/*.{ts,tsx}, lib/**", ["src/*.{ts,tsx}", "lib/**"]),
-        ("**", ["**"]),
-    ],
-)
-def test_comma_strings_split_outside_braces(value: str, globs: list[str]) -> None:
-    assert split_globs(value) == globs
-
-
-def test_too_many_brace_expansions_skip_the_check() -> None:
-    glob = "x/" + "{a,b,c,d}" * 6
-    assert claude_glob(glob, FILES) == "unmodelled"
-
-
-@pytest.mark.parametrize(("glob", "unclosed"), [("photos \\[2024/**", False), ("a\\[b[c", True), ("a\\\\[b", True)])
-def test_escaped_brackets_do_not_open_a_class(glob: str, unclosed: bool) -> None:
-    assert has_unclosed_bracket(glob) is unclosed
-
-
-def test_the_escaped_bracket_example_is_unmodelled_not_invalid() -> None:
-    assert claude_glob("photos \\[2024/**", FILES) == "unmodelled"
-
-
-def test_brackets_in_a_comma_string_do_not_split_and_are_unmodelled() -> None:
-    assert split_globs("src/[a,b].ts, lib/**") == ["src/[a,b].ts", "lib/**"]
-    assert claude_glob("src/[a,b].ts", FILES, split=True) == "unmodelled"
-    assert copilot_glob("src/[a,b].ts", FILES, split=True) == "unmodelled"
-
-
-@pytest.mark.parametrize(
-    ("glob", "claude", "copilot"),
-    [
-        ("src/[z-a].ts", "invalid", "unmodelled"),
-        ("src/[a-[]", "invalid", "unmodelled"),
-        ("x[a&&b]", "no_match", "no_match"),
-    ],
-)
-def test_a_class_re_cannot_compile_does_not_raise(glob: str, claude: str, copilot: str) -> None:
-    assert claude_glob(glob, FILES) == claude
-    assert copilot_glob(glob, FILES) == copilot
-
-
-def test_a_glob_naming_a_directory_matches_a_listed_directory() -> None:
-    assert claude_glob("src/api", FILES | {"src", "src/api"}) == "matches"
-    assert claude_glob("src/api", FILES) == "no_match"
+def test_comma_strings_split_outside_braces_and_brackets() -> None:
+    assert split_globs("src/[a,b].ts, x/*.{a,b}, y") == ["src/[a,b].ts", "x/*.{a,b}", "y"]
 
 
 @pytest.mark.parametrize(
