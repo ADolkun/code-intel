@@ -320,3 +320,9 @@ def test_a_hook_event_line_is_its_own_key(tmp_path: Path) -> None:
     text = '{"version": 1, "notes": {"preToolUse": []},\n "hooks": {\n  "preToolUse": {}}}\n'
     write(tmp_path / ".github/hooks/h.json", text)
     assert [line.split(": ", 1)[0] for line in lines(tmp_path)] == [".github/hooks/h.json:3"]
+
+
+def test_a_repeated_server_name_is_reported_where_the_winning_value_is(tmp_path: Path) -> None:
+    text = '{"mcpServers": {\n  "a": {"command": "x"},\n  "b": {"command": "y"},\n  "a": {"url": "u"}\n}}\n'
+    write(tmp_path / ".mcp.json", text)
+    assert [line.split(": ", 1)[0] for line in lines(tmp_path)] == [".mcp.json:4"]

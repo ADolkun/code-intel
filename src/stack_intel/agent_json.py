@@ -10,8 +10,8 @@
 Every server is an object; a typeless or ``stdio``/``local`` one needs a
 ``command``, a typeless one with only a ``url`` is read as stdio and skipped,
 a remote one needs a ``url``; ``args`` is a list of strings and ``env`` and
-``headers`` are objects (VS Code also takes numbers and null as values). An unknown ``type`` gets only the checks
-that do not depend on it.
+``headers`` are objects (VS Code also takes numbers and null as values). An
+unknown ``type`` gets only the checks that do not depend on it.
 """
 
 from __future__ import annotations
@@ -89,34 +89,46 @@ def _string_end(text: str, start: int) -> int:
 
 
 def _key_lines(text: str) -> dict[tuple[str, ...], int]:
-    """The line of each object key, by its path of keys from the root (first
-    occurrence); keys inside arrays are not recorded. ``text`` is valid JSON."""
+    """The line of each object key, by its path of keys from the root; a
+    repeated key gets the line of its last occurrence, the value ``json``
+    keeps. Keys inside arrays are not recorded. ``text`` is valid JSON, so no
+    string holds a raw newline and one pass counts the lines."""
     lines: dict[tuple[str, ...], int] = {}
-    # Each open container: whether it is an object, the key path to it (None inside an array), its last key.
-    frames: list[tuple[bool, tuple[str, ...] | None, list[str | None]]] = []
-    i = 0
+    # Per open container: the key path to it (None inside an array), whether it
+    # is an object expecting a key next, and its latest key.
+    paths: list[tuple[str, ...] | None] = []
+    expecting: list[bool] = []
+    latest: list[str | None] = []
+    line, i = 1, 0
     while i < len(text):
         char = text[i]
         if char == '"':
             end = _string_end(text, i)
-            value = json.loads(text[i:end])
-            if frames and frames[-1][0] and text[end:].lstrip().startswith(":"):
-                _, path, last = frames[-1]
-                last[0] = value
-                if path is not None:
-                    lines.setdefault((*path, value), text.count("\n", 0, i) + 1)
+            if expecting and expecting[-1]:
+                key = json.loads(text[i:end])
+                latest[-1] = key
+                expecting[-1] = False
+                if paths[-1] is not None:
+                    lines[(*paths[-1], key)] = line
             i = end
             continue
-        if char in "{[":
-            if not frames:
-                path: tuple[str, ...] | None = ()
-            else:
-                is_object, parent, last = frames[-1]
-                key = last[0]
-                path = None if parent is None or not is_object or key is None else (*parent, key)
-            frames.append((char == "{", path, [None]))
+        if char == "\n":
+            line += 1
+        elif char in "{[":
+            path: tuple[str, ...] | None = None
+            if char == "{" and not paths:
+                path = ()
+            elif char == "{" and (parent := paths[-1]) is not None and (key := latest[-1]) is not None:
+                path = (*parent, key)
+            paths.append(path)
+            expecting.append(char == "{")
+            latest.append(None)
         elif char in "}]":
-            frames.pop()
+            paths.pop()
+            expecting.pop()
+            latest.pop()
+        elif char == "," and expecting:
+            expecting[-1] = latest[-1] is not None
         i += 1
     return lines
 

@@ -15,13 +15,13 @@ from stack_intel.doc_report import Finding
 KIND = "agent"
 STATUS = "invalid"
 
-# An unquoted glob as the value of a glob key (`paths: **/*.ts`, `applyTo: {a,b}/**`)
-# is a YAML alias or flow mapping. Whether the agents' own parsers read such
-# frontmatter is unconfirmed, so outside `strict` it is not reported as broken.
-_GLOB_KEY_VALUE = re.compile(r"^((?:paths|applyTo)\s*:\s+)([*{].*?)\s*$")
-_GLOB_ITEM = re.compile(r"^(\s*-\s+)([*{].*?)\s*$")
-_TOP_LEVEL_KEY = re.compile(r"^[^\s#-][^:]*:")
-_GLOB_KEY = re.compile(r"^(?:paths|applyTo)\s*:")
+# A plain value starting with `*` (`paths: **/*.ts`, `description: *Use
+# proactively*`) is a YAML alias, and one starting with `{` under a glob key
+# (`paths: {src,lib}/**`) a flow mapping. Whether the agents' own parsers read
+# such frontmatter is unconfirmed, so outside `strict` it is not reported.
+_KEY_LINE = re.compile(r"^(\s*)([^\s#'\"\-][^:]*?)(\s*:\s+)(\S.*?)\s*$")
+_ITEM_LINE = re.compile(r"^(\s*-\s+)(\S.*?)\s*$")
+_GLOB_KEYS = frozenset({"paths", "applyTo"})
 _BOOL = "tag:yaml.org,2002:bool"
 
 
@@ -84,32 +84,59 @@ class Frontmatter:
 @dataclass(frozen=True)
 class FrontmatterRead:
     """``present``: line 1 is ``---``. Present frontmatter has ``meta`` when it
-    reads as a mapping and ``error`` when it cannot be read. ``glob_quirk``:
-    it reads once the unquoted glob values of ``paths`` and ``applyTo`` are
-    quoted, so whether the agents read it is unconfirmed."""
+    reads as a mapping and ``error`` when it cannot be read. ``unconfirmed``:
+    it reads once unquoted ``*`` values (and ``{`` glob values) are quoted,
+    so whether the agents read it is unconfirmed."""
 
     present: bool
     meta: Frontmatter | None = None
     error: FrontmatterError | None = None
-    glob_quirk: bool = False
+    unconfirmed: bool = False
 
     def failure(self, *, strict: bool) -> FrontmatterError | None:
-        """The error to report: a glob quirk only under ``strict``."""
-        return None if self.glob_quirk and not strict else self.error
+        """The error to report: an unconfirmed one only under ``strict``."""
+        return None if self.unconfirmed and not strict else self.error
 
 
-def _quote_glob_values(body: str) -> str:
-    def quote(match: re.Match[str]) -> str:
-        return match.group(1) + "'" + match.group(2).replace("'", "''") + "'"
+def _quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
+
+def _split_flow(inner: str) -> list[str]:
+    parts, depth, start = [], 0, 0
+    for i, char in enumerate(inner):
+        depth += {"{": 1, "[": 1, "}": -1, "]": -1}.get(char, 0)
+        if char == "," and depth == 0:
+            parts.append(inner[start:i])
+            start = i + 1
+    parts.append(inner[start:])
+    return parts
+
+
+def _quote_value(value: str, glob_key: bool) -> str:
+    starts = "*{" if glob_key else "*"
+    if value[0] in starts:
+        return _quoted(value)
+    if value.startswith("[") and value.endswith("]"):
+        items = [item.strip() for item in _split_flow(value[1:-1])]
+        return "[" + ", ".join(_quoted(item) if item[:1] in starts else item for item in items) + "]"
+    return value
+
+
+def _quote_unconfirmed(body: str) -> str:
+    """``body`` with each plain value starting with ``*`` (and with ``{`` under
+    ``paths`` or ``applyTo``) quoted, in block and flow lists too."""
     out: list[str] = []
-    in_glob_key = False
+    glob_key = False
     for line in body.split("\n"):
-        if _TOP_LEVEL_KEY.match(line):
-            in_glob_key = _GLOB_KEY.match(line) is not None
-            line = _GLOB_KEY_VALUE.sub(quote, line)
-        elif in_glob_key:
-            line = _GLOB_ITEM.sub(quote, line)
+        if match := _KEY_LINE.match(line):
+            indent, key, colon, value = match.groups()
+            glob_key = key in _GLOB_KEYS
+            line = indent + key + colon + _quote_value(value, glob_key)
+        elif match := _ITEM_LINE.match(line):
+            line = match.group(1) + _quote_value(match.group(2), glob_key)
+        elif (bare := line.rstrip()).endswith(":") and not bare.lstrip().startswith(("#", "-")):
+            glob_key = bare.strip()[:-1].strip() in _GLOB_KEYS
         out.append(line)
     return "\n".join(out)
 
@@ -138,7 +165,7 @@ def parse_frontmatter(text: str) -> FrontmatterRead:
         reason = getattr(exc, "problem", None) or str(exc).splitlines()[0]
         line = 1 if mark is None else mark.line + 2
         error = FrontmatterError(line, f"invalid YAML frontmatter: {reason}")
-        return FrontmatterRead(True, error=error, glob_quirk=_reads(_quote_glob_values(body)))
+        return FrontmatterRead(True, error=error, unconfirmed=_reads(_quote_unconfirmed(body)))
     if root is None:
         return FrontmatterRead(True, meta=Frontmatter({}, {}, {}, ()))
     if not isinstance(root, yaml.MappingNode) or not isinstance(data, dict):

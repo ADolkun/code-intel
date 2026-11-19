@@ -9,10 +9,12 @@ from pathlib import Path
 
 import pytest
 from fake_repo_files import FakeRepoFiles, repo_files_on_disk
+from fixture_repo import git_init, hermetic_git
 from mcp_fixtures import FakeAnalyzers, config_toml, make_repo, make_runtime, write, write_config
 
 from stack_intel import agent_files
 from stack_intel.config import AgentsConfig, InstructionMap
+from stack_intel.repo_files import list_repo_files
 
 MAP_FILE = "AGENTS.md"
 INSTRUCTION_MAP = InstructionMap(MAP_FILE, "Scoped instruction map")
@@ -694,10 +696,47 @@ def test_an_unquoted_glob_value_is_reported_only_under_strict(repo: Path, text: 
     assert finding.endswith("; Claude Code ignores it and loads the rule for every file")
 
 
-def test_an_unquoted_alias_outside_a_glob_key_is_reported(repo: Path) -> None:
-    put(repo, ".claude/rules/api.md", '---\ndescription: *anchor\npaths: ["src/api/**"]\n---\n')
-    (finding,) = lines(repo, DEFAULT)
-    assert finding.startswith(".claude/rules/api.md:2: invalid YAML frontmatter:")
+@pytest.mark.parametrize(
+    ("rel", "text"),
+    [
+        (".claude/agents/r.md", "---\nname: r\ndescription: *Use proactively* for reviews\n---\n"),
+        (".claude/skills/s/SKILL.md", "---\nname: s\ndescription: *Important* skill\n---\n"),
+        (".claude/rules/api.md", "---\npaths: **/*.ts\ndescription: *x*\n---\n"),
+        (".claude/rules/api.md", "---\npaths: [**/*.ts]\n---\n"),
+        (".claude/rules/api.md", "---\n  paths: **/*.ts\n---\n"),
+        (".claude/rules/api.md", '---\npaths: [**/*.ts, "src/**", {src,lib}/**]\n---\n'),
+        (".claude/rules/api.md", "---\npaths:\n  - {src,lib}/**\n  - *.md\n---\n"),
+    ],
+    ids=[
+        "subagent-description",
+        "skill-description",
+        "rule-two-values",
+        "flow-list",
+        "indented",
+        "mixed-flow",
+        "items",
+    ],
+)
+def test_an_unquoted_star_value_is_reported_only_under_strict(tmp_path: Path, rel: str, text: str) -> None:
+    put(tmp_path, rel, text)
+    assert lines(tmp_path, DEFAULT) == []
+    (finding,) = [line for line in lines(tmp_path, AgentsConfig(strict=True)) if "invalid YAML" in line]
+    assert finding.startswith(f"{rel}:")
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("`npm test` runner", "found character '`' that cannot start any token"),
+        ("@mention", "found character '@' that cannot start any token"),
+        ("%x", "found character '%' that cannot start any token"),
+        ("{a,b}/**", "expected <block end>, but found '<scalar>'"),
+    ],
+)
+def test_other_reserved_characters_are_reported_by_default(tmp_path: Path, value: str, reason: str) -> None:
+    put(tmp_path, ".claude/agents/r.md", f"---\nname: r\ndescription: {value}\n---\n")
+    (finding,) = lines(tmp_path, DEFAULT)
+    assert finding.startswith(f".claude/agents/r.md:3: invalid YAML frontmatter: {reason}")
 
 
 def test_repeated_instruction_keys_are_reported_only_under_strict(repo: Path) -> None:
@@ -712,3 +751,29 @@ def test_yaml_1_1_booleans_are_read_as_strings(tmp_path: Path) -> None:
     put(tmp_path, ".claude/agents/a.md", "---\nname: yes\ndescription: on\n---\n")
     put(tmp_path, ".github/agents/b.md", "---\ndescription: no\n---\n")
     assert lines(tmp_path, DEFAULT) == []
+
+
+# ── Paths git must read as data ──────────────────────────────────────────
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    hermetic_git(monkeypatch, tmp_path / "home")
+    return git_init(tmp_path / "repo")
+
+
+@pytest.mark.parametrize("glob", [":!y/**", ":(exclude)y/**"])
+def test_a_glob_starting_with_a_colon_is_asked_about_as_a_path(git_repo: Path, glob: str) -> None:
+    put(git_repo, ".claude/rules/api.md", f"---\npaths: [{glob!r}]\n---\n")
+    report = agent_files.check(git_repo, DEFAULT, list_repo_files(git_repo))
+    assert [f"{f.file}:{f.line}: {f.message}" for f in report.findings] == [
+        f".claude/rules/api.md:2: paths glob {glob!r} matches no git-visible file"
+    ]
+
+
+def test_an_import_starting_with_a_colon_is_asked_about_as_a_path(git_repo: Path) -> None:
+    put(git_repo, "CLAUDE.md", "See @:!x.md\n")
+    report = agent_files.check(git_repo, DEFAULT, list_repo_files(git_repo))
+    assert [f"{f.file}:{f.line}: {f.message}" for f in report.findings] == [
+        "CLAUDE.md:1: @:!x.md imports a file that does not exist"
+    ]

@@ -83,6 +83,14 @@ def test_ignored_answers_for_missing_paths(repo: Path) -> None:
     assert files.ignored(asked) == {"gone.log", "frontend/build/", ".env"}
 
 
+@pytest.mark.parametrize("path", [":!y/x", ":(exclude)y/x", ":/top", ":x"])
+def test_a_path_starting_with_a_colon_is_a_path_not_pathspec_magic(repo: Path, path: str) -> None:
+    files = list_repo_files(repo)
+    assert files.ignored([path, "gone.log"]) == {"gone.log"}
+    write(repo, {".gitignore": f"build/\n*.log\n.env\n/{path.split('/')[0]}/\n/{path}\n"})
+    assert files.ignored([path, "docs/x.md"]) == {path}
+
+
 def test_ignored_sends_paths_on_stdin_with_a_fixed_argv(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = list_repo_files(repo)
     calls: list[tuple[list[str], bytes | None]] = []

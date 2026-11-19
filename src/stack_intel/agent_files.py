@@ -25,13 +25,13 @@ finding is never wrong for any of them:
 - MCP configs and hooks: ``agent_json``. ``@path`` imports: ``agent_imports``.
 - ``strict``: every rule has frontmatter with ``paths`` and no ``applyTo``,
   the Agent Skills rules apply to ``.claude/skills`` too, every directory
-  under a skill root holds a ``SKILL.md``, and unquoted glob values that stop
+  under a skill root holds a ``SKILL.md``, and unquoted ``*`` values that stop
   frontmatter from parsing and repeated instruction keys are reported.
+- The ``instruction_map`` section's ``- `label`: `glob`, ...`` lines name
+  exactly the root ``.claude/rules`` files' stems, each with that file's ``paths``.
 
 A glob that matches no git-visible path is still not reported when a reader
 may see files git does not list (``_Checkout.unproven``).
-- The ``instruction_map`` section's ``- `label`: `glob`, ...`` lines name
-  exactly the root ``.claude/rules`` files' stems, each with that file's ``paths``.
 
 Nested ``.claude/`` directories (a sub-project launched on its own) are not read.
 A finding is a ``doc_report.Finding`` (``path:line: message`` when printed),
@@ -175,9 +175,9 @@ def _check_rule(
 # ── .claude/agents ───────────────────────────────────────────────────────
 
 
-def _check_subagent(rel: str, text: str, first_by_name: dict[str, str], findings: list[Finding]) -> None:
+def _check_subagent(rel: str, text: str, first_by_name: dict[str, str], strict: bool, findings: list[Finding]) -> None:
     read = parse_frontmatter(text)
-    if (error := read.failure(strict=False)) is not None:
+    if (error := read.failure(strict=strict)) is not None:
         findings.append(finding(rel, error.line, "frontmatter", f"{error.message}; Claude Code skips the subagent"))
         return
     meta = read.meta
@@ -324,7 +324,7 @@ def check(repo_root: Path, agents: AgentsConfig, files: RepoFiles) -> AgentRepor
     for rel in _files_under(AGENTS_DIR, visible, ".md"):
         read.append(rel)
         if (text := read_text(repo_root, rel, findings)) is not None:
-            _check_subagent(rel, text, first_by_name, findings)
+            _check_subagent(rel, text, first_by_name, agents.strict, findings)
 
     strict = agents.strict
     read += agent_skills.check_root(
