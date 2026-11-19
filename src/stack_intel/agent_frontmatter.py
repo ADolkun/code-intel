@@ -15,11 +15,26 @@ from stack_intel.doc_report import Finding
 KIND = "agent"
 STATUS = "invalid"
 
-# A value the YAML grammar reads as an alias, a tag, a flow mapping or a
-# reserved indicator, as an unquoted glob is (`paths: **/*.ts`). Whether the
-# agents' own parsers read such frontmatter is unconfirmed, so it is not
-# reported as broken.
-_GLOB_LIKE_VALUE = re.compile(r"^(\s*(?:-\s+|[^\s#'\"-][^:]*:\s+))([*{!@%`].*?)\s*$")
+# An unquoted glob as the value of a glob key (`paths: **/*.ts`, `applyTo: {a,b}/**`)
+# is a YAML alias or flow mapping. Whether the agents' own parsers read such
+# frontmatter is unconfirmed, so outside `strict` it is not reported as broken.
+_GLOB_KEY_VALUE = re.compile(r"^((?:paths|applyTo)\s*:\s+)([*{].*?)\s*$")
+_GLOB_ITEM = re.compile(r"^(\s*-\s+)([*{].*?)\s*$")
+_TOP_LEVEL_KEY = re.compile(r"^[^\s#-][^:]*:")
+_GLOB_KEY = re.compile(r"^(?:paths|applyTo)\s*:")
+_BOOL = "tag:yaml.org,2002:bool"
+
+
+class _Loader(yaml.SafeLoader):
+    """YAML 1.2 booleans: only true and false. YAML 1.1's yes, no, on, off, y
+    and n stay strings, as the agents' YAML 1.2 readers read them."""
+
+
+_Loader.yaml_implicit_resolvers = {
+    first: [(tag, regex) for tag, regex in resolvers if tag != _BOOL]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_Loader.add_implicit_resolver(_BOOL, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF"))
 
 
 def finding(rel: str, line: int, text: str, message: str) -> Finding:
@@ -69,23 +84,42 @@ class Frontmatter:
 @dataclass(frozen=True)
 class FrontmatterRead:
     """``present``: line 1 is ``---``. Present frontmatter has ``meta`` when it
-    reads as a mapping, ``error`` when it cannot be read, and neither when
-    only a glob-like unquoted value stops it from parsing (unconfirmed)."""
+    reads as a mapping and ``error`` when it cannot be read. ``glob_quirk``:
+    it reads once the unquoted glob values of ``paths`` and ``applyTo`` are
+    quoted, so whether the agents read it is unconfirmed."""
 
     present: bool
     meta: Frontmatter | None = None
     error: FrontmatterError | None = None
+    glob_quirk: bool = False
+
+    def failure(self, *, strict: bool) -> FrontmatterError | None:
+        """The error to report: a glob quirk only under ``strict``."""
+        return None if self.glob_quirk and not strict else self.error
 
 
-def _compose(body: str) -> yaml.Node | None:
-    return yaml.compose(body, Loader=yaml.SafeLoader)
-
-
-def _quote_glob_like(body: str) -> str:
+def _quote_glob_values(body: str) -> str:
     def quote(match: re.Match[str]) -> str:
         return match.group(1) + "'" + match.group(2).replace("'", "''") + "'"
 
-    return "\n".join(_GLOB_LIKE_VALUE.sub(quote, line) for line in body.split("\n"))
+    out: list[str] = []
+    in_glob_key = False
+    for line in body.split("\n"):
+        if _TOP_LEVEL_KEY.match(line):
+            in_glob_key = _GLOB_KEY.match(line) is not None
+            line = _GLOB_KEY_VALUE.sub(quote, line)
+        elif in_glob_key:
+            line = _GLOB_ITEM.sub(quote, line)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _reads(body: str) -> bool:
+    try:
+        yaml.load(body, Loader=_Loader)
+    except yaml.YAMLError:
+        return False
+    return True
 
 
 def parse_frontmatter(text: str) -> FrontmatterRead:
@@ -97,32 +131,33 @@ def parse_frontmatter(text: str) -> FrontmatterRead:
         return FrontmatterRead(True, error=FrontmatterError(1, "YAML frontmatter is not closed by a --- line"))
     body = "\n".join(lines[1:end])
     try:
-        root = _compose(body)
-        data = yaml.safe_load(body)
+        root = yaml.compose(body, Loader=_Loader)
+        data = yaml.load(body, Loader=_Loader)
     except yaml.YAMLError as exc:
-        try:
-            yaml.safe_load(_quote_glob_like(body))
-        except yaml.YAMLError:
-            mark = getattr(exc, "problem_mark", None)
-            reason = getattr(exc, "problem", None) or str(exc).splitlines()[0]
-            line = 1 if mark is None else mark.line + 2
-            return FrontmatterRead(True, error=FrontmatterError(line, f"invalid YAML frontmatter: {reason}"))
-        return FrontmatterRead(present=True)
+        mark = getattr(exc, "problem_mark", None)
+        reason = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+        line = 1 if mark is None else mark.line + 2
+        error = FrontmatterError(line, f"invalid YAML frontmatter: {reason}")
+        return FrontmatterRead(True, error=error, glob_quirk=_reads(_quote_glob_values(body)))
     if root is None:
         return FrontmatterRead(True, meta=Frontmatter({}, {}, {}, ()))
     if not isinstance(root, yaml.MappingNode) or not isinstance(data, dict):
         return FrontmatterRead(True, error=FrontmatterError(1, "YAML frontmatter must be a mapping"))
     keys: dict[str, yaml.Node] = {}
     values: dict[str, yaml.Node] = {}
+    first_lines: dict[str, int] = {}
     repeats: list[tuple[str, int, int]] = []
     for key_node, value_node in root.value:
         if not isinstance(key_node, yaml.ScalarNode):
             continue
         key = key_node.value
-        if key in keys:
-            repeats.append((key, key_node.start_mark.line + 2, keys[key].start_mark.line + 2))
+        line = key_node.start_mark.line + 2
+        if key in first_lines:
+            repeats.append((key, line, first_lines[key]))
         else:
-            keys[key], values[key] = key_node, value_node
+            first_lines[key] = line
+        # The loaded mapping keeps a repeated key's last value, so lines point there too.
+        keys[key], values[key] = key_node, value_node
     return FrontmatterRead(True, meta=Frontmatter(data, keys, values, tuple(repeats)))
 
 

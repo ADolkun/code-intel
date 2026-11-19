@@ -26,7 +26,8 @@ from stack_intel.agent_frontmatter import Frontmatter, finding, is_blank, parse_
 from stack_intel.doc_report import Finding
 
 CLAUDE_SKILLS = ".claude/skills"
-SPEC_ROOTS: tuple[str, ...] = (".agents/skills", ".github/skills")
+GITHUB_SKILLS = ".github/skills"
+SPEC_ROOTS: tuple[str, ...] = (".agents/skills", GITHUB_SKILLS)
 CONVENTIONAL_ROOTS: tuple[str, ...] = (CLAUDE_SKILLS, *SPEC_ROOTS)
 SKILL_FILE = "SKILL.md"
 
@@ -74,24 +75,25 @@ def _check_claude(rel: str, directory: str, meta: Frontmatter | None, findings: 
         )
 
 
-def _name_problem(name: str) -> str | None:
+def _name_problem(name: str, unloaded: str) -> str | None:
     if len(name) > _MAX_NAME:
         return f"must be at most {_MAX_NAME} characters (Agent Skills)"
     if any(c != "-" and (not c.isalnum() or c.isupper()) for c in name):
-        return "must be lowercase letters, digits and hyphens (Agent Skills; VS Code does not load it)"
+        return f"must be lowercase letters, digits and hyphens ({unloaded})"
     if name.startswith("-") or name.endswith("-") or "--" in name:
         return "must not start or end with a hyphen or hold '--' (Agent Skills)"
     return None
 
 
-def _check_spec(rel: str, directory: str, meta: Frontmatter, findings: list[Finding]) -> None:
+def _check_spec(rel: str, directory: str, meta: Frontmatter, vscode: bool, findings: list[Finding]) -> None:
+    unloaded = "Agent Skills; VS Code does not load it" if vscode else "Agent Skills"
     name = meta.data.get("name")
     if is_blank(name):
         findings.append(
             finding(rel, meta.line("name"), "name", "frontmatter 'name' must be a non-blank string (Agent Skills)")
         )
     elif isinstance(name, str):
-        if (problem := _name_problem(name)) is not None:
+        if (problem := _name_problem(name, unloaded)) is not None:
             findings.append(finding(rel, meta.line("name"), name, f"skill name {name!r} {problem}"))
         elif name != directory:
             findings.append(
@@ -99,7 +101,7 @@ def _check_spec(rel: str, directory: str, meta: Frontmatter, findings: list[Find
                     rel,
                     meta.line("name"),
                     name,
-                    f"skill name {name!r} does not match its directory {directory!r} (Agent Skills; VS Code does not load it)",
+                    f"skill name {name!r} does not match its directory {directory!r} ({unloaded})",
                 )
             )
     description = meta.data.get("description")
@@ -143,7 +145,9 @@ def check_root(
     spec: bool,
     strict: bool,
 ) -> list[str]:
-    """Check the skills under ``root``; returns the ``SKILL.md`` files read."""
+    """Check the skills under ``root``; returns the ``SKILL.md`` files read.
+    Only ``.github/skills`` findings name VS Code, the reader of that root."""
+    vscode = root == GITHUB_SKILLS
     files = skill_files(root, visible)
     for rel in files:
         text = read_text(repo_root, rel, findings)
@@ -151,9 +155,9 @@ def check_root(
             continue
         directory = posixpath.basename(posixpath.dirname(rel))
         read = parse_frontmatter(text)
-        if read.error is not None:
+        if (error := read.failure(strict=strict)) is not None:
             reader = "Claude Code loads the skill without it" if claude else "its name and description cannot be read"
-            findings.append(finding(rel, read.error.line, "frontmatter", f"{read.error.message}; {reader}"))
+            findings.append(finding(rel, error.line, "frontmatter", f"{error.message}; {reader}"))
         meta = read.meta
         if meta is not None:
             findings.extend(meta.repeat_findings(rel))
@@ -171,7 +175,7 @@ def check_root(
                     )
                 )
             elif meta is not None:
-                _check_spec(rel, directory, meta, findings)
+                _check_spec(rel, directory, meta, vscode, findings)
     if strict:
         _missing_skill_files(root, visible, findings)
     return files

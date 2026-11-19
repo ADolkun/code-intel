@@ -5,7 +5,14 @@ from __future__ import annotations
 
 import pytest
 
-from stack_intel.agent_globs import claude_glob, copilot_glob, has_unclosed_bracket, split_globs
+from stack_intel.agent_globs import (
+    claude_glob,
+    copilot_glob,
+    has_unclosed_bracket,
+    literal_directory,
+    sample_paths,
+    split_globs,
+)
 
 FILES = frozenset(
     {
@@ -126,3 +133,51 @@ def test_comma_strings_split_outside_braces(value: str, globs: list[str]) -> Non
 def test_too_many_brace_expansions_skip_the_check() -> None:
     glob = "x/" + "{a,b,c,d}" * 6
     assert claude_glob(glob, FILES) == "unmodelled"
+
+
+@pytest.mark.parametrize(("glob", "unclosed"), [("photos \\[2024/**", False), ("a\\[b[c", True), ("a\\\\[b", True)])
+def test_escaped_brackets_do_not_open_a_class(glob: str, unclosed: bool) -> None:
+    assert has_unclosed_bracket(glob) is unclosed
+
+
+def test_the_escaped_bracket_example_is_unmodelled_not_invalid() -> None:
+    assert claude_glob("photos \\[2024/**", FILES) == "unmodelled"
+
+
+def test_brackets_in_a_comma_string_do_not_split_and_are_unmodelled() -> None:
+    assert split_globs("src/[a,b].ts, lib/**") == ["src/[a,b].ts", "lib/**"]
+    assert claude_glob("src/[a,b].ts", FILES, split=True) == "unmodelled"
+    assert copilot_glob("src/[a,b].ts", FILES, split=True) == "unmodelled"
+
+
+@pytest.mark.parametrize(
+    ("glob", "claude", "copilot"),
+    [
+        ("src/[z-a].ts", "invalid", "unmodelled"),
+        ("src/[a-[]", "invalid", "unmodelled"),
+        ("x[a&&b]", "no_match", "no_match"),
+    ],
+)
+def test_a_class_re_cannot_compile_does_not_raise(glob: str, claude: str, copilot: str) -> None:
+    assert claude_glob(glob, FILES) == claude
+    assert copilot_glob(glob, FILES) == copilot
+
+
+def test_a_glob_naming_a_directory_matches_a_listed_directory() -> None:
+    assert claude_glob("src/api", FILES | {"src", "src/api"}) == "matches"
+    assert claude_glob("src/api", FILES) == "no_match"
+
+
+@pytest.mark.parametrize(
+    ("glob", "directory", "samples"),
+    [
+        ("gen/**/*.ts", "gen", ["gen/.ts", "gen/x.ts"]),
+        ("/src/gen/*.py", "src/gen", ["src/gen/.py", "src/gen/x.py"]),
+        ("**/.env*", "", [".env", ".envx"]),
+        ("src/[ab]/?.md", "src", ["src/a/x.md"]),
+        ("src/api", "src", ["src/api"]),
+    ],
+)
+def test_literal_directory_and_sample_paths(glob: str, directory: str, samples: list[str]) -> None:
+    assert literal_directory(glob) == directory
+    assert sample_paths(glob) == samples

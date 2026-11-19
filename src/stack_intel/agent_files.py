@@ -15,17 +15,21 @@ finding is never wrong for any of them:
   characters, not starting with ``-``, without ``:``, unique in the tree.
 - skills: ``agent_skills``.
 - ``.github/instructions/**/*.instructions.md`` (Copilot): when the
-  frontmatter parses, no repeated key, ``applyTo`` a string or a list of
-  non-blank strings whose globs match a file, ``excludeAgent`` one of
-  ``code-review`` and ``cloud-agent``. Copilot CLI recovers its keys from
-  YAML that does not parse, so a parse failure is not reported.
+  frontmatter parses, ``applyTo`` a string or a list of non-blank strings
+  whose globs match a file, ``excludeAgent`` one of ``code-review`` and
+  ``cloud-agent``. Copilot CLI recovers its keys from YAML that does not
+  parse, so neither a parse failure nor a repeated key is reported.
 - ``.github/agents/**/*.md`` (Copilot): a base name of ``.``, ``-``, ``_``,
   ASCII letters and digits; parsed frontmatter has a non-blank
   ``description`` and a ``target`` of ``vscode`` or ``github-copilot``.
 - MCP configs and hooks: ``agent_json``. ``@path`` imports: ``agent_imports``.
 - ``strict``: every rule has frontmatter with ``paths`` and no ``applyTo``,
-  the Agent Skills rules apply to ``.claude/skills`` too, and every directory
-  under a skill root holds a ``SKILL.md``.
+  the Agent Skills rules apply to ``.claude/skills`` too, every directory
+  under a skill root holds a ``SKILL.md``, and unquoted glob values that stop
+  frontmatter from parsing and repeated instruction keys are reported.
+
+A glob that matches no git-visible path is still not reported when a reader
+may see files git does not list (``_Checkout.unproven``).
 - The ``instruction_map`` section's ``- `label`: `glob`, ...`` lines name
   exactly the root ``.claude/rules`` files' stems, each with that file's ``paths``.
 
@@ -36,6 +40,7 @@ so the docs check reports it with the docs findings.
 
 from __future__ import annotations
 
+import functools
 import posixpath
 import re
 from collections.abc import Collection
@@ -44,7 +49,7 @@ from pathlib import Path
 
 from stack_intel import agent_imports, agent_json, agent_skills
 from stack_intel.agent_frontmatter import Frontmatter, finding, is_blank, parse_frontmatter, read_text
-from stack_intel.agent_globs import claude_glob, copilot_glob, split_globs
+from stack_intel.agent_globs import claude_glob, copilot_glob, literal_directory, sample_paths, split_globs
 from stack_intel.config import AgentsConfig, InstructionMap
 from stack_intel.doc_report import Finding
 from stack_intel.markdown_facts import doc_facts_from_text
@@ -67,6 +72,41 @@ _MAX_SUBAGENT_NAME = 256
 class AgentReport:
     findings: list[Finding]
     files: tuple[str, ...]  # every agent file read
+
+
+@dataclass(frozen=True)
+class _Checkout:
+    repo_root: Path
+    files: RepoFiles
+
+    @functools.cached_property
+    def paths(self) -> frozenset[str]:
+        """Git-visible files and directories: a glob naming a directory matches."""
+        return self.files.files | self.files.dirs
+
+    @functools.cached_property
+    def tracked_dirs(self) -> frozenset[str]:
+        return frozenset(parent for rel in self.files.tracked for parent in _parents(rel))
+
+    def unproven(self, glob: str) -> bool:
+        """Whether a glob that matches no git-visible path may still match
+        files the reader sees: its literal directory is or lies under a
+        symlink, exists on disk without being tracked, or git ignores the
+        directory or paths the glob would match."""
+        directory = literal_directory(glob)
+        if directory:
+            parts = directory.split("/")
+            if any((self.repo_root / "/".join(parts[:end])).is_symlink() for end in range(1, len(parts) + 1)):
+                return True
+            if (self.repo_root / directory).exists() and directory not in self.tracked_dirs:
+                return True
+        asked = sample_paths(glob) + ([directory + "/"] if directory else [])
+        return bool(self.files.ignored(asked))
+
+
+def _parents(rel: str) -> list[str]:
+    parts = rel.split("/")[:-1]
+    return ["/".join(parts[:end]) for end in range(1, len(parts) + 1)]
 
 
 def _files_under(directory: str, visible: Collection[str], suffix: str) -> list[str]:
@@ -92,13 +132,13 @@ def _globs(meta: Frontmatter, key: str) -> list[tuple[str, int, bool]] | None:
 
 
 def _check_rule(
-    rel: str, text: str, visible: Collection[str], strict: bool, findings: list[Finding]
+    rel: str, text: str, checkout: _Checkout, strict: bool, findings: list[Finding]
 ) -> tuple[str, ...] | None:
     """The rule's globs for the instruction map: None when they cannot be read."""
     read = parse_frontmatter(text)
-    if read.error is not None:
-        message = f"{read.error.message}; Claude Code ignores it and loads the rule for every file"
-        findings.append(finding(rel, read.error.line, "frontmatter", message))
+    if (error := read.failure(strict=strict)) is not None:
+        message = f"{error.message}; Claude Code ignores it and loads the rule for every file"
+        findings.append(finding(rel, error.line, "frontmatter", message))
         return None
     if not read.present:
         if strict:
@@ -123,11 +163,11 @@ def _check_rule(
         findings.append(finding(rel, meta.line("paths"), "paths", "frontmatter 'paths' must name a glob (strict)"))
         return None
     for glob, line, split in globs:
-        verdict = claude_glob(glob, visible, split=split)
+        verdict = claude_glob(glob, checkout.paths, split=split)
         if verdict == "invalid":
-            message = f"paths glob {glob!r} has a '[' that no ']' closes; Claude Code matches no file with it"
+            message = f"paths glob {glob!r} has an invalid bracket expression; Claude Code matches no file with it"
             findings.append(finding(rel, line, glob, message))
-        elif verdict == "no_match":
+        elif verdict == "no_match" and not checkout.unproven(glob):
             findings.append(finding(rel, line, glob, f"paths glob {glob!r} matches no git-visible file"))
     return tuple(glob for glob, _, _ in globs)
 
@@ -137,10 +177,8 @@ def _check_rule(
 
 def _check_subagent(rel: str, text: str, first_by_name: dict[str, str], findings: list[Finding]) -> None:
     read = parse_frontmatter(text)
-    if read.error is not None:
-        findings.append(
-            finding(rel, read.error.line, "frontmatter", f"{read.error.message}; Claude Code skips the subagent")
-        )
+    if (error := read.failure(strict=False)) is not None:
+        findings.append(finding(rel, error.line, "frontmatter", f"{error.message}; Claude Code skips the subagent"))
         return
     meta = read.meta
     name = None if meta is None else meta.data.get("name")
@@ -169,18 +207,19 @@ def _check_subagent(rel: str, text: str, first_by_name: dict[str, str], findings
 # ── .github/instructions and .github/agents ──────────────────────────────
 
 
-def _check_instructions(rel: str, text: str, visible: Collection[str], findings: list[Finding]) -> None:
+def _check_instructions(rel: str, text: str, checkout: _Checkout, strict: bool, findings: list[Finding]) -> None:
     meta = parse_frontmatter(text).meta
     if meta is None:
         return
-    findings.extend(meta.repeat_findings(rel))
+    if strict:
+        findings.extend(meta.repeat_findings(rel))
     if meta.data.get("applyTo") is not None:
         globs = _globs(meta, "applyTo")
         if globs is None:
             message = "frontmatter 'applyTo' must be a string or a list of non-blank strings"
             findings.append(finding(rel, meta.line("applyTo"), "applyTo", message))
         for glob, line, split in globs or ():
-            if copilot_glob(glob, visible, split=split) == "no_match":
+            if copilot_glob(glob, checkout.paths, split=split) == "no_match" and not checkout.unproven(glob):
                 findings.append(finding(rel, line, glob, f"applyTo glob {glob!r} matches no git-visible file"))
     exclude = meta.data.get("excludeAgent")
     if isinstance(exclude, str) and exclude not in _EXCLUDE_AGENTS:
@@ -270,6 +309,7 @@ def _check_map(
 def check(repo_root: Path, agents: AgentsConfig, files: RepoFiles) -> AgentReport:
     """Every agent-file finding in ``files``' checkout."""
     visible = files.files
+    checkout = _Checkout(repo_root, files)
     findings: list[Finding] = []
     read: list[str] = []
 
@@ -278,7 +318,7 @@ def check(repo_root: Path, agents: AgentsConfig, files: RepoFiles) -> AgentRepor
         read.append(rel)
         text = read_text(repo_root, rel, findings)
         stem = rel[len(RULES_DIR) + 1 : -len(".md")]
-        rule_paths[stem] = None if text is None else _check_rule(rel, text, visible, agents.strict, findings)
+        rule_paths[stem] = None if text is None else _check_rule(rel, text, checkout, agents.strict, findings)
 
     first_by_name: dict[str, str] = {}
     for rel in _files_under(AGENTS_DIR, visible, ".md"):
@@ -296,7 +336,7 @@ def check(repo_root: Path, agents: AgentsConfig, files: RepoFiles) -> AgentRepor
     for rel in _files_under(INSTRUCTIONS_DIR, visible, INSTRUCTIONS_SUFFIX):
         read.append(rel)
         if (text := read_text(repo_root, rel, findings)) is not None:
-            _check_instructions(rel, text, visible, findings)
+            _check_instructions(rel, text, checkout, agents.strict, findings)
     for rel in _files_under(COPILOT_AGENTS_DIR, visible, ".md"):
         read.append(rel)
         if (text := read_text(repo_root, rel, findings)) is not None:

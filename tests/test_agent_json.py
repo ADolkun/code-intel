@@ -123,8 +123,8 @@ def test_an_mcp_json_that_is_not_an_object_with_servers_is_reported(tmp_path: Pa
         ('{"type": "sse", "command": "x"}', "of type 'sse' needs a non-blank string 'url'"),
         ('{"command": "x", "args": "run"}', "has 'args' that is not a list of strings"),
         ('{"command": "x", "args": ["run", 3]}', "has 'args' that is not a list of strings"),
-        ('{"command": "x", "env": {"A": 1}}', "has 'env' that is not an object of strings"),
-        ('{"type": "http", "url": "u", "headers": ["A: b"]}', "has 'headers' that is not an object of strings"),
+        ('{"command": "x", "env": ["A=1"]}', "has 'env' that is not an object"),
+        ('{"type": "http", "url": "u", "headers": ["A: b"]}', "has 'headers' that is not an object"),
         ('{"type": "grpc", "args": "x"}', "has 'args' that is not a list of strings"),
     ],
 )
@@ -295,3 +295,28 @@ def test_hook_files_copilot_loads_are_not_reported(tmp_path: Path, text: str) ->
 def test_a_hook_file_copilot_rejects_is_reported(tmp_path: Path, text: str, expected: str) -> None:
     write(tmp_path / HOOKS, text)
     assert lines(tmp_path) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("rel", "text"),
+    [
+        (".vscode/mcp.json", '{"servers":{"a":{"type":"stdio","command":"x","env":{"PORT":8080,"N":null}}}}'),
+        (".mcp.json", '{"mcpServers":{"a":{"command":"x","env":{"PORT":8080,"N":null},"headers":{"X":1}}}}'),
+        (".github/mcp.json", '{"a":{"command":"x","env":{"PORT":8080,"N":null}}}'),
+    ],
+)
+def test_env_and_header_values_of_any_type_are_not_reported(tmp_path: Path, rel: str, text: str) -> None:
+    write(tmp_path / rel, text)
+    assert lines(tmp_path) == []
+
+
+def test_a_server_line_is_its_own_key_not_a_same_named_key_in_an_earlier_server(tmp_path: Path) -> None:
+    text = '{"mcpServers": {\n  "a": {"command": "x", "env": {"b": "1"}},\n  "b": {"url": "u"}\n}}\n'
+    write(tmp_path / ".mcp.json", text)
+    assert [line.split(": ", 1)[0] for line in lines(tmp_path)] == [".mcp.json:3"]
+
+
+def test_a_hook_event_line_is_its_own_key(tmp_path: Path) -> None:
+    text = '{"version": 1, "notes": {"preToolUse": []},\n "hooks": {\n  "preToolUse": {}}}\n'
+    write(tmp_path / ".github/hooks/h.json", text)
+    assert [line.split(": ", 1)[0] for line in lines(tmp_path)] == [".github/hooks/h.json:3"]

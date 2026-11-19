@@ -10,7 +10,7 @@
 Every server is an object; a typeless or ``stdio``/``local`` one needs a
 ``command``, a typeless one with only a ``url`` is read as stdio and skipped,
 a remote one needs a ``url``; ``args`` is a list of strings and ``env`` and
-``headers`` are objects of strings. An unknown ``type`` gets only the checks
+``headers`` are objects (VS Code also takes numbers and null as values). An unknown ``type`` gets only the checks
 that do not depend on it.
 """
 
@@ -80,27 +80,61 @@ def strip_jsonc(text: str) -> str:
     return "".join(out)
 
 
+def _string_end(text: str, start: int) -> int:
+    """The offset just past the JSON string opening at ``start``."""
+    i = start + 1
+    while text[i] != '"':
+        i += 2 if text[i] == "\\" else 1
+    return i + 1
+
+
+def _key_lines(text: str) -> dict[tuple[str, ...], int]:
+    """The line of each object key, by its path of keys from the root (first
+    occurrence); keys inside arrays are not recorded. ``text`` is valid JSON."""
+    lines: dict[tuple[str, ...], int] = {}
+    # Each open container: whether it is an object, the key path to it (None inside an array), its last key.
+    frames: list[tuple[bool, tuple[str, ...] | None, list[str | None]]] = []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == '"':
+            end = _string_end(text, i)
+            value = json.loads(text[i:end])
+            if frames and frames[-1][0] and text[end:].lstrip().startswith(":"):
+                _, path, last = frames[-1]
+                last[0] = value
+                if path is not None:
+                    lines.setdefault((*path, value), text.count("\n", 0, i) + 1)
+            i = end
+            continue
+        if char in "{[":
+            if not frames:
+                path: tuple[str, ...] | None = ()
+            else:
+                is_object, parent, last = frames[-1]
+                key = last[0]
+                path = None if parent is None or not is_object or key is None else (*parent, key)
+            frames.append((char == "{", path, [None]))
+        elif char in "}]":
+            frames.pop()
+        i += 1
+    return lines
+
+
 @dataclass(frozen=True)
 class _Source:
     rel: str
-    text: str  # what was parsed: comments already blanked for JSONC
+    lines: dict[tuple[str, ...], int]
 
-    def key_line(self, key: str, after: int = 0) -> int:
-        """The line of the first ``"key":`` at or after offset ``after``; 1 when not found."""
-        match = re.compile(re.escape(json.dumps(key, ensure_ascii=False)) + r"\s*:").search(self.text, after)
-        if match is None:
-            return 1
-        return self.text.count("\n", 0, match.start()) + 1
-
-    def key_offset(self, key: str) -> int:
-        match = re.compile(re.escape(json.dumps(key, ensure_ascii=False)) + r"\s*:").search(self.text)
-        return 0 if match is None else match.start()
+    def line(self, *path: str) -> int:
+        """The line of the key at ``path``; 1 when not found."""
+        return self.lines.get(path, 1)
 
 
 def _load(rel: str, text: str, findings: list[Finding], *, jsonc: bool, reader: str) -> tuple[object, _Source] | None:
-    source = _Source(rel, strip_jsonc(text) if jsonc else text)
+    parsed = strip_jsonc(text) if jsonc else text
     try:
-        return json.loads(source.text), source
+        return json.loads(parsed), _Source(rel, _key_lines(parsed))
     except json.JSONDecodeError as exc:
         findings.append(finding(rel, exc.lineno, rel, f"invalid JSON: {exc.msg}; {reader} cannot read the file"))
         return None
@@ -108,10 +142,6 @@ def _load(rel: str, text: str, findings: list[Finding], *, jsonc: bool, reader: 
 
 def _is_string_list(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
-
-
-def _is_string_map(value: object) -> bool:
-    return isinstance(value, dict) and all(isinstance(item, str) for item in value.values())
 
 
 def _check_server(
@@ -142,16 +172,16 @@ def _check_server(
     if "args" in server and not _is_string_list(server["args"]):
         report("has 'args' that is not a list of strings")
     for key in ("env", "headers"):
-        if key in server and not _is_string_map(server[key]):
-            report(f"has {key!r} that is not an object of strings")
+        if key in server and not isinstance(server[key], dict):
+            report(f"has {key!r} that is not an object")
 
 
 def _check_servers(
     source: _Source, servers: dict[str, object], container: str | None, findings: list[Finding], typeless_url: str
 ) -> None:
-    after = 0 if container is None else source.key_offset(container)
     for name, server in servers.items():
-        _check_server(source, name, server, source.key_line(name, after), findings, typeless_url=typeless_url)
+        line = source.line(name) if container is None else source.line(container, name)
+        _check_server(source, name, server, line, findings, typeless_url=typeless_url)
 
 
 def check_claude_mcp(text: str, findings: list[Finding]) -> None:
@@ -179,9 +209,7 @@ def check_copilot_mcp(text: str, findings: list[Finding]) -> None:
         return
     servers = data.get("mcpServers", data)
     if not isinstance(servers, dict):
-        findings.append(
-            finding(COPILOT_MCP, source.key_line("mcpServers"), "mcpServers", "'mcpServers' must be an object")
-        )
+        findings.append(finding(COPILOT_MCP, source.line("mcpServers"), "mcpServers", "'mcpServers' must be an object"))
         return
     reason = "Copilot CLI reads it as a local server and skips it"
     container = "mcpServers" if "mcpServers" in data else None
@@ -211,7 +239,7 @@ def check_vscode_mcp(text: str, findings: list[Finding]) -> None:
             findings.append(
                 finding(
                     VSCODE_MCP,
-                    source.key_line("mcpServers"),
+                    source.line("mcpServers"),
                     "mcpServers",
                     "VS Code reads servers from 'servers', not 'mcpServers'",
                 )
@@ -219,13 +247,12 @@ def check_vscode_mcp(text: str, findings: list[Finding]) -> None:
         return
     servers = data["servers"]
     if not isinstance(servers, dict):
-        findings.append(finding(VSCODE_MCP, source.key_line("servers"), "servers", "'servers' must be an object"))
+        findings.append(finding(VSCODE_MCP, source.line("servers"), "servers", "'servers' must be an object"))
         return
     inputs = data.get("inputs")
     declared = {item.get("id") for item in inputs if isinstance(item, dict)} if isinstance(inputs, list) else set()
-    after = source.key_offset("servers")
     for name, server in servers.items():
-        line = source.key_line(name, after)
+        line = source.line("servers", name)
         _check_server(source, name, server, line, findings, typeless_url=None)
         if not isinstance(server, dict):
             continue
@@ -254,15 +281,14 @@ def check_hooks(rel: str, text: str, findings: list[Finding]) -> None:
         return
     version = data.get("version")
     if "version" in data and (isinstance(version, bool) or version != 1):
-        findings.append(finding(rel, source.key_line("version"), "version", f"'version' must be 1{rejected}"))
+        findings.append(finding(rel, source.line("version"), "version", f"'version' must be 1{rejected}"))
     if "hooks" not in data:
         return
     hooks = data["hooks"]
     if not isinstance(hooks, dict):
-        findings.append(finding(rel, source.key_line("hooks"), "hooks", f"'hooks' must be an object{rejected}"))
+        findings.append(finding(rel, source.line("hooks"), "hooks", f"'hooks' must be an object{rejected}"))
         return
-    after = source.key_offset("hooks")
     for event, entries in hooks.items():
         if not isinstance(entries, list):
-            line = source.key_line(event, after)
+            line = source.line("hooks", event)
             findings.append(finding(rel, line, event, f"hook event {event!r} must be an array{rejected}"))

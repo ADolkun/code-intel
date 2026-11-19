@@ -504,3 +504,15 @@ def test_the_removed_agents_keys_say_what_to_do(table: str, expected: str) -> No
 )
 def test_invalid_agents_values_name_the_key_and_the_file(table: str, expected: str) -> None:
     assert error_of(f"{MINIMAL_CONFIG}\n[agents]\n{table}\n").startswith(expected)
+
+
+def test_agents_skill_dirs_count_a_directory_once() -> None:
+    cfg = parse(MINIMAL_CONFIG + '\n[agents]\nskill_dirs = ["skills", "skills/", "./skills"]\n')
+    assert cfg.agents == config.AgentsConfig(("skills",))
+
+
+@pytest.mark.parametrize("root", [".", "./"])
+def test_agents_skill_dirs_reject_the_repository_root(root: str) -> None:
+    assert error_of(f'{MINIMAL_CONFIG}\n[agents]\nskill_dirs = ["{root}"]\n') == (
+        "cfg.toml: 'skill_dirs' in [agents]: '.' is the repository root; list the directory holding the skills"
+    )

@@ -447,7 +447,11 @@ def _parse_agents(table: _Table) -> AgentsConfig:
         present, value = table.take(key)
         if present:
             raise _removed_agents_key(table, key, value)
-    skill_dirs = tuple(PurePosixPath(d).as_posix() for d in table.strings("skill_dirs", relative=True))
+    skill_dirs = tuple(dict.fromkeys(PurePosixPath(d).as_posix() for d in table.strings("skill_dirs", relative=True)))
+    if "." in skill_dirs:
+        raise table.fail(
+            f"'skill_dirs' in {table.where}: '.' is the repository root; list the directory holding the skills"
+        )
     if conventional := [d for d in skill_dirs if d in _CONVENTIONAL_SKILL_ROOTS]:
         raise table.fail(
             f"'skill_dirs' in {table.where}: {conventional[0]} is checked automatically; remove it from the list"

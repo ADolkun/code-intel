@@ -195,6 +195,8 @@ def test_a_claude_only_skill_is_not_held_to_the_agent_skills_rules(tmp_path: Pat
 def test_an_agent_skills_violation_is_reported(tmp_path: Path, root: str, text: str, expected: str) -> None:
     write(tmp_path / root / "deploy" / "SKILL.md", text)
     agents = AgentsConfig(skill_dirs=("skills",)) if root == "skills" else DEFAULT
+    if root != ".github/skills":
+        expected = expected.replace("(Agent Skills; VS Code does not load it)", "(Agent Skills)")
     assert lines(tmp_path, agents) == [f"{root}/deploy/{expected}"]
 
 
@@ -222,8 +224,7 @@ def test_one_name_in_two_roots_is_not_reported(tmp_path: Path) -> None:
 def test_strict_holds_claude_skills_to_the_agent_skills_rules(tmp_path: Path) -> None:
     write(tmp_path / ".claude/skills/deploy/SKILL.md", skill("release"))
     assert lines(tmp_path, STRICT) == [
-        ".claude/skills/deploy/SKILL.md:2: skill name 'release' does not match its directory 'deploy' "
-        "(Agent Skills; VS Code does not load it)"
+        ".claude/skills/deploy/SKILL.md:2: skill name 'release' does not match its directory 'deploy' (Agent Skills)"
     ]
 
 
@@ -240,3 +241,18 @@ def test_strict_requires_a_skill_md_in_every_directory(tmp_path: Path, root: str
         f"{root}/notes:1: skill directory 'notes' has no SKILL.md (strict)",
     ]
     assert lines(tmp_path) == []
+
+
+def test_yaml_1_1_booleans_are_names_not_booleans(tmp_path: Path) -> None:
+    for name in ("on", "no", "y"):
+        write(tmp_path / ".agents/skills" / name / "SKILL.md", skill(name))
+    assert lines(tmp_path) == []
+
+
+def test_an_unquoted_glob_in_a_skills_paths_is_reported_only_under_strict(tmp_path: Path) -> None:
+    write(tmp_path / ".claude/skills/deploy/SKILL.md", "---\nname: deploy\ndescription: x\npaths: **/*.py\n---\n")
+    assert lines(tmp_path) == []
+    assert lines(tmp_path, STRICT) == [
+        ".claude/skills/deploy/SKILL.md:4: invalid YAML frontmatter: expected alphabetic or numeric character, "
+        "but found '*'; Claude Code loads the skill without it"
+    ]

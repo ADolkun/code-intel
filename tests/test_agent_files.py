@@ -4,10 +4,11 @@ instruction map, each failure with its exact ``path:line: message`` line."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from fake_repo_files import repo_files_on_disk
+from fake_repo_files import FakeRepoFiles, repo_files_on_disk
 from mcp_fixtures import FakeAnalyzers, config_toml, make_repo, make_runtime, write, write_config
 
 from stack_intel import agent_files
@@ -212,7 +213,7 @@ def test_a_file_git_does_not_see_is_not_checked(repo: Path) -> None:
         ),
         (
             '---\npaths:\n  - "src/api/[id"\n---\n',
-            ".claude/rules/api.md:3: paths glob 'src/api/[id' has a '[' that no ']' closes; "
+            ".claude/rules/api.md:3: paths glob 'src/api/[id' has an invalid bracket expression; "
             "Claude Code matches no file with it",
         ),
     ],
@@ -276,15 +277,16 @@ def test_a_rule_the_readers_accept_is_not_reported_by_default(repo: Path, text: 
 
 
 def test_a_glob_is_matched_against_git_visible_files_only(repo: Path) -> None:
+    (repo / "src/api/handler.py").unlink()
+    (repo / "src/api").rmdir()
+    put(repo, "local/api/handler.py", "x = 1\n")
+    put(repo, ".claude/rules/api.md", '---\npaths:\n  - "src/api/**"\n---\n')
     files = repo_files_on_disk(repo)
-    hidden = files.__class__(
-        repo_root=repo,
-        files=files.files - {"src/api/handler.py"},
-        tracked=files.tracked - {"src/api/handler.py"},
-        dirs=files.dirs - {"src/api"},
+    hidden = replace(
+        files, files=files.files - {"local/api/handler.py"}, tracked=files.tracked - {"local/api/handler.py"}
     )
     found = [f"{f.file}:{f.line}: {f.message}" for f in agent_files.check(repo, STRICT, hidden).findings]
-    assert ".claude/rules/api.md:3: paths glob 'src/api/**' matches no git-visible file" in found
+    assert found == [".claude/rules/api.md:3: paths glob 'src/api/**' matches no git-visible file"]
 
 
 # ── Rules: strict ────────────────────────────────────────────────────────
@@ -306,7 +308,7 @@ def test_a_glob_is_matched_against_git_visible_files_only(repo: Path) -> None:
 )
 def test_strict_requires_scoped_rules(repo: Path, text: str, expected: str) -> None:
     put(repo, ".claude/rules/api.md", text)
-    assert lines(repo, AgentsConfig(strict=True))[0] == expected
+    assert lines(repo, AgentsConfig(strict=True)) == [expected]
 
 
 def test_strict_accepts_a_comma_string(repo: Path) -> None:
@@ -407,11 +409,11 @@ INSTRUCTIONS = ".github/instructions/py.instructions.md"
             f"{INSTRUCTIONS}:3: excludeAgent 'coding-agent' must be 'code-review' or 'cloud-agent'",
         ),
         (
-            '---\napplyTo: "**"\napplyTo: "src/**"\n---\n',
-            f"{INSTRUCTIONS}:3: frontmatter key 'applyTo' is repeated (first at line 2)",
+            '---\napplyTo: "**"\napplyTo: "lib/**"\n---\n',
+            f"{INSTRUCTIONS}:3: applyTo glob 'lib/**' matches no git-visible file",
         ),
     ],
-    ids=["number", "blank-item", "comma-string", "star-is-the-root-only", "exclude-agent", "repeated-key"],
+    ids=["number", "blank-item", "comma-string", "star-is-the-root-only", "exclude-agent", "repeated-key-last-wins"],
 )
 def test_broken_copilot_instructions_are_reported(repo: Path, text: str, expected: str) -> None:
     put(repo, INSTRUCTIONS, text)
@@ -599,3 +601,114 @@ def test_the_runtime_checks_the_conventional_locations_without_the_agents_table(
     (finding,) = rt.get_agent_report().findings
     assert (finding.file, finding.kind, finding.status) == (".mcp.json", "agent", "invalid")
     assert ".claude/rules/api.md" in rt.get_agent_report().files
+
+
+# ── Globs a reader may still match ───────────────────────────────────────
+
+
+def rule_lines(root: Path, paths: str, files: FakeRepoFiles | None = None) -> list[str]:
+    put(root, ".claude/rules/api.md", f"---\npaths: {paths}\n---\n")
+    report = agent_files.check(root, DEFAULT, files or repo_files_on_disk(root))
+    return [f"{f.file}:{f.line}: {f.message}" for f in report.findings]
+
+
+def test_a_glob_under_an_ignored_directory_is_not_reported(repo: Path) -> None:
+    files = replace(repo_files_on_disk(repo), ignored_paths=frozenset({"gen"}))
+    assert rule_lines(repo, '["gen/**/*.ts"]', files) == []
+    assert rule_lines(repo, '["gen/**/*.ts"]') == [
+        ".claude/rules/api.md:2: paths glob 'gen/**/*.ts' matches no git-visible file"
+    ]
+
+
+def test_a_glob_for_ignored_files_is_not_reported(repo: Path) -> None:
+    files = replace(repo_files_on_disk(repo), ignored_paths=frozenset({".env"}))
+    assert rule_lines(repo, '["**/.env*"]', files) == []
+
+
+def test_a_glob_through_a_symlinked_directory_is_not_reported(repo: Path, tmp_path: Path) -> None:
+    put(tmp_path / "elsewhere", "shared/a.ts", "export {};\n")
+    (repo / "linked").symlink_to(tmp_path / "elsewhere" / "shared", target_is_directory=True)
+    assert rule_lines(repo, '["linked/**/*.ts"]') == []
+
+
+def test_a_glob_under_an_untracked_directory_on_disk_is_not_reported(repo: Path) -> None:
+    put(repo, "scratch/a.ts", "export {};\n")
+    files = repo_files_on_disk(repo)
+    hidden = replace(files, files=files.files - {"scratch/a.ts"}, tracked=files.tracked - {"scratch/a.ts"})
+    assert rule_lines(repo, '["scratch/**/*.py"]', hidden) == []
+
+
+def test_a_glob_naming_a_directory_matches_it(repo: Path) -> None:
+    assert rule_lines(repo, "['src/api']") == []
+    assert rule_lines(repo, "['src/api', 'api']") == []
+
+
+def test_a_comma_string_does_not_split_inside_brackets(repo: Path) -> None:
+    assert rule_lines(repo, "src/[a,b].ts") == []
+    assert rule_lines(repo, '"src/[a,b].ts, src/api/**"') == []
+
+
+def test_the_claude_code_docs_escaped_bracket_example_is_not_reported(repo: Path) -> None:
+    assert rule_lines(repo, "['photos \\[2024/**']") == []
+
+
+@pytest.mark.parametrize(
+    "glob",
+    ["src/[z-a].ts", "src/[a-[]", "[", "]", "[]]", "[!]", "a[--z]", "x[a&&b]", "y[a~~b]", "z[a||b]", "[^]", "{,}", "{"],
+)
+def test_no_glob_crashes_the_check(repo: Path, glob: str) -> None:
+    put(repo, ".github/instructions/x.instructions.md", f"---\napplyTo: [{glob!r}]\n---\n")
+    assert isinstance(rule_lines(repo, f"[{glob!r}]"), list)
+
+
+@pytest.mark.parametrize("glob", ["src/[z-a].ts", "src/[a-[]"])
+def test_a_class_the_matcher_cannot_compile_is_an_invalid_pattern(repo: Path, glob: str) -> None:
+    assert rule_lines(repo, f"[{glob!r}]") == [
+        f".claude/rules/api.md:2: paths glob {glob!r} has an invalid bracket expression; "
+        "Claude Code matches no file with it"
+    ]
+    put(repo, ".claude/rules/api.md", API_RULE)
+    put(repo, INSTRUCTIONS, f"---\napplyTo: [{glob!r}]\n---\n")
+    assert lines(repo, DEFAULT) == []
+
+
+# ── Frontmatter that does not parse ──────────────────────────────────────
+
+
+def test_a_yaml_error_outside_a_glob_value_is_reported(repo: Path) -> None:
+    put(repo, ".claude/rules/api.md", '---\ndescription: `npm test` runner\npaths: ["src/api/**"]\n---\n')
+    assert lines(repo, DEFAULT) == [
+        ".claude/rules/api.md:2: invalid YAML frontmatter: found character '`' that cannot start any token; "
+        "Claude Code ignores it and loads the rule for every file"
+    ]
+
+
+@pytest.mark.parametrize(
+    "text", ["---\npaths: **/*.py\n---\n", "---\npaths:\n  - *.py\n---\n", "---\npaths: {src,lib}/**\n---\n"]
+)
+def test_an_unquoted_glob_value_is_reported_only_under_strict(repo: Path, text: str) -> None:
+    put(repo, ".claude/rules/api.md", text)
+    assert lines(repo, DEFAULT) == []
+    (finding,) = [line for line in lines(repo, AgentsConfig(strict=True)) if "invalid YAML" in line]
+    assert finding.startswith(".claude/rules/api.md:")
+    assert finding.endswith("; Claude Code ignores it and loads the rule for every file")
+
+
+def test_an_unquoted_alias_outside_a_glob_key_is_reported(repo: Path) -> None:
+    put(repo, ".claude/rules/api.md", '---\ndescription: *anchor\npaths: ["src/api/**"]\n---\n')
+    (finding,) = lines(repo, DEFAULT)
+    assert finding.startswith(".claude/rules/api.md:2: invalid YAML frontmatter:")
+
+
+def test_repeated_instruction_keys_are_reported_only_under_strict(repo: Path) -> None:
+    put(repo, INSTRUCTIONS, '---\napplyTo: "lib/**"\napplyTo: "**"\n---\n')
+    assert lines(repo, DEFAULT) == []
+    assert lines(repo, AgentsConfig(strict=True)) == [
+        f"{INSTRUCTIONS}:3: frontmatter key 'applyTo' is repeated (first at line 2)"
+    ]
+
+
+def test_yaml_1_1_booleans_are_read_as_strings(tmp_path: Path) -> None:
+    put(tmp_path, ".claude/agents/a.md", "---\nname: yes\ndescription: on\n---\n")
+    put(tmp_path, ".github/agents/b.md", "---\ndescription: no\n---\n")
+    assert lines(tmp_path, DEFAULT) == []
