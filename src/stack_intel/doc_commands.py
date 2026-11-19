@@ -302,7 +302,9 @@ _WILDCARD_CHARS = "*?[{"
 
 
 def _placeholder(name: str) -> bool:
-    return is_placeholder_path(name) or name.startswith("$") or name in ("-", "--")
+    """A placeholder, or a name the shell expands: any ``$`` form, ANSI-C
+    ``$'…'`` and locale ``$"…"`` quoting included, which the reader does not model."""
+    return is_placeholder_path(name) or "$" in name or name in ("-", "--")
 
 
 def _named(

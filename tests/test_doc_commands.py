@@ -474,3 +474,8 @@ def test_a_hash_line_in_a_console_fence_is_a_comment_not_a_prompt() -> None:
 
 def test_a_heredoc_without_a_space_is_skipped() -> None:
     assert fence_command_mentions(["cat<<EOF > x.sh", "make deploy", "EOF"]) == []
+
+
+@pytest.mark.parametrize("text", ["make $'a\\nb'", 'make $"loc"', "make a$'b'", "npm run $'x'", "mise run a$'b'"])
+def test_ansi_c_and_locale_quoting_are_skipped(text: str) -> None:
+    assert [m.verdict for m in command_mentions(text)] == ["skipped"]

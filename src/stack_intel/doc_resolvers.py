@@ -1344,7 +1344,8 @@ class CommandResolver:
         the name cannot be settled. As mise 2026.11 does: ``//p:t`` names a
         config root, or a directory the command runs in or under; ``p:t``
         is also ``//p:t`` (after path aliases, when ``p`` has no ``/``) from
-        the root project, or from inside ``p``."""
+        the root project or a directory above config root ``p`` (an alias may
+        name a nested one), or from inside ``p``."""
         if name.startswith("//"):
             if monorepo is None:
                 return _NEEDS_MONOREPO.format(form="//path:task")
@@ -1368,7 +1369,8 @@ class CommandResolver:
             target = _repo_dir(monorepo.aliases.get(path, path))
             root = self._is_config_root(monorepo, target)
             if any(
-                (root and not self._nearest(work, monorepo)) or (target and _at_or_under(work, target))
+                (root and (not self._nearest(work, monorepo) or _at_or_under(target, work)))
+                or (target and _at_or_under(work, target))
                 for work in works
             ):
                 lookups.append(self._own(target, task, envs))
