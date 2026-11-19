@@ -123,6 +123,10 @@ LIMITATION_KINDS: Mapping[str, str] = {
         "the frontend pages could not be read (Node or TypeScript is unavailable), so a path that only a page "
         "could satisfy is not checked"
     ),
+    "not_configured": (
+        "the config has no [backend] or no [frontend] table, so that side is not analyzed; "
+        "the message names what is missing from the answer"
+    ),
     "frontend_provisioning": (
         "TypeScript is being installed in the background (first use), so frontend results are n/a until it is ready"
     ),

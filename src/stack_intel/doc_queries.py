@@ -21,6 +21,7 @@ from typing import Any
 
 from stack_intel import doc_rules
 from stack_intel.code_paths import is_under
+from stack_intel.problems import limitation
 from stack_intel.queries import Page, page, problem_dicts
 
 # ── Docs check ───────────────────────────────────────────────────────────
@@ -36,7 +37,8 @@ class DocCheck:
     (skipped, not-checked and Tier B references are not). ``limitations``
     are the report's own plus the DI route gaps the runtime passed in
     (`queries.BACKEND_ROUTE_GAP_KINDS`): a "route not found" finding may be a
-    route the analysis cannot see."""
+    route the analysis cannot see. ``docs_configured`` is False when the
+    config has no ``[docs]`` table: only the agent files were checked."""
 
     findings: list[Any]
     doc_count: int
@@ -46,6 +48,7 @@ class DocCheck:
     complete: bool
     diagnostics: list[dict]
     limitations: list[dict]
+    docs_configured: bool = True
 
     @property
     def analysis(self) -> dict[str, Any]:
@@ -67,9 +70,21 @@ def _report_problems(report: Any, extra: Iterable[Any] = ()) -> tuple[list[dict]
     return diagnostics, limitations
 
 
-def doc_check(report: Any, extra_findings: Iterable[Any] = ()) -> DocCheck:
-    """``report`` is a `doc_refs.DocReport`; ``extra_findings`` (the agent
-    files') are merged into its findings in the same order."""
+def doc_check(report: Any, extra_findings: Iterable[Any] = (), *, config_path: str | None = None) -> DocCheck:
+    """``report`` is a `doc_refs.DocReport`, or None without ``[docs]`` (then
+    ``config_path`` names the config the limitation points at);
+    ``extra_findings`` (the agent files') are merged into its findings in the
+    same order."""
+    if report is None:
+        findings = sorted(extra_findings, key=lambda f: (f.file, f.line, f.kind, f.text))
+        note = limitation(
+            "not_configured",
+            stage=doc_rules.STAGE,
+            file=config_path,
+            line=None,
+            message=f"no [docs] table in {config_path}: no docs were checked, only the agent files",
+        )
+        return DocCheck(findings, 0, {}, 0, 0, True, [], problem_dicts([note]), docs_configured=False)
     diagnostics, limitations = _report_problems(report)
     references = list(report.references())
     findings = sorted([*report.findings(), *extra_findings], key=lambda f: (f.file, f.line, f.kind, f.text))
@@ -126,7 +141,9 @@ class DocRefs:
     check). ``ambiguous`` (symbol queries only) is true when the definitions
     span more than one owner or file, so the mentions may be of different
     symbols; ``owners`` then names each (``Owner (file)``, or the file of a
-    module-level one)."""
+    module-level one). ``not_analyzed`` says why a route or symbol query has
+    no ``definitions`` at all: the config lacks the tables that would supply
+    them, so "none found" would be a claim nothing checked."""
 
     kind: str
     value: str
@@ -146,6 +163,7 @@ class DocRefs:
     in_scope: bool | None = None
     ambiguous: bool | None = None
     owners: list[str] | None = None
+    not_analyzed: str | None = None
 
     @property
     def analysis(self) -> dict[str, Any]:
@@ -354,8 +372,10 @@ def doc_refs_lookup(
     method: str | None = None
     definitions: list[dict] | None = None
     owners: list[str] | None = None
+    not_analyzed: str | None = None
     rows: list[dict] = []
     refs = sorted(report.references(), key=_ref_order)
+    config = report.config
     if file is not None:
         value = file
         nonlocal_defs = frozenset((s.location, s.name) for s in report.symbols if s.scope != "local")
@@ -377,18 +397,24 @@ def doc_refs_lookup(
                 continue
             if _same_route_path(ref_path, value, prefixes):
                 rows.append(_ref_row(ref, reference_message))
-        definitions = _route_definitions(report.routes, method, value, prefixes)
+        if config.backend_configured:
+            definitions = _route_definitions(report.routes, method, value, prefixes)
+        else:
+            not_analyzed = f"Routes not analyzed: no [backend] table in {config.path}."
     else:
         assert symbol is not None
         value = symbol
-        definitions = _symbol_definitions(report.symbols, symbol, report.package_bindings)
-        locations = frozenset(f"{d['file']}:{d['line']}" for d in definitions)
+        if config.backend_configured or config.frontend_root is not None:
+            definitions = _symbol_definitions(report.symbols, symbol, report.package_bindings)
+            owners = _definition_owners(definitions)
+        else:
+            not_analyzed = f"Symbol index not built: no [backend] or [frontend] table in {config.path}."
+        locations = frozenset(f"{d['file']}:{d['line']}" for d in definitions or ())
         rows = [
             _ref_row(ref, reference_message)
             for ref in refs
             if ref.kind == "symbol" and _symbol_matches(ref, symbol, locations)
         ]
-        owners = _definition_owners(definitions)
 
     return DocRefs(
         kind=given[0],
@@ -402,6 +428,7 @@ def doc_refs_lookup(
         doc_count=len({row["file"] for row in rows}),
         ambiguous=None if owners is None else len(owners) > 1,
         owners=owners,
+        not_analyzed=not_analyzed,
     )
 
 

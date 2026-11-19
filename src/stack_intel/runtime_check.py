@@ -318,6 +318,12 @@ def run(args: argparse.Namespace, context: Context) -> int:
     from stack_intel.repo_files import RepoFilesError
 
     repo_root, backend = context.repo_root, context.config.backend
+    if backend is None:
+        print(
+            f"runtime-check: {context.config.display} has no [backend] table; there is no app to compare",
+            file=sys.stderr,
+        )
+        return 2
     if (refusal := problems.runtime_refusal(repo_root, backend.python_version_file)) is not None:
         print(refusal, file=sys.stderr)
         return 2

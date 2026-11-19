@@ -19,7 +19,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from fixture_repo import MINIMAL_CONFIG, git_init, make_repo
+from fixture_repo import BACKEND_ONLY_CONFIG, DOCS_ONLY_CONFIG, MINIMAL_CONFIG, git_init, make_repo
 from test_dependency_resolver import FakeResolver, FakeSources
 
 from stack_intel import cli, include_model, route_map, ts_bridge
@@ -57,7 +57,7 @@ export = "downloadExport"
 """
 )
 CONFIG = parse_config(MINIMAL_CONFIG + CLIENTS_CONFIG)
-FRONTEND = CONFIG.frontend
+FRONTEND = CONFIG.require_frontend()
 
 TSCONFIG = json.dumps(
     {
@@ -1481,7 +1481,7 @@ url_arg = 0
 init_arg = 1
 same_origin_only = true
 """
-INSTANCES = parse_config(MINIMAL_CONFIG + INSTANCE_CONFIG).frontend
+INSTANCES = parse_config(MINIMAL_CONFIG + INSTANCE_CONFIG).require_frontend()
 HTTP_TS = """\
 declare const axios: { create(options: { baseURL: string }): any };
 export const api = axios.create({ baseURL: "/api" });
@@ -1702,7 +1702,7 @@ package = "got"
 export = "got"
 base_path = "/api"
 """
-PACKAGES = parse_config(MINIMAL_CONFIG + PACKAGE_CONFIG).frontend
+PACKAGES = parse_config(MINIMAL_CONFIG + PACKAGE_CONFIG).require_frontend()
 PACKAGE_CALLS = """\
 import axios from "axios";
 import http, { create as made } from "axios";
@@ -1812,7 +1812,7 @@ def test_routes_request_carries_the_configured_clients_tsconfig_and_builder_modu
 def test_a_configured_tsconfig_that_is_missing_is_a_read_failure_naming_it(scan_tree) -> None:
     frontend = parse_config(
         MINIMAL_CONFIG.replace("frontend/tsconfig.json", "frontend/tsconfig.app.json") + CLIENTS_CONFIG
-    ).frontend
+    ).require_frontend()
     scan = scan_tree({"lib/api.ts": CLIENTS_TS, "lib/utils/download-export.ts": DOWNLOAD_TS}, frontend)
     [problem] = [p for p in scan.problems if p.step == "read tsconfig"]
     assert (problem.kind, problem.file) == ("read_failed", "frontend/tsconfig.app.json")
@@ -2206,3 +2206,24 @@ def test_report_names_the_summary_figures_findings_can_move() -> None:
     clean = io.StringIO()
     route_map.print_report(route_map.build_routes(model(live("GET", "/a", 0)), scan), out=clean)
     assert "Bounds:" not in clean.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("config", "needs"),
+    [
+        (
+            BACKEND_ONLY_CONFIG,
+            "the [frontend] table, and .stack-intel/config.toml has none. Fix: add [frontend] with root and tsconfig.",
+        ),
+        (
+            DOCS_ONLY_CONFIG,
+            "the [backend] and [frontend] tables, and .stack-intel/config.toml has neither. "
+            "Fix: add [backend] with root, package and app; add [frontend] with root and tsconfig.",
+        ),
+    ],
+)
+def test_cli_without_both_sides_says_which_table_is_missing(capsys, tmp_path: Path, config: str, needs: str) -> None:
+    (tmp_path / ".stack-intel").mkdir()
+    (tmp_path / ".stack-intel" / "config.toml").write_text(config, encoding="utf-8")
+    assert _dump_routes("--repo-root", tmp_path) == 1
+    assert capsys.readouterr().err == f"stack-intel: dump routes needs {needs}\n"

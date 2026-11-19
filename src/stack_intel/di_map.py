@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from stack_intel import include_model as include_models
 from stack_intel import problems
 from stack_intel.backend_model import BackendModel, DepTarget, DepUse, LiveRoute, NameResolver, Unknown
-from stack_intel.config import BackendConfig
+from stack_intel.config import BackendConfig, NotConfigured
 from stack_intel.dependency_resolver import STAGE, DependencyResolver
 from stack_intel.result_types import (
     SCHEMA_VERSION,
@@ -416,7 +416,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace, context: Context) -> int:
-    repo_root, backend = context.repo_root, context.config.backend
+    repo_root = context.repo_root
+    try:
+        backend = context.config.require_backend()
+    except NotConfigured as exc:
+        print(f"stack-intel: {exc.describe('dump di')}", file=sys.stderr)
+        return 1
     if (refusal := problems.runtime_refusal(repo_root, backend.python_version_file)) is not None:
         print(refusal, file=sys.stderr)
         return 1

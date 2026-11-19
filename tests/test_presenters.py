@@ -1024,3 +1024,44 @@ def test_status_text_names_the_library_capture_its_applied_counts_and_why_it_is_
     payload = presenters.status(_snapshot(library_capture=block)).payload
     assert payload["library_capture"] == block
     assert "Library capture" not in presenters.status(_snapshot()).text
+
+
+# ── Partial configs ──────────────────────────────────────────────────────
+
+
+def test_not_configured_names_the_tool_the_tables_and_the_fix() -> None:
+    from stack_intel.config import NotConfigured
+
+    body = presenters.not_configured("di_deps", NotConfigured(("backend",), ".stack-intel/config.toml"))
+    assert body.is_error
+    assert body.text == (
+        "di_deps needs the [backend] table, and .stack-intel/config.toml has none. "
+        "Fix: add [backend] with root, package and app."
+    )
+    assert body.payload == {
+        "schema_version": 2,
+        "error": "not_configured",
+        "message": body.text,
+        "tables": ["backend"],
+        "config": ".stack-intel/config.toml",
+        "fix": "add [backend] with root, package and app",
+    }
+
+
+def test_status_text_says_what_is_not_configured() -> None:
+    from stack_intel.analysis_runtime import toolchain_not_configured
+
+    analyzers = {
+        name: {
+            "state": "not_configured",
+            "last_step": None,
+            "last_success_at": None,
+            "last_runtime_ms": None,
+            "last_error": None,
+        }
+        for name in ("di_map", "route_map")
+    }
+    text = presenters.status(_snapshot(toolchain=toolchain_not_configured(), analyzers=analyzers)).text
+    assert "  Frontend toolchain: not needed (no [frontend] table), so it is not probed" in text.splitlines()
+    assert "  di_map: not_configured" in text.splitlines()
+    assert "  route_map: not_configured" in text.splitlines()

@@ -132,14 +132,96 @@ class AgentsConfig:
     instruction_map: InstructionMap | None = None
 
 
+_TABLE_FIXES: Mapping[str, str] = {
+    "backend": "add [backend] with root, package and app",
+    "frontend": "add [frontend] with root and tsconfig",
+    "docs": "add [docs] with scope",
+    "backend.capture": "add [backend.capture] with python",
+}
+
+
+def table_names(tables: tuple[str, ...], conjunction: str = "and") -> str:
+    """``[backend]``, or ``[backend] and [frontend]``."""
+    return f" {conjunction} ".join(f"[{table}]" for table in tables)
+
+
+class NotConfigured(Exception):
+    """A caller needed ``tables`` and the config named ``config`` (its display path) has none of them.
+
+    It describes the config, not the machine: callers report it as the
+    ``not_configured`` error, never as an incomplete or failed analysis.
+    """
+
+    def __init__(self, tables: tuple[str, ...], config: str) -> None:
+        self.tables = tables
+        self.config = config
+        super().__init__(f"{config} has no {table_names(tables, 'or')} table")
+
+    @property
+    def fix(self) -> str:
+        return "; ".join(_TABLE_FIXES[table] for table in self.tables)
+
+    def describe(self, user: str) -> str:
+        """``<user> needs the [backend] table, and <config> has none. Fix: ...``"""
+        needs, has = ("table", "none") if len(self.tables) == 1 else ("tables", "neither")
+        return f"{user} needs the {table_names(self.tables)} {needs}, and {self.config} has {has}. Fix: {self.fix}."
+
+    def fields(self) -> dict[str, object]:
+        """The ``not_configured`` error body fields besides ``message``."""
+        return {"tables": list(self.tables), "config": self.config, "fix": self.fix}
+
+
 @dataclass(frozen=True)
 class Config:
     path: Path  # absolute path of the file this was read from
-    backend: BackendConfig
-    frontend: FrontendConfig
+    backend: BackendConfig | None
+    frontend: FrontendConfig | None
     symbols: SymbolsConfig
     docs: DocsConfig | None
     agents: AgentsConfig | None
+    display: str = CONFIG_REL  # how errors name the file
+
+    @property
+    def tables(self) -> tuple[str, ...]:
+        """The configured tables of ``[backend]``, ``[frontend]``, ``[docs]`` and ``[agents]``."""
+        present = (("backend", self.backend), ("frontend", self.frontend), ("docs", self.docs), ("agents", self.agents))
+        return tuple(name for name, table in present if table is not None)
+
+    def missing(self, *tables: str) -> tuple[str, ...]:
+        """Those of ``tables`` (``backend.capture`` included) the config lacks, in the order given.
+        ``backend.capture`` without ``[backend]`` is named as ``backend``, the table to add first."""
+        capture = self.backend.capture if self.backend is not None else None
+        present = {*self.tables, *(("backend.capture",) if capture is not None else ())}
+        missing = (
+            "backend" if t == "backend.capture" and self.backend is None else t for t in tables if t not in present
+        )
+        return tuple(dict.fromkeys(missing))
+
+    def require(self, *tables: str) -> None:
+        """Raise ``NotConfigured`` naming each of ``tables`` the config lacks."""
+        if missing := self.missing(*tables):
+            raise NotConfigured(missing, self.display)
+
+    def require_backend(self) -> BackendConfig:
+        if self.backend is None:
+            raise NotConfigured(("backend",), self.display)
+        return self.backend
+
+    def require_frontend(self) -> FrontendConfig:
+        if self.frontend is None:
+            raise NotConfigured(("frontend",), self.display)
+        return self.frontend
+
+    def require_docs(self) -> DocsConfig:
+        if self.docs is None:
+            raise NotConfigured(("docs",), self.display)
+        return self.docs
+
+    def require_capture(self) -> CaptureConfig:
+        capture = self.require_backend().capture
+        if capture is None:
+            raise NotConfigured(("backend.capture",), self.display)
+        return capture
 
 
 class _Table:
@@ -236,9 +318,6 @@ class _Table:
 
     def table(self, key: str) -> _Table | None:
         return _Table(self._data.pop(key), self._child(key), self.path) if key in self._data else None
-
-    def required_table(self, key: str) -> _Table:
-        return _Table(self._required(key), self._child(key), self.path)
 
     def tables(self, key: str) -> list[_Table]:
         value = self._data.pop(key, [])
@@ -483,13 +562,18 @@ def parse_config(text: str, display: str = CONFIG_REL, path: Path | None = None)
     top = _Table(data, "", display)
     config = Config(
         path=path or Path(display),
-        backend=_parse_backend(top.required_table("backend")),
-        frontend=_parse_frontend(top.required_table("frontend")),
+        backend=_parse_backend(backend) if (backend := top.table("backend")) is not None else None,
+        frontend=_parse_frontend(frontend) if (frontend := top.table("frontend")) is not None else None,
         symbols=_parse_symbols(top.table("symbols")),
         docs=_parse_docs(docs) if (docs := top.table("docs")) is not None else None,
         agents=_parse_agents(agents) if (agents := top.table("agents")) is not None else None,
+        display=display,
     )
     top.done()
+    if not config.tables:
+        raise ConfigError(
+            display, "the config configures nothing: add at least one of [backend], [frontend], [docs] or [agents]"
+        )
     return config
 
 

@@ -51,7 +51,7 @@ from stack_intel import (
 )
 from stack_intel.analysis_runtime import AnalysisFailed, AnalysisRuntime, FrontendFailed, FrontendProblem, InvalidRoot
 from stack_intel.cli import Context as CliContext
-from stack_intel.config import ConfigFile
+from stack_intel.config import ConfigFile, NotConfigured
 from stack_intel.ts_bridge import ToolchainUnavailable
 
 _log = logging.getLogger("stack_intel.server")
@@ -228,6 +228,8 @@ def _run(tool: str, output_format: str, body: Callable[[], str]) -> str:
         return _respond(error, "text")
     try:
         return body()
+    except NotConfigured as exc:
+        return _respond(presenters.not_configured(tool, exc), output_format)
     except AnalysisFailed as exc:
         error = presenters.error_body(
             "analysis_failed", exc.message, analyzer=exc.analyzer, step=exc.step, missing=exc.missing
@@ -379,6 +381,7 @@ def di_deps(
             return _respond(
                 presenters.invalid_argument("method", method, (), "method needs handler or path"), output_format
             )
+        _runtime().config().require_backend()
         if refusal := _refusal():
             return _respond(refusal, output_format)
         data = _runtime().get_di()
@@ -415,6 +418,7 @@ def di_reverse(
             _check_limit(limit),
         ):
             return _respond(invalid, output_format)
+        _runtime().config().require_backend()
         if refusal := _refusal():
             return _respond(refusal, output_format)
         data = _runtime().get_di()
@@ -459,6 +463,7 @@ def route_match(
             _check_limit(limit),
         ):
             return _respond(invalid, output_format)
+        _runtime().config().require(*analysis_runtime.ANALYZER_TABLES["route_map"])
         if refusal := _refusal():
             return _respond(refusal, output_format)
         data = _runtime().get_routes()
@@ -489,6 +494,7 @@ def route_unmatched(
     def body() -> str:
         if invalid := _first_error(_check_choice("side", side, _SIDES), _check_limit(limit)):
             return _respond(invalid, output_format)
+        _runtime().config().require(*analysis_runtime.ANALYZER_TABLES["route_map"])
         if refusal := _refusal():
             return _respond(refusal, output_format)
         rt = _runtime()
@@ -551,7 +557,8 @@ def jsx_usage(
         ):
             return _respond(invalid, output_format)
         rt = _runtime()
-        scan_root = root if root is not None else rt.config("jsx_usage").frontend.root
+        frontend = rt.config("jsx_usage").require_frontend()
+        scan_root = root if root is not None else frontend.root
         root_dir = rt.resolve_root(scan_root)
         found = rt.get_jsx_usage(
             component_name, root_dir, include_self_close=include_self_close, include_tests=include_tests
@@ -604,7 +611,7 @@ def symbol_resolve(
             _check_limit(limit),
         ):
             return _respond(invalid, output_format)
-        if side != "frontend" and (refusal := _refusal()):
+        if _runtime().symbol_side(side) != "frontend" and (refusal := _refusal()):
             return _respond(refusal, output_format)
         kind_filter = None if kind in (None, "none") else kind
         found = _runtime().resolve_symbol(name, side=side, kind=kind_filter, file_hint=file_hint)
@@ -671,12 +678,14 @@ def doc_refs(
             return _respond(presenters.invalid_argument("doc", doc, (), reason), output_format)
         if invalid := _check_limit(limit):
             return _respond(invalid, output_format)
+        config = _runtime().config()
+        config.require_docs()
         # Routes and backend symbols come from the backend analysis.
         if refusal := _refusal():
             return _respond(refusal, output_format)
         found = _runtime().get_doc_report()
-        needs_frontend = doc_queries.doc_lookup_needs_frontend(
-            file=paths["file"], symbol=symbol, frontend_root=_runtime().config("doc_refs").frontend.root
+        needs_frontend = config.frontend is not None and doc_queries.doc_lookup_needs_frontend(
+            file=paths["file"], symbol=symbol, frontend_root=config.frontend.root
         )
         result = doc_queries.doc_refs_lookup(
             found.report,

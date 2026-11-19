@@ -1,20 +1,39 @@
 [build-system]
-requires = ["uv_build>=0.13.7,<0.14.0"]
+requires = ["uv_build>=0.13.9,<0.14"]
 build-backend = "uv_build"
 
 [project]
 name = "stack-intel"
-version = "0.2.3"
-description = "Static analysis of a FastAPI backend and its TypeScript frontend, served to coding agents over MCP."
+version = "0.3.0.dev0"
+description = "Static analysis of FastAPI backends and TypeScript frontends for coding agents over MCP, and a docs and agent-file checker for CI."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = ["mcp", "fastapi", "typescript", "react", "static-analysis", "documentation", "coding-agents", "ci"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Documentation",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
     "mcp>=2.3.0",
     "markdown-it-py>=4.2.0",
     "PyYAML>=6.0.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ADolkun/stack-intel"
+Repository = "https://github.com/ADolkun/stack-intel"
+Documentation = "https://github.com/ADolkun/stack-intel/tree/main/docs"
+Changelog = "https://github.com/ADolkun/stack-intel/blob/main/CHANGELOG.md"
+Issues = "https://github.com/ADolkun/stack-intel/issues"
 
 [project.scripts]
 stack-intel = "stack_intel.cli:main"
@@ -26,6 +45,7 @@ dev = [
     "ruff>=0.17.3",
     "pyrefly>=1.4.1",
     "types-PyYAML>=6.0.12.20261103",
+    "zizmor>=1.32.0",
 ]
 # The oracle tests run the locked FastAPI of the repository under analysis; its
 # include_router model depends on the version (live from 0.137, copy before).
@@ -39,6 +59,9 @@ fastapi-copy = [
 ]
 
 [tool.uv]
+# Keep at or below the uv that Dependabot runs: above it, every uv update fails with
+# tool_version_not_supported. Releases pin their own uv in release.yml.
+required-version = ">=0.13.7"
 default-groups = ["dev", "fastapi-live"]
 conflicts = [
     [{ group = "fastapi-live" }, { group = "fastapi-copy" }],
@@ -46,6 +69,7 @@ conflicts = [
 
 [tool.uv.build-backend]
 module-name = "stack_intel"
+source-exclude = ["node_modules"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

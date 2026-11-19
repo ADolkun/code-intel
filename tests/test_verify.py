@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fixture_repo import hermetic_git
+from fixture_repo import BACKEND_ONLY_CONFIG, DOCS_ONLY_CONFIG, hermetic_git
 from mcp_fixtures import LAYOUT, FakeAnalyzers, doc_lookup_report, make_repo, make_runtime, write_config
 
 from stack_intel import cli, doc_queries, ts_bridge, verify
@@ -380,7 +380,7 @@ def test_a_check_that_raises_cannot_run_is_an_error_not_a_failure(tmp_path: Path
 
 
 def test_a_docs_check_is_skipped_without_a_docs_table(tmp_path: Path) -> None:
-    check = verify.Check("docs-x", lambda subject: verify.Verdict("never"), needs_docs=True)
+    check = verify.Check("docs-x", lambda subject: verify.Verdict("never"), ("docs",))
     assert verify.run_check(check, subject_for(tmp_path, docs=False)).status == "skipped"
     assert verify.run_check(check, subject_for(tmp_path / "again", docs=True)).status == "pass"
 
@@ -388,7 +388,7 @@ def test_a_docs_check_is_skipped_without_a_docs_table(tmp_path: Path) -> None:
 def test_every_check_has_a_unique_name() -> None:
     names = [check.name for check in verify.CHECKS]
     assert len(names) == len(set(names))
-    assert {c.name for c in verify.CHECKS if c.needs_docs} == {n for n in names if n.startswith("docs-")}
+    assert {c.name for c in verify.CHECKS if "docs" in c.needs} == {n for n in names if n.startswith("docs-")}
 
 
 # ── A real checkout, end to end ──────────────────────────────────────────
@@ -509,7 +509,7 @@ def outcomes_of(repo: Path) -> dict[str, verify.Outcome]:
 def test_a_clean_checkout_passes_every_check(repo: Path) -> None:
     results = outcomes_of(repo)
     assert {name: (o.status, o.rows) for name, o in results.items()} == {
-        check.name: (("skipped", ()) if check.needs_capture else ("pass", ())) for check in verify.CHECKS
+        check.name: (("skipped", ()) if "backend.capture" in check.needs else ("pass", ())) for check in verify.CHECKS
     }
     assert results["library-capture"].detail == "the config has no [backend.capture] table"
     assert results["handler-locations"].detail == "2 routes"
@@ -566,3 +566,76 @@ def test_an_unknown_check_name_is_a_usage_error(repo: Path, capsys: pytest.Captu
 def test_the_command_is_listed_by_the_cli() -> None:
     args = cli.build_parser().parse_args(["verify", "handler-locations"])
     assert (args.command, args.only) == ("verify", ["handler-locations"])
+
+
+# ── Partial configs ──────────────────────────────────────────────────────
+
+NEEDS = {
+    "backend-content": "[backend]",
+    "handler-locations": "[backend]",
+    "python-index": "[backend]",
+    "routes-content": "[backend] or [frontend]",
+    "di-matches-routes": "[backend] or [frontend]",
+    "call-sites": "[backend] or [frontend]",
+    "matched-backends-are-live": "[backend] or [frontend]",
+    "library-capture": "[backend]",
+    "jsx-oracle": "[frontend]",
+    "declaration-oracle": "[frontend]",
+    "docs-routes-are-live": "[backend]",
+    "docs-code-words": "[backend]",
+}
+
+
+def test_a_check_whose_tables_are_missing_is_skipped_and_never_runs(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo")
+    write_config(repo, DOCS_ONLY_CONFIG)
+    fakes = FakeAnalyzers()
+    runtime = make_runtime(repo, fakes)
+    outcomes = {o.name: o for o in verify.verify(runtime)}
+    assert {name: o.detail for name, o in outcomes.items() if o.status == "skipped"} == {
+        name: f"the config has no {tables} table" for name, tables in NEEDS.items()
+    }
+    assert {o.status for name, o in outcomes.items() if name not in NEEDS} == {"pass"}
+    assert not {"build_backend_model", "scan_frontend", "python_symbols"} & set(fakes.calls)
+    assert runtime.toolchain_state["probes"] == 0
+
+
+def test_the_route_checks_need_both_sides(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo")
+    write_config(repo, BACKEND_ONLY_CONFIG)
+    checks = [c for c in verify.CHECKS if c.name in ("routes-content", "docs-routes-are-live")]
+    outcomes = {o.name: o for o in verify.verify(make_runtime(repo, FakeAnalyzers()), checks)}
+    assert outcomes["routes-content"].detail == "the config has no [frontend] table"
+    assert outcomes["docs-routes-are-live"].status == "pass"
+
+
+def test_every_check_skipped_exits_2() -> None:
+    assert verify.exit_code([outcome("a", "skipped"), outcome("b", "skipped")]) == 2
+
+
+def test_the_command_says_when_no_check_applies(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (tmp_path / ".stack-intel").mkdir()
+    (tmp_path / ".stack-intel" / "config.toml").write_text(DOCS_ONLY_CONFIG, encoding="utf-8")
+    assert cli.main(["verify", "jsx-oracle", "python-index", "--repo-root", str(tmp_path)]) == 2
+    out, err = capsys.readouterr()
+    assert out.splitlines()[-1] == "verify: 2 checks, 0 passed, 0 failed, 0 could not run, 2 skipped"
+    assert err == "verify: no check applies to this config\n"
+
+
+def test_a_check_that_meets_a_missing_table_is_skipped(tmp_path: Path) -> None:
+    from stack_intel.config import NotConfigured
+
+    def needs_backend(subject: verify.Subject) -> verify.Verdict:
+        raise NotConfigured(("backend",), ".stack-intel/config.toml")
+
+    result = verify.run_check(verify.Check("late", needs_backend), subject_for(tmp_path, docs=True))
+    assert (result.status, result.detail) == ("skipped", "the config has no [backend] table")
+
+
+def test_library_capture_names_the_capture_table_when_the_backend_is_there(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo")
+    write_config(repo, BACKEND_ONLY_CONFIG)
+    [result] = verify.verify(
+        make_runtime(repo, FakeAnalyzers()), [c for c in verify.CHECKS if c.name == "library-capture"]
+    )
+    assert result.detail == "the config has no [backend.capture] table"

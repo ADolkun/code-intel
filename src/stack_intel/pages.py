@@ -164,7 +164,9 @@ class ReactRouterPages:
 def page_provider(
     repo_root: Path, config: Config, toolchain: Callable[[], Toolchain], clock: Callable[[], int]
 ) -> PageProvider:
-    """The provider for ``config.frontend.pages``."""
+    """The provider for ``config.frontend.pages``; public files only (none) without ``[frontend]``."""
+    if config.frontend is None:
+        return NoPages(None)
     pages = config.frontend.pages
     if pages.kind == "react-router":
         cache = FactsCache(repo_root, toolchain, clock=clock, attribute_tags=(ROUTE_TAG,))
