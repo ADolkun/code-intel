@@ -1,9 +1,10 @@
 """``stack-intel doc-check``: the docs against the code, plus the agent instruction files.
 
 Checks links, anchors, repository paths, backend routes, frontend pages, code
-symbols, npm scripts and orphaned docs in the config's ``[docs]`` scope, and the files under
-``[agents]``. Without ``[docs]`` only the agent files are checked; with
-neither there is nothing to check, which is exit code 2 rather than a pass.
+symbols, npm scripts and orphaned docs in the config's ``[docs]`` scope, and the agent
+instruction files at their Claude Code and Copilot locations (``agent_files``).
+Without ``[docs]`` only the agent files are checked; with no ``[docs]`` and no
+agent file there is nothing to check, which is exit code 2 rather than a pass.
 It needs only Python, git and markdown-it-py, plus Node and the
 shared TypeScript install (``stack-intel setup``) for react-router pages and
 frontend definition locations.
@@ -52,12 +53,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="print the result as one JSON document")
 
 
-def _summary(result: doc_queries.DocCheck) -> str:
+def _summary(result: doc_queries.DocCheck, agent_files: int) -> str:
     noun = "finding" if len(result.findings) == 1 else "findings"
     references = f"{result.reference_count} references, {result.checked_count} checked"
+    agents = f"{agent_files} agent file" + ("" if agent_files == 1 else "s")
     state = "" if result.complete else "; INCOMPLETE"
     docs = "" if result.docs_configured else "; docs not configured"
-    return f"{PROG}: {len(result.findings)} {noun} in {result.doc_count} docs ({references}){state}{docs}"
+    return f"{PROG}: {len(result.findings)} {noun} in {result.doc_count} docs ({references}); {agents}{state}{docs}"
 
 
 def check(runtime: AnalysisRuntime, out: TextIO, err: TextIO, *, as_json: bool = False) -> int:
@@ -77,11 +79,11 @@ def check(runtime: AnalysisRuntime, out: TextIO, err: TextIO, *, as_json: bool =
         except NotConfigured as exc:
             if exc.tables != ("docs",):
                 raise
-            if runtime.config(PROG).agents is None:
-                print(f"{PROG}: {exc.config} has no [docs] table and there are no agent files to check", file=err)
-                return EXIT_CANNOT_RUN
             report, config_path = None, exc.config
-        agent_findings = runtime.get_agent_findings()
+        agents = runtime.get_agent_report()
+        if report is None and not agents.files:
+            print(f"{PROG}: {config_path} has no [docs] table and there are no agent files to check", file=err)
+            return EXIT_CANNOT_RUN
     except analysis_runtime.AnalysisFailed as exc:
         print(f"{PROG}: {exc.message}", file=err)
         return EXIT_CANNOT_RUN
@@ -92,7 +94,7 @@ def check(runtime: AnalysisRuntime, out: TextIO, err: TextIO, *, as_json: bool =
         traceback.print_exception(exc, file=err)
         return EXIT_CANNOT_RUN
 
-    result = doc_queries.doc_check(report, agent_findings, config_path=config_path)
+    result = doc_queries.doc_check(report, agents.findings, config_path=config_path)
     if as_json:
         body = doc_presenters.doc_check(result)
         print(presenters.envelope(body, "json", stale=False, analysis=result.analysis), file=out)
@@ -102,7 +104,7 @@ def check(runtime: AnalysisRuntime, out: TextIO, err: TextIO, *, as_json: bool =
             print(line, file=out)
         for line in notes:
             print(line, file=err)
-    print(_summary(result), file=err)
+    print(_summary(result, len(agents.files)), file=err)
     if not result.complete:
         return EXIT_CANNOT_RUN
     return EXIT_FINDINGS if result.findings else EXIT_OK

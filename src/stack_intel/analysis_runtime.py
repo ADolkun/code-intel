@@ -1408,18 +1408,18 @@ class AnalysisRuntime:
             self._pages_key = key
         return self._pages
 
-    def get_agent_findings(self) -> list[Any]:
-        """The agent-file findings (`doc_report.Finding` rows) for the current
-        checkout; none without an ``[agents]`` table."""
+    def get_agent_report(self) -> Any:
+        """The agent-file report (`agent_files.AgentReport`) for the current
+        checkout. The conventional locations are checked with or without an
+        ``[agents]`` table."""
         with self._lock:
             from stack_intel import agent_files
+            from stack_intel.config import AgentsConfig
 
-            agents = self.config("agent_files").agents
-            if agents is None:
-                return []
+            agents = self.config("agent_files").agents or AgentsConfig()
             files = self._repo_files("agent_files")
             with self._step("agent_files", STEP_CHECK_AGENT_FILES):
-                return agent_files.check(self.repo_root, agents, files.files)
+                return agent_files.check(self.repo_root, agents, files)
 
     def _doc_index_cache(self) -> Any:
         if self._doc_index is None:

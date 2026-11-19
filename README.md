@@ -134,7 +134,7 @@ Every command takes `--repo-root PATH` (default: the git work tree containing th
 
 The `dump` commands are for checking an analyzer by hand; their JSON is the same schema the tools return. A command that needs a table the config lacks prints the [`not_configured`](#response-contract) message (`dump di needs the [backend] table, and .stack-intel/config.toml has none. Fix: add [backend] with root, package and app.`) and exits with its "could not run" code.
 
-**Docs check.** `doc-check` needs only Python, git and the packaged Markdown parser. Standard output holds only the findings, one `path:line: message` line each, or with `--json` one JSON document (the [response contract](#response-contract) envelope with `findings`, `finding_count`, `doc_count` and `reference_counts`). Everything else goes to standard error: the `⚠ INCOMPLETE` banner with every diagnostic, the `ⓘ` limitations, and a one-line summary (`doc-check: N findings in D docs (R references, C checked)`, ending in `; INCOMPLETE` when the report is incomplete and in `; docs not configured` when the config has no `[docs]`; R counts every reference the docs name, C the ones whose status decides the verdict). No GitHub workflow commands (`::error`) are printed, because messages quote doc text that a pull request controls.
+**Docs check.** `doc-check` needs only Python, git and the packaged Markdown parser. Standard output holds only the findings, one `path:line: message` line each, or with `--json` one JSON document (the [response contract](#response-contract) envelope with `findings`, `finding_count`, `doc_count` and `reference_counts`). Everything else goes to standard error: the `⚠ INCOMPLETE` banner with every diagnostic, the `ⓘ` limitations, and a one-line summary (`doc-check: N findings in D docs (R references, C checked); A agent files`, ending in `; INCOMPLETE` when the report is incomplete and in `; docs not configured` when the config has no `[docs]`; A counts the agent instruction files read; R counts every reference the docs name, C the ones whose status decides the verdict). No GitHub workflow commands (`::error`) are printed, because messages quote doc text that a pull request controls.
 
 | Code | Meaning |
 | --- | --- |
@@ -221,8 +221,8 @@ text = "/api/external"
 reason = "Served by another service."
 
 [agents]
-rules_dir = ".claude/rules"
-skills_dir = ".claude/skills"
+skill_dirs = ["skills"]
+strict = true
 instruction_map = { file = "AGENTS.md", heading = "Scoped instruction map" }
 ```
 
@@ -346,7 +346,15 @@ URL builders are found in the modules of the configured clients: exported functi
 
 ### `[agents]`
 
-`rules_dir` and `skills_dir` are required; `instruction_map` (`file` and `heading`) is optional. See [Agent instruction files](#agent-instruction-files).
+Optional. The agent instruction files at their conventional locations are checked without it; the table only adds to that. See [Agent instruction files](#agent-instruction-files).
+
+| Key | Meaning |
+| --- | --- |
+| `skill_dirs` | More Agent Skills roots, each holding `<name>/SKILL.md`, held to the Agent Skills rules. Repository-relative; a conventional root (`.claude/skills`, `.github/skills`, `.agents/skills`) or `.` is an error, and a directory listed twice counts once. |
+| `strict` | `true` adds this repository's policy to the checks: every `.claude/rules` file is scoped (frontmatter with `paths`, no `applyTo`), the Agent Skills rules apply to every skill root, every directory under a skill root holds a `SKILL.md`, and frontmatter that is not clean YAML and repeated keys are reported. Default `false`. |
+| `instruction_map` | `file` and `heading`: a section whose ``- `label`: `glob`, …`` lines must equal the `.claude/rules` files' stems and their `paths` exactly. |
+
+`rules_dir` and `skills_dir` were removed in 0.3; `config-check` says what replaces them.
 
 ## Tools
 
@@ -871,19 +879,35 @@ Add an ignore entry only when the doc is right and the check cannot see it, and 
 ```
 $ stack-intel doc-check
 docs/items.md:7: route not found: POST /items/import (only /api/items/{item_id} fits, by a word in a parameter)
-doc-check: 1 finding in 2 docs (7 references, 6 checked)
+doc-check: 1 finding in 2 docs (7 references, 6 checked); 0 agent files
 ```
 
 ### Agent instruction files
 
-With an `[agents]` table the docs check also validates the instruction files coding agents load, and prints their findings as `path:line: message` beside the docs findings:
+The docs check also validates the instruction files Claude Code and GitHub Copilot load, with or without an `[agents]` table, and prints their findings as `path:line: message` beside the docs findings; the summary line ends with the number of agent files read (`; A agent files`). Only git-visible files at the repository root's conventional locations count; a nested `.claude/` directory (a sub-project launched on its own) is not read. Files are read as UTF-8, with undecodable bytes replaced as the agents replace them. A default finding states what goes wrong for a named reader (Claude Code, Copilot CLI or VS Code), and only where that reader's behavior is known; behavior that is not known is never a finding.
 
-- every rule file under `rules_dir` opens with YAML frontmatter holding a non-empty `paths` list of non-blank strings, and has no `applyTo` key;
-- every `paths` glob matches at least one git-visible file, so a renamed directory cannot silently stop a rule from loading;
-- every skill's `SKILL.md` under `skills_dir` has a `name` equal to its directory, unique among skills, and a non-empty `description`, and every directory under `skills_dir` holds a `SKILL.md` (itself or in a nested skill directory);
-- no frontmatter key repeats;
-- the `instruction_map` section (the `heading` in `file`) lists ``- `label`: `glob`, …`` lines that equal the rule files' stems and their `paths` exactly;
-- a `.mcp.json` at the repository root, when git sees one, parses as JSON, is an object with an `mcpServers` object, and every server is an object with a non-blank string `command` or `url`.
+| Location | Read by | Checked |
+| --- | --- | --- |
+| `.claude/rules/**/*.md` (a symlinked `.claude/rules` inside the repository is followed) | Claude Code, Copilot CLI | Frontmatter, when line 1 is `---`, that Claude Code cannot read (see **Frontmatter** below), a `---` inside a value that ends Claude Code's frontmatter before `paths`, and a non-empty `paths` with no string glob left (`paths: 123`, a map, `[3, 4]`): each makes Claude Code load the rule for every file. A `---` inside the `paths` value is reported when what is left before it matches nothing. Each `paths` glob matches at least one git-visible file. |
+| `.claude/agents/**/*.md` | Claude Code, Copilot CLI | With a `name`: frontmatter Claude Code can read, a non-blank `description`, a name of at most 256 characters that does not start with `-` and has no `:`, unique among the subagents Claude Code loads. A file without `name` is documentation and is not checked. |
+| `.claude/skills/<dir>/SKILL.md` | Claude Code, Copilot CLI | Frontmatter Claude Code cannot read (it loads the skill without it). The directory is not `synced` and the name is not `anthropic-skills` or `anthropic-skills:*` and has no `<`, control, zero-width, bidi or private-use character, which Claude Code does not load. |
+| `.agents/skills/<dir>/SKILL.md`, `.github/skills/<dir>/SKILL.md` | VS Code | Nothing by default. VS Code 1.147.0 collects YAML errors instead of failing, reads an unclosed header to the end of the file, and loads a skill with a missing or mismatched name under its folder name, so a parse failure and the Agent Skills rules are reported here only under `strict`. |
+| each `skill_dirs` entry | Agent Skills | Frontmatter is present and parses. `name` is 1-64 lowercase letters, digits and hyphens, with no leading, trailing or double hyphen, and equals the directory. `description` is a non-blank string of at most 1024 characters. |
+| `.github/instructions/**/*.instructions.md` | Copilot | When the frontmatter parses: each `applyTo` glob matches a file, and `excludeAgent` is `code-review`, `cloud-agent` or `coding-agent`. |
+| `.github/agents/**/*.md` | Copilot | The base name uses only ASCII letters, digits, `.`, `-` and `_`. Parsed frontmatter has a non-blank `description` and a `target` of `vscode` or `github-copilot`. |
+| `.github/hooks/*.json` | Copilot CLI and cloud agent | JSON object, `version` 1, `hooks` an object whose every value is an array (otherwise Copilot rejects the whole file). |
+| `.mcp.json`, `.github/mcp.json`, `.vscode/mcp.json` | Claude Code and Copilot CLI; Copilot CLI; VS Code | A file that is not blank parses as JSON (JSONC for VS Code). `.mcp.json` is `{}` or has an `mcpServers` object; `.github/mcp.json` has one or is a bare map of servers; `.vscode/mcp.json` keeps them under `servers` and declares every `${input:ID}` in `inputs`. Every server is an object with a `command` or a `url` (VS Code infers a missing `type`); for Claude Code and Copilot CLI a server with no type (or `stdio`, `local`) has a `command`, and one with only a `url` and no type is a finding (it is read as a stdio server and skipped); `http`, `streamable-http`, `sse` and `ws` servers have a `url`; `args` is a list of strings; `env` and `headers` are objects. JSON the parser cannot hold (a 5000-digit number, nesting 100,000 deep) is skipped. |
+| `CLAUDE.md` and `AGENTS.md` at any depth, `.claude/CLAUDE.md`, `.github/copilot-instructions.md` | Claude Code, Copilot CLI | Every `@path` import resolves, relative to the file or to the repository root. Only `@` at the start of a text run or after whitespace counts, outside code and table cells and not escaped as `\@`, followed by a path ending in `.md`, or starting with `./` or `../` and naming a Markdown or text file or one with no extension; a `#fragment` is dropped. Quoted, absolute and `~` paths, a target git ignores and `@word` mentions are not checked. |
+
+**Frontmatter.** Claude Code (as observed in Claude Code 2.1.328) ends the frontmatter at the first `---` after the opening line, even inside a longer run such as `-----`. YAML that does not parse is retried once: each top-level `key: value` line whose value holds `{`, `}`, `[`, `]`, `*`, `&`, `#`, `!`, `|`, `>`, `%`, `@`, a backtick or `: ` is double-quoted, unless the value is already in matching quotes or is a `[...]` list that parses on its own, and leading tabs become spaces. Only a failed retry drops the frontmatter, so `paths: **/*.ts` and `description: Use this agent when: the user asks` are read, while a block-list item such as `  - **/*.ts` is not quoted and breaks the file. A `[...]` value that is not a list on its own (`paths: [src/api/**, {lib]`) is quoted into one string; when no piece of that string matches a file, the finding names the line that made the YAML invalid and how to fix it. Because the block ends at the first `---`, `description: Backend --- API layer` above `paths` drops `paths`. A repeated key keeps its last value. Values are read as YAML 1.2 reads them: only `true` and `false` are booleans and dates stay strings. Frontmatter with no key-value lines (a `---` rule above prose) has no keys, and an unclosed one is not frontmatter. Frontmatter the YAML library cannot load although it may be valid (`!!float abc`, a 5000-digit number, nesting 3000 deep), before or during the retry, is not a default finding.
+
+**Globs.** A glob is reported only when it matches no git-visible file or directory under the most lenient reading a known reader uses: case-insensitive, folded per character as Python's `re` folds it, with range bounds kept in their case (`[B-a]` matches `x`, `[A-z]` matches `_`); `**/` prepended unless the pattern starts with `/` or `**/` (VS Code); a trailing `/**` also matches the directory itself; `./` stripped; brace options trimmed (`{ js, ts }`); `[...]` tried as a class and as a literal (for directories such as `[id]`). A comma-separated string is split into globs reported one by one; in a list, nested lists are flattened, non-strings dropped, and each item is also split on commas and reported only when no piece matches. A glob is also not checked when something the reader may see could match it: its literal directory is a symlink, lies under one, or exists on disk untracked, or git ignores its directory or the paths it would match (`gen/**/*.ts` with `gen/` ignored, `**/.env*`). Negation, extglobs, backslash escapes, POSIX classes, brace ranges, braces or brackets holding a comma inside a comma-separated string, and globs past the work bound (longer than 256 characters, more than 64 brace expansions) are not checked. Matching never backtracks: a glob with more than two wildcards runs as an automaton over each path once, built from the same one-character tests as the regex.
+
+**Never reported by default:** unknown frontmatter keys, a missing `paths` or `applyTo`, an empty `paths` (`""`, `[]`, `[""]`), a `paths` list with non-string items beside a string glob, an `applyTo` value of another shape, `applyTo` in `.claude/rules`, instruction files without frontmatter, `.mcp.json` servers without `tools`, a Claude Code skill whose name differs from its directory, subdirectories under `instructions/`, `rules/` and `agents/`, YAML that does not parse in `.github/instructions` and `.github/agents` (Copilot CLI recovers the keys), frontmatter Claude Code's retry reads, a skill frontmatter that does not parse in `.agents/skills` and `.github/skills`, a repeated key, YAML 1.1 words such as `yes` and `on`, one skill name in two roots, a blank MCP config, and `.github/prompts`, `.claude/commands` and settings files.
+
+**`strict = true`** adds: every `.claude/rules` file has frontmatter with at least one `paths` glob, a `paths` that is a non-blank string or a list of non-blank strings, and no `applyTo`; `applyTo` is a string or a list of non-blank strings; the Agent Skills rules apply to every skill root; every directory directly under a skill root holds a `SKILL.md`; frontmatter that is not clean YAML is reported with what the reader does about it (`invalid YAML frontmatter: ...; Claude Code recovers by quoting the value`), as is frontmatter the YAML library cannot load (`frontmatter could not be checked`) and frontmatter that is not a mapping of keys; a repeated key is reported (`the last value wins`).
+
+**Instruction map.** With `instruction_map`, the section under `heading` in `file` lists ``- `label`: `glob`, …`` lines that must equal the `.claude/rules` files' stems (`web/forms` for `.claude/rules/web/forms.md`) and their `paths` exactly; a comma-separated `paths` string counts as its globs.
 
 ## Freshness and the restart rule
 
@@ -1019,7 +1043,7 @@ Releases: `release.yml` builds once, smoke-tests the wheel on Ubuntu and macOS, 
 
 The dependency groups `fastapi-live` (default) and `fastapi-copy` select the FastAPI the oracle tests run against; install one at a time: `uv sync --no-default-groups --group dev --group fastapi-copy`. The tests turn the automatic install off (`STACK_INTEL_NO_AUTO_SETUP=1`), so run `stack-intel setup` first. Tests that need Node, TypeScript, git or FastAPI skip when they are missing; `STACK_INTEL_REQUIRE_TOOLCHAIN=1` (set in CI) turns those skips into failures. The code has no type-check suppressions; keep it that way.
 
-Layout of `src/stack_intel/`: `server.py` registers the tools, validates arguments and maps failures to error bodies; `analysis_runtime.py` owns every cache, its freshness and the analyzer-code staleness check; `queries.py` and `doc_queries.py` hold the pure filtering, matching and suggestion logic; `presenters.py` and `doc_presenters.py` render text and JSON through one envelope. Backend: `py_sources.py`, `py_escapes.py`, `py_values.py`, `router_bases.py`, `router_graph.py`, `include_model.py`, `dependency_resolver.py` and `di_map.py`; the library capture is `library_capture.py` (the file format), `library_view.py` (what the analysis applies and checks), `capture.py` and `runner.py` (the command and the clean-environment subprocess). Frontend: `ts_bridge.py`, `provision.py` (the install on first use), `ts_facts.py`, `ts/*.cjs`, `route_map.py`, `route_matching.py`, `jsx_usage.py`, `symbol_resolve.py`. Docs: `markdown_facts.py`, `repo_files.py`, `code_words.py`, `doc_rules.py`, `doc_refs.py`, `doc_report.py`, `doc_resolvers.py`, `pages.py`, `agent_files.py`, `doc_check.py`. Commands: `cli.py`, `setup.py`, `verify.py`, `summary.py`, `runtime_check.py`.
+Layout of `src/stack_intel/`: `server.py` registers the tools, validates arguments and maps failures to error bodies; `analysis_runtime.py` owns every cache, its freshness and the analyzer-code staleness check; `queries.py` and `doc_queries.py` hold the pure filtering, matching and suggestion logic; `presenters.py` and `doc_presenters.py` render text and JSON through one envelope. Backend: `py_sources.py`, `py_escapes.py`, `py_values.py`, `router_bases.py`, `router_graph.py`, `include_model.py`, `dependency_resolver.py` and `di_map.py`; the library capture is `library_capture.py` (the file format), `library_view.py` (what the analysis applies and checks), `capture.py` and `runner.py` (the command and the clean-environment subprocess). Frontend: `ts_bridge.py`, `provision.py` (the install on first use), `ts_facts.py`, `ts/*.cjs`, `route_map.py`, `route_matching.py`, `jsx_usage.py`, `symbol_resolve.py`. Docs: `markdown_facts.py`, `repo_files.py`, `code_words.py`, `doc_rules.py`, `doc_refs.py`, `doc_report.py`, `doc_resolvers.py`, `pages.py`, `doc_check.py`. Agent files: `agent_files.py` (discovery, rules, subagents, Copilot instructions and agents, the instruction map), `agent_frontmatter.py`, `agent_globs.py`, `agent_skills.py`, `agent_json.py` (MCP configs, hooks), `agent_imports.py`. Commands: `cli.py`, `setup.py`, `verify.py`, `summary.py`, `runtime_check.py`.
 
 ## License
 

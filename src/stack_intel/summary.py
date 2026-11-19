@@ -193,7 +193,7 @@ def docs_section(runtime: AnalysisRuntime) -> Rows:
 
     started = time.perf_counter()
     report = runtime.get_doc_report().report
-    result = doc_queries.doc_check(report, runtime.get_agent_findings())
+    result = doc_queries.doc_check(report, runtime.get_agent_report().findings)
     elapsed = milliseconds(started)
     kinds = Counter({kind: sum(by_status.values()) for kind, by_status in result.reference_counts.items()})
     return [
