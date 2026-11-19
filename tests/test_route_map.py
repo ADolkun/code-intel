@@ -22,12 +22,12 @@ import pytest
 from fixture_repo import MINIMAL_CONFIG, git_init, make_repo
 from test_dependency_resolver import FakeResolver, FakeSources
 
-from code_intel import cli, include_model, route_map, ts_bridge
-from code_intel.backend_model import BackendModel, CapturedEndpoint, Library, LiveRoute, Located, RouteKind
-from code_intel.code_paths import TS_SUFFIXES, iter_source_files
-from code_intel.config import FrontendConfig, parse_config
-from code_intel.dependency_resolver import DependencyResolver
-from code_intel.problems import Problem, diagnostic, limitation
+from stack_intel import cli, include_model, route_map, ts_bridge
+from stack_intel.backend_model import BackendModel, CapturedEndpoint, Library, LiveRoute, Located, RouteKind
+from stack_intel.code_paths import TS_SUFFIXES, iter_source_files
+from stack_intel.config import FrontendConfig, parse_config
+from stack_intel.dependency_resolver import DependencyResolver
+from stack_intel.problems import Problem, diagnostic, limitation
 
 pytestmark = pytest.mark.usefixtures("module_git")
 
@@ -1858,8 +1858,8 @@ def test_unavailable_toolchain_names_the_missing_piece_and_the_fix(tmp_path: Pat
     (tmp_path / "frontend").mkdir()
     problem = ts_bridge.ToolchainProblem(
         "typescript_not_found",
-        "tools/code-intel/ts/node_modules/typescript/package.json not found",
-        "tools/code-intel/ts/node_modules/typescript/package.json",
+        "tools/stack-intel/ts/node_modules/typescript/package.json not found",
+        "tools/stack-intel/ts/node_modules/typescript/package.json",
         ts_bridge.FRONTEND_TS_FIX,
     )
     toolchain = ts_bridge.Toolchain(None, None, None, None, None, None, problem, (), tmp_path)
@@ -1867,13 +1867,13 @@ def test_unavailable_toolchain_names_the_missing_piece_and_the_fix(tmp_path: Pat
     assert isinstance(scan, route_map.FrontendUnavailable)
     diag = scan.diagnostic()
     assert (
-        diag.kind == "frontend_unavailable" and diag.file == "tools/code-intel/ts/node_modules/typescript/package.json"
+        diag.kind == "frontend_unavailable" and diag.file == "tools/stack-intel/ts/node_modules/typescript/package.json"
     )
-    assert diag.message == "tools/code-intel/ts/node_modules/typescript/package.json not found"
+    assert diag.message == "tools/stack-intel/ts/node_modules/typescript/package.json not found"
     assert scan.code == "typescript_not_found"
     row = diag.as_diagnostic()
     assert (row["missing"], row["fix"]) == (
-        "tools/code-intel/ts/node_modules/typescript/package.json",
+        "tools/stack-intel/ts/node_modules/typescript/package.json",
         ts_bridge.FRONTEND_TS_FIX,
     )
 
@@ -2071,7 +2071,7 @@ def test_cli_matches_a_configured_repository_from_any_cwd(typescript_toolchain, 
     (repo / "frontend" / "tsconfig.json").write_text(TSCONFIG, encoding="utf-8")
     env = {**os.environ, ts_bridge.TS_DIR_ENV: str(typescript_toolchain.typescript_dir)}
     proc = subprocess.run(
-        [sys.executable, "-m", "code_intel.cli", "dump", "routes", "--json", "--repo-root", str(repo)],
+        [sys.executable, "-m", "stack_intel.cli", "dump", "routes", "--json", "--repo-root", str(repo)],
         cwd="/",
         capture_output=True,
         text=True,
@@ -2093,7 +2093,7 @@ def test_matching_uses_the_include_snapshot_reachability(tmp_path: Path) -> None
     a lambda the analysis cannot order keeps its route, listed as deferred and reported."""
     import textwrap
 
-    from code_intel.router_graph import build_backend_model
+    from stack_intel.router_graph import build_backend_model
 
     sources = {
         "pkg/__init__.py": "",
@@ -2155,7 +2155,7 @@ def test_a_function_run_at_import_other_than_by_a_followed_call_keeps_its_route(
         "app = FastAPI()\n"
         'app.include_router(child, prefix="/c")\n'
     )
-    from code_intel.router_graph import build_backend_model
+    from stack_intel.router_graph import build_backend_model
 
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
@@ -2171,7 +2171,7 @@ def test_a_function_run_at_import_other_than_by_a_followed_call_keeps_its_route(
 
 def test_a_methods_none_route_matches_only_get(tmp_path: Path) -> None:
     """``methods=None`` is GET at runtime, so a POST call to the path is frontend-only."""
-    from code_intel.router_graph import build_backend_model
+    from stack_intel.router_graph import build_backend_model
 
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")

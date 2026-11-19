@@ -2,8 +2,8 @@ version = 1
 revision = 5
 requires-python = ">=3.14"
 conflicts = [[
-    { package = "code-intel", group = "fastapi-copy" },
-    { package = "code-intel", group = "fastapi-live" },
+    { package = "stack-intel", group = "fastapi-copy" },
+    { package = "stack-intel", group = "fastapi-live" },
 ]]
 
 [[package]]
@@ -112,56 +112,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c7/0e/7fa0ef50764b67090eca4114772a2abf8b6148198475e54c660b97caeee6/click-8.5.0.tar.gz", hash = "sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34", size = 382235, upload-time = "2026-08-26T13:33:14.56Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl", hash = "sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360", size = 125251, upload-time = "2026-08-26T13:33:12.928Z" },
-]
-
-[[package]]
-name = "code-intel"
-version = "0.2.3"
-source = { editable = "." }
-default-groups = ["dev", "fastapi-live"]
-dependencies = [
-    { name = "markdown-it-py" },
-    { name = "mcp" },
-    { name = "pyyaml" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pyrefly" },
-    { name = "pytest" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "types-pyyaml" },
-    { name = "zizmor" },
-]
-fastapi-copy = [
-    { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" } },
-]
-fastapi-live = [
-    { name = "fastapi", version = "0.162.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "starlette" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "markdown-it-py", specifier = ">=4.2.0" },
-    { name = "mcp", specifier = ">=2.3.0" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pyrefly", specifier = ">=1.4.1" },
-    { name = "pytest", specifier = ">=9.2.0" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "ruff", specifier = ">=0.17.3" },
-    { name = "types-pyyaml", specifier = ">=6.0.12.20261103" },
-    { name = "zizmor", specifier = ">=1.32.0" },
-]
-fastapi-copy = [{ name = "fastapi", specifier = "<0.137" }]
-fastapi-live = [
-    { name = "fastapi", specifier = ">=0.162.0" },
-    { name = "starlette", specifier = ">=1.10.0" },
 ]
 
 [[package]]
@@ -789,6 +739,56 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/71/7f/3b8ec4f27833f7b8c270a3ef960b6d435e1065439847bc0fcd1e58ae898b/sse_starlette-3.6.0.tar.gz", hash = "sha256:623151d6c20dc0eebf1b3379c27faae91fff883bac7ab6665f16f46440a88b3a", size = 41174, upload-time = "2026-10-25T20:31:59.372Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cf/49/35053078cdfcf639237e8bee6dc6f34f1b3a3cc8d01800a1e213e1660ff6/sse_starlette-3.6.0-py3-none-any.whl", hash = "sha256:e4dfa4d237d2712cb2b4d4918eda9b457cd6b44bbecdc838af75de836565bafd", size = 17985, upload-time = "2026-10-25T20:31:58.134Z" },
+]
+
+[[package]]
+name = "stack-intel"
+version = "0.2.3"
+source = { editable = "." }
+default-groups = ["dev", "fastapi-live"]
+dependencies = [
+    { name = "markdown-it-py" },
+    { name = "mcp" },
+    { name = "pyyaml" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pyrefly" },
+    { name = "pytest" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+    { name = "types-pyyaml" },
+    { name = "zizmor" },
+]
+fastapi-copy = [
+    { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" } },
+]
+fastapi-live = [
+    { name = "fastapi", version = "0.162.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "starlette" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "markdown-it-py", specifier = ">=4.2.0" },
+    { name = "mcp", specifier = ">=2.3.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pyrefly", specifier = ">=1.4.1" },
+    { name = "pytest", specifier = ">=9.2.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "ruff", specifier = ">=0.17.3" },
+    { name = "types-pyyaml", specifier = ">=6.0.12.20261103" },
+    { name = "zizmor", specifier = ">=1.32.0" },
+]
+fastapi-copy = [{ name = "fastapi", specifier = "<0.137" }]
+fastapi-live = [
+    { name = "fastapi", specifier = ">=0.162.0" },
+    { name = "starlette", specifier = ">=1.10.0" },
 ]
 
 [[package]]

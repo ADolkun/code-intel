@@ -3,7 +3,7 @@ requires = ["uv_build>=0.13.7,<0.14.0"]
 build-backend = "uv_build"
 
 [project]
-name = "code-intel"
+name = "stack-intel"
 version = "0.2.3"
 description = "Static analysis of a FastAPI backend and its TypeScript frontend, served to coding agents over MCP."
 readme = "README.md"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-code-intel = "code_intel.cli:main"
+stack-intel = "stack_intel.cli:main"
 
 [dependency-groups]
 dev = [
@@ -48,7 +48,7 @@ conflicts = [
 ]
 
 [tool.uv.build-backend]
-module-name = "code_intel"
+module-name = "stack_intel"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -63,7 +63,7 @@ target-version = "py314"
 select = ["E4", "E7", "E9", "F", "I", "B", "UP", "PLE"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["code_intel"]
+known-first-party = ["stack_intel"]
 
 [tool.pyrefly]
 python-version = "3.14"

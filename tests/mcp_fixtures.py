@@ -18,11 +18,11 @@ from doc_config import docs_toml
 from fake_repo_files import repo_files_on_disk
 from fixture_repo import LATE_NS, Clock, write
 
-from code_intel import analysis_runtime, doc_rules, problems
-from code_intel.config import BackendConfig, Config, ConfigFile, FrontendConfig, load_config
-from code_intel.doc_rules import DocRefsConfig
-from code_intel.repo_files import RepoFiles
-from code_intel.result_types import (
+from stack_intel import analysis_runtime, doc_rules, problems
+from stack_intel.config import BackendConfig, Config, ConfigFile, FrontendConfig, load_config
+from stack_intel.doc_rules import DocRefsConfig
+from stack_intel.repo_files import RepoFiles
+from stack_intel.result_types import (
     BackendRouteRow,
     DiagnosticDict,
     DiDependencyFunction,
@@ -37,7 +37,7 @@ from code_intel.result_types import (
     MatchRow,
     RoutesResult,
 )
-from code_intel.ts_bridge import FRONTEND_TS_FIX, Toolchain, ToolchainProblem, ToolchainUnavailable
+from stack_intel.ts_bridge import FRONTEND_TS_FIX, Toolchain, ToolchainProblem, ToolchainUnavailable
 
 __all__ = ["LATE_NS", "Clock", "write"]
 
@@ -586,7 +586,7 @@ class FakeAnalyzers:
 
     def make_doc_index(self, repo_root: Path, clock: Callable[[], int]) -> Any:
         self._count("make_doc_index")
-        from code_intel import doc_refs
+        from stack_intel import doc_refs
 
         return doc_refs.DocIndex(repo_root, clock=clock)
 
@@ -681,7 +681,7 @@ DOC_CONFIG: dict[str, Any] = {
     "ignore": [],
 }
 
-CONFIG_FILE = ".code-intel/config.toml"
+CONFIG_FILE = ".stack-intel/config.toml"
 
 
 def config_toml(layout: str = LAYOUT, **docs: Any) -> str:
@@ -832,7 +832,7 @@ DOC_LOOKUP_OTHER_STATUS: dict[str, Any] = {
 
 def doc_lookup_two_owner_report(root: Path) -> Any:
     """`doc_lookup_report` plus docs/c.md and a second owner of ``status``."""
-    from code_intel import doc_refs
+    from stack_intel import doc_refs
 
     doc_lookup_repo(root)
     write(root / DOC_LOOKUP_OTHER_FILE, "class Holder:\n    pass\nclass Other:\n    status = 2\n")
@@ -856,7 +856,7 @@ def doc_lookup_report(
     route: DiRoute | None = None,
 ) -> Any:
     """A real `doc_refs.DocReport` over `doc_lookup_repo` (no git, no Node)."""
-    from code_intel import doc_refs
+    from stack_intel import doc_refs
 
     doc_lookup_repo(root)
     return doc_refs.build_report(

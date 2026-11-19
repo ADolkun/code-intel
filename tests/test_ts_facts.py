@@ -3,7 +3,7 @@
 Cache tests drive ``FactsCache`` with a fake helper and an injected clock, so
 they run without Node and never patch ``time`` globally. Helper tests run the
 real ``ts/helper.cjs`` through ``ts_bridge`` (skipped, or failed under
-``CODE_INTEL_REQUIRE_TOOLCHAIN=1``, when Node or TypeScript is missing).
+``STACK_INTEL_REQUIRE_TOOLCHAIN=1``, when Node or TypeScript is missing).
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from code_intel import code_paths, ts_bridge, ts_facts
-from code_intel.code_paths import RACY_WINDOW_NS, SourceFile
+from stack_intel import code_paths, ts_bridge, ts_facts
+from stack_intel.code_paths import RACY_WINDOW_NS, SourceFile
 
 NOW = 1_000_000_000_000_000_000  # injected clock value, far past every test file's mtime
 # Cache tests set mtimes against NOW and rewrite files keeping their stamp to

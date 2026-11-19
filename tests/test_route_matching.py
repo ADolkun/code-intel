@@ -8,10 +8,10 @@ import re
 
 import pytest
 
-from code_intel import route_matching as rmatch
-from code_intel.backend_model import LiveRoute, Located, RouteKind
-from code_intel.result_types import Confidence
-from code_intel.route_paths import path_key
+from stack_intel import route_matching as rmatch
+from stack_intel.backend_model import LiveRoute, Located, RouteKind
+from stack_intel.result_types import Confidence
+from stack_intel.route_paths import path_key
 
 _ENDPOINT = Located("case", ast.Pass())
 

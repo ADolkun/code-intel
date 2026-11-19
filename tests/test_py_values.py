@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from code_intel.backend_model import Def, External, Located, ModuleRef, Unknown, Value
-from code_intel.py_sources import PySources
-from code_intel.py_values import ESCAPED_REASON, ValueEvaluator
+from stack_intel.backend_model import Def, External, Located, ModuleRef, Unknown, Value
+from stack_intel.py_sources import PySources
+from stack_intel.py_values import ESCAPED_REASON, ValueEvaluator
 
 
 def evaluator(tmp_path: Path, files: dict[str, str], **kwargs) -> ValueEvaluator:
@@ -537,7 +537,7 @@ def test_a_decorator_keeps_the_signature_only_through_functools_wraps(
     ``functools.wraps`` (whose signature FastAPI follows); anything else is a
     wrapper FastAPI reads instead. Decorators from outside the package are
     assumed to keep the signature."""
-    from code_intel.py_values import opaque_decorator
+    from stack_intel.py_values import opaque_decorator
 
     ev = evaluator(tmp_path, {**BASE, "pkg/d.py": DECORATORS})
     assert opaque_decorator(ev, "pkg.d", ast.parse(decorator, mode="eval").body, None) == reason

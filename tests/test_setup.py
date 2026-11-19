@@ -1,4 +1,4 @@
-"""``code-intel setup``: the shared TypeScript install, with a fake npm and a private cache."""
+"""``stack-intel setup``: the shared TypeScript install, with a fake npm and a private cache."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fake_npm import NODE, NPM, FakeNpm, which
 
-from code_intel import cli, setup, ts_bridge
+from stack_intel import cli, setup, ts_bridge
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -48,7 +48,7 @@ def test_the_install_directory_is_named_by_the_lock_digest(tmp_path: Path) -> No
     target = ts_bridge.install_dir(_env(tmp_path))
     assert target.parent == tmp_path / "cache" / "ts"
     assert len(target.name) == 16 and set(target.name) <= set("0123456789abcdef")
-    assert ts_bridge.cache_dir({}) == Path.home() / ".cache" / "code-intel"
+    assert ts_bridge.cache_dir({}) == Path.home() / ".cache" / "stack-intel"
 
 
 def test_the_typescript_dir_override_does_not_redirect_the_install(tmp_path: Path) -> None:
@@ -185,4 +185,4 @@ def test_the_command_needs_no_repository_or_config(tmp_path: Path, monkeypatch: 
 
     monkeypatch.setattr(setup, "install", fail)
     assert cli.main(["setup"]) == 1
-    assert capsys.readouterr().err == "code-intel setup: npm not found on PATH (it ships with Node.js)\n"
+    assert capsys.readouterr().err == "stack-intel setup: npm not found on PATH (it ships with Node.js)\n"

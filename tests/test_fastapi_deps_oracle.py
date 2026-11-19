@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import pytest
 
-from code_intel import di_map, include_model, queries
-from code_intel.oracles import case_package
-from code_intel.oracles.fastapi_dependency_cases import DEPENDENCY_CASES, INEXACT_DEPENDENCIES
-from code_intel.result_types import DiResult
+from stack_intel import di_map, include_model, queries
+from stack_intel.oracles import case_package
+from stack_intel.oracles.fastapi_dependency_cases import DEPENDENCY_CASES, INEXACT_DEPENDENCIES
+from stack_intel.result_types import DiResult
 
 
 def _runtime(results, case_id: str) -> dict:
@@ -38,7 +38,7 @@ _DI_CACHE: dict[str, DiResult] = {}
 
 def _di(results, case_id: str) -> DiResult:
     if case_id not in _DI_CACHE:
-        from code_intel import router_graph
+        from stack_intel import router_graph
 
         case = DEPENDENCY_CASES[case_id]
         version = include_model.for_version(results.results["fastapi_version"], source=None)
@@ -54,7 +54,7 @@ def _di(results, case_id: str) -> DiResult:
 
 @pytest.mark.parametrize("case_id", sorted(DEPENDENCY_CASES))
 def test_dependency_case_matches_the_fastapi_runtime(fastapi_oracle_results, case_id: str) -> None:
-    from code_intel.oracles import fastapi_oracle
+    from stack_intel.oracles import fastapi_oracle
 
     runtime = _runtime(fastapi_oracle_results, case_id)
     di = _di(fastapi_oracle_results, case_id)

@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from code_intel.repo_files import RepoFiles
+from stack_intel.repo_files import RepoFiles
 
 
 @dataclass(frozen=True)

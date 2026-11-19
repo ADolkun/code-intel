@@ -111,7 +111,7 @@ def hermetic_git(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
     (``$XDG_CONFIG_HOME/git/ignore``, else ``~/.config/git/ignore``), whose
     patterns would change what counts as ignored, so ``HOME`` and
     ``XDG_CONFIG_HOME`` point at an empty directory too. Skips (fails under
-    ``CODE_INTEL_REQUIRE_TOOLCHAIN=1``) when git is missing."""
+    ``STACK_INTEL_REQUIRE_TOOLCHAIN=1``) when git is missing."""
     if shutil.which("git") is None:
         unavailable("git is not on PATH")
     home.mkdir(parents=True, exist_ok=True)
@@ -144,7 +144,7 @@ class Clock:
 
 def make_repo(root: Path, config: str = FULL_CONFIG) -> Path:
     """A small repository laid out as ``config`` describes, with its config file written."""
-    write(root / ".code-intel" / "config.toml", config)
+    write(root / ".stack-intel" / "config.toml", config)
     write(root / "backend" / ".python-version", "3.14\n")
     write(root / "backend" / "service_backend" / "main.py", "app = None\n")
     write(root / "frontend" / "lib" / "api.ts", "export {};\n")

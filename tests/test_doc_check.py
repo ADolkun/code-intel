@@ -1,4 +1,4 @@
-"""``code-intel doc-check``: exit codes, the exact ``path:line: message`` lines
+"""``stack-intel doc-check``: exit codes, the exact ``path:line: message`` lines
 for a stale path, a broken anchor, a removed route, an orphaned doc and a
 broken agent file, and the same failures caused by editing a real git
 checkout end to end."""
@@ -31,10 +31,10 @@ from mcp_fixtures import (
     write_doc_config,
 )
 
-from code_intel import doc_check, ts_bridge
-from code_intel.doc_rules import STAGE
-from code_intel.problems import limitation
-from code_intel.repo_files import RepoFilesError
+from stack_intel import doc_check, ts_bridge
+from stack_intel.doc_rules import STAGE
+from stack_intel.problems import limitation
+from stack_intel.repo_files import RepoFilesError
 
 pytestmark = pytest.mark.usefixtures("ctime_follows_mtime")
 
@@ -314,7 +314,7 @@ def test_agent_findings_are_in_the_json_findings_and_counts(tmp_path: Path) -> N
 def test_a_page_provider_limitation_is_a_note_and_the_run_still_passes(repo: Path) -> None:
     class Unavailable:
         def pages(self, tracked: frozenset[str]):
-            from code_intel.doc_rules import PageSet
+            from stack_intel.doc_rules import PageSet
 
             note = limitation("frontend_pages_unavailable", stage=STAGE, file=None, line=None, message="no node")
             return PageSet(available=False, problems=(note,))
@@ -405,7 +405,7 @@ def e2e_repo(root: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     config = config_toml(E2E_LAYOUT)
-    (root / ".code-intel").mkdir()
+    (root / ".stack-intel").mkdir()
     (root / CONFIG_FILE).write_text(config + E2E_PAGES + AGENTS_TABLE, encoding="utf-8")
     git(root, "init", "-q")
     git(root, "add", "-A")
@@ -418,7 +418,7 @@ def run_cli(repo: Path, env_extra: dict[str, str] | None = None) -> tuple[int, s
     env[ts_bridge.CACHE_ENV] = str(repo.parent / "no-cache")
     env.update(env_extra or {})
     proc = subprocess.run(
-        [sys.executable, "-c", "from code_intel.cli import main; raise SystemExit(main())", "doc-check"],
+        [sys.executable, "-c", "from stack_intel.cli import main; raise SystemExit(main())", "doc-check"],
         cwd=repo,
         capture_output=True,
         text=True,
@@ -456,7 +456,7 @@ def _unlink_doc(repo: Path) -> None:
 def _hermetic_git(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Git, and the CLI's git, see no user or system config (an excludes file
     there would change what is ignored); a missing git fails under
-    ``CODE_INTEL_REQUIRE_TOOLCHAIN=1``."""
+    ``STACK_INTEL_REQUIRE_TOOLCHAIN=1``."""
     hermetic_git(monkeypatch, tmp_path / "home")
 
 
@@ -541,11 +541,11 @@ def test_end_to_end_main_refuses_a_missing_config(tmp_path: Path) -> None:
     git(repo, "init", "-q")
     code, out, err = run_cli(repo)
     assert (code, out) == (2, "")
-    assert "code-intel:" in err
+    assert "stack-intel:" in err
 
 
 def test_the_command_is_listed_by_the_cli() -> None:
-    from code_intel.cli import build_parser
+    from stack_intel.cli import build_parser
 
     parser = build_parser()
     args = parser.parse_args(["doc-check", "--json"])

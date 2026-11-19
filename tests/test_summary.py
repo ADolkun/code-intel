@@ -1,4 +1,4 @@
-"""``code-intel summary``: every section renders over a real git checkout, a
+"""``stack-intel summary``: every section renders over a real git checkout, a
 section that crashes or cannot run becomes a row in its place, and the
 exit code says whether any section failed."""
 
@@ -13,10 +13,10 @@ from fixture_repo import hermetic_git
 from mcp_fixtures import LAYOUT, FakeAnalyzers, make_repo, make_runtime, write_config
 from test_verify import checkout
 
-from code_intel import cli, summary, ts_bridge
-from code_intel.analysis_runtime import AnalysisFailed, AnalysisRuntime, FrontendFailed, FrontendProblem
-from code_intel.config import ConfigFile
-from code_intel.ts_bridge import HelperError, ToolchainProblem, ToolchainUnavailable
+from stack_intel import cli, summary, ts_bridge
+from stack_intel.analysis_runtime import AnalysisFailed, AnalysisRuntime, FrontendFailed, FrontendProblem
+from stack_intel.config import ConfigFile
+from stack_intel.ts_bridge import HelperError, ToolchainProblem, ToolchainUnavailable
 
 
 def test_calls_by_kind_counts_distinct_calls_not_url_variants() -> None:
@@ -125,7 +125,7 @@ def test_the_command_prints_the_markdown_and_exits_0(repo: Path) -> None:
     with redirect_stdout(out):
         code = cli.main(["summary", "--repo-root", str(repo)])
     assert code == 0
-    assert out.getvalue().startswith("## Code-intel analysis\n")
+    assert out.getvalue().startswith("## Stack-intel analysis\n")
 
 
 def test_the_command_exits_1_when_a_section_failed(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -19,9 +19,9 @@ from pathlib import Path
 import pytest
 from conftest import unavailable
 
-from code_intel import include_model, oracles
-from code_intel.backend_model import IncludeModel
-from code_intel.oracles import Case
+from stack_intel import include_model, oracles
+from stack_intel.backend_model import IncludeModel
+from stack_intel.oracles import Case
 
 ORACLES_DIR = Path(oracles.__path__[0])
 ORACLE_TIMEOUT_S = 600
@@ -52,7 +52,7 @@ class OracleResults:
 
 
 def _load_cases(module_name: str, attribute: str) -> dict[str, Case]:
-    module = importlib.import_module(f"code_intel.oracles.{module_name}")
+    module = importlib.import_module(f"stack_intel.oracles.{module_name}")
     cases = getattr(module, attribute, None)
     if not isinstance(cases, dict):
         pytest.fail(f"oracles/{module_name}.py: {attribute} must be a dict of case id -> Case", pytrace=False)

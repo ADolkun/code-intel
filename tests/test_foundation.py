@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from code_intel import backend_model, code_paths, problems, queries, result_types, route_paths, toolchain_pins
+from stack_intel import backend_model, code_paths, problems, queries, result_types, route_paths, toolchain_pins
 
 # ── code_paths ───────────────────────────────────────────────────────────
 
@@ -438,7 +438,7 @@ def test_every_emitted_diagnostic_step_has_a_banner_phrase() -> None:
         if not p.name.startswith(("test_", "conftest", "tool_fixtures", "analysis_runtime"))
     ]
     steps = {m for p in producers for m in _STEP_LITERAL.findall(p.read_text(encoding="utf-8"))}
-    route_map = pytest.importorskip("code_intel.route_map")
+    route_map = pytest.importorskip("stack_intel.route_map")
 
     steps |= {step for step, _ in route_map._UNRESOLVED_TEXT.values()}
     assert {"read file", "extract calls", "read tsconfig", "extract facts", "index symbols"} <= steps

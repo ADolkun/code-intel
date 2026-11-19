@@ -1,4 +1,4 @@
-"""``code-intel verify``: each relation broken once on plain data, the report
+"""``stack-intel verify``: each relation broken once on plain data, the report
 and exit codes, and the whole command over a real git checkout."""
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ import pytest
 from fixture_repo import hermetic_git
 from mcp_fixtures import LAYOUT, FakeAnalyzers, doc_lookup_report, make_repo, make_runtime, write_config
 
-from code_intel import cli, doc_queries, ts_bridge, verify
-from code_intel.analysis_runtime import AnalysisRuntime
-from code_intel.config import ConfigFile
-from code_intel.doc_refs import reference_message
-from code_intel.oracles import compare_facts
+from stack_intel import cli, doc_queries, ts_bridge, verify
+from stack_intel.analysis_runtime import AnalysisRuntime
+from stack_intel.config import ConfigFile
+from stack_intel.doc_refs import reference_message
+from stack_intel.oracles import compare_facts
 
 # ── Relations over plain data ────────────────────────────────────────────
 
@@ -373,10 +373,10 @@ def subject_for(tmp_path: Path, *, docs: bool) -> verify.Subject:
 
 def test_a_check_that_raises_cannot_run_is_an_error_not_a_failure(tmp_path: Path) -> None:
     def cannot(subject: verify.Subject) -> verify.Verdict:
-        raise verify.CannotRun("the frontend toolchain is unavailable. Fix: code-intel setup")
+        raise verify.CannotRun("the frontend toolchain is unavailable. Fix: stack-intel setup")
 
     result = verify.run_check(verify.Check("needs-node", cannot), subject_for(tmp_path, docs=True))
-    assert (result.status, result.detail) == ("error", "the frontend toolchain is unavailable. Fix: code-intel setup")
+    assert (result.status, result.detail) == ("error", "the frontend toolchain is unavailable. Fix: stack-intel setup")
 
 
 def test_a_docs_check_is_skipped_without_a_docs_table(tmp_path: Path) -> None:
@@ -474,7 +474,7 @@ def git(repo: Path, *args: str) -> None:
 
 def checkout(root: Path) -> Path:
     files = {
-        ".code-intel/config.toml": CONFIG,
+        ".stack-intel/config.toml": CONFIG,
         ".python-version": "3.14\n",
         "backend/service_backend/__init__.py": "",
         "backend/service_backend/main.py": MAIN,
@@ -535,7 +535,7 @@ def test_a_missing_toolchain_is_a_could_not_run_with_the_fix(
     monkeypatch.delenv(ts_bridge.TS_DIR_ENV)
     results = outcomes_of(repo)
     assert results["jsx-oracle"].status == "error"
-    assert "code-intel setup" in results["jsx-oracle"].detail
+    assert "stack-intel setup" in results["jsx-oracle"].detail
     assert results["handler-locations"].status == "pass"
     assert verify.exit_code(results.values()) == 2
 

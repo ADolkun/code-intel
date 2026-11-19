@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from fixture_repo import hermetic_git
 
-from code_intel import repo_files
-from code_intel.repo_files import RepoFilesError, list_repo_files
+from stack_intel import repo_files
+from stack_intel.repo_files import RepoFilesError, list_repo_files
 
 
 @pytest.fixture(autouse=True)
