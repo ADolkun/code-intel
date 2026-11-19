@@ -441,13 +441,13 @@ def e2e_repo(root: Path) -> Path:
     return root
 
 
-def run_cli(repo: Path, env_extra: dict[str, str] | None = None) -> tuple[int, str, str]:
+def run_cli(repo: Path, env_extra: dict[str, str] | None = None, *args: str) -> tuple[int, str, str]:
     """The CLI as CI runs it: a fresh interpreter, no TypeScript unless ``env_extra`` provides it."""
     env = {k: v for k, v in os.environ.items() if k != ts_bridge.TS_DIR_ENV}
     env[ts_bridge.CACHE_ENV] = str(repo.parent / "no-cache")
     env.update(env_extra or {})
     proc = subprocess.run(
-        [sys.executable, "-c", "from stack_intel.cli import main; raise SystemExit(main())", "doc-check"],
+        [sys.executable, "-c", "from stack_intel.cli import main; raise SystemExit(main())", "doc-check", *args],
         cwd=repo,
         capture_output=True,
         text=True,
@@ -622,7 +622,7 @@ def test_docs_only_a_route_is_not_checked_and_says_why(tmp_path: Path) -> None:
     assert (code, out) == (0, "")
     assert "ⓘ 2 analysis limitation(s)" in err
     assert (
-        "[not_configured] .stack-intel/config.toml: no [backend] table in .stack-intel/config.toml: route references "
+        "[not_configured] .stack-intel/config.toml: no [backend] table: route references "
         "are not checked against backend routes" in err
     )
 
@@ -700,6 +700,31 @@ def test_end_to_end_a_docs_only_checkout_needs_no_toolchain(tmp_path: Path) -> N
     assert code == 1 and out.startswith("docs/guide.md:3: ")
 
 
+@pytest.mark.usefixtures("_hermetic_git")
+def test_end_to_end_the_verdict_does_not_depend_on_where_the_config_lives(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    config = (
+        DOCS_ONLY_CONFIG
+        + '\n[[docs.ignore]]\nfile = "docs/README.md"\nkind = "symbol"\ntext = "fetch_widget()"\n'
+        + 'reason = "A library function, not code of this repository."\n'
+    )
+    write(root / CONFIG_FILE, config)
+    write(root / "docs" / "README.md", "# Docs\n\nThe library offers `fetch_widget()`.\n")
+    git(root, "init", "-q")
+    git(root, "add", "-A")
+    outside = tmp_path / "elsewhere" / "config.toml"
+    write(outside, config)
+
+    def verdict(*args: str) -> tuple[int, object, object]:
+        code, out, _ = run_cli(root, None, "--json", *args)
+        body = json.loads(out)
+        return code, body["findings"], body["reference_counts"]
+
+    inside = verdict()
+    assert inside == (0, [], {"symbol": {"ignored": 1}})
+    assert verdict("--config", str(outside)) == inside
+
+
 def test_an_agents_only_json_report_says_the_docs_were_not_checked(tmp_path: Path) -> None:
     root = agent_repo(tmp_path / "repo")
     write(root / CONFIG_FILE, AGENTS_TABLE)
@@ -710,7 +735,7 @@ def test_an_agents_only_json_report_says_the_docs_were_not_checked(tmp_path: Pat
         (
             "not_configured",
             ".stack-intel/config.toml",
-            "no [docs] table in .stack-intel/config.toml: no docs were checked, only the agent files",
+            "no [docs] table: no docs were checked, only the agent files",
         )
     ]
 

@@ -136,7 +136,11 @@ class DocRefsConfig:
         )
 
     def is_config_file(self, rel: str) -> bool:
-        return rel == self.path
+        """The config in use, or the repository's default one when ``--config`` names another file.
+
+        Its ignore entries quote the very names they ignore, so scanning it as code would resolve them.
+        """
+        return rel in (self.path, CONFIG_REL)
 
     def ignore_line(self, index: int) -> int:
         """The config line of ``ignore[index]``, 1 when the file's text did not say."""

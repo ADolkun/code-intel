@@ -2293,7 +2293,7 @@ def test_symbol_resolve_both_searches_the_configured_side(
     assert s.fakes.symbol_calls[-1]["side"] == searched
     assert payload["complete"] is True and payload["diagnostics"] == []
     [note] = [lim for lim in payload["analysis_limitations"] if lim["kind"] == "not_configured"]
-    assert note["message"].startswith(f"no [{missing}] table in .stack-intel/config.toml: ")
+    assert note["message"].startswith(f"no [{missing}] table: ")
     text = mcp_server.symbol_resolve("X")
     assert "not_configured" in text and "frontend_unavailable" not in text
     assert _call_over_the_wire("symbol_resolve", {"name": "X"}).is_error is False
@@ -2321,7 +2321,7 @@ def test_doc_refs_without_a_frontend_indexes_no_frontend_definitions(
     assert payload["complete"] is True and payload["diagnostics"] == []
     notes = [lim["message"] for lim in payload["analysis_limitations"] if lim["kind"] == "not_configured"]
     assert notes == [
-        "no [frontend] table in .stack-intel/config.toml: frontend pages and TypeScript definitions are not "
+        "no [frontend] table: frontend pages and TypeScript definitions are not "
         "indexed; frontend names still resolve through tracked code"
     ]
     assert "typescript_decls" not in s.fakes.calls and s.rt.toolchain_state["probes"] == 0

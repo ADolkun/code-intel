@@ -82,7 +82,7 @@ def doc_check(report: Any, extra_findings: Iterable[Any] = (), *, config_path: s
             stage=doc_rules.STAGE,
             file=config_path,
             line=None,
-            message=f"no [docs] table in {config_path}: no docs were checked, only the agent files",
+            message="no [docs] table: no docs were checked, only the agent files",
         )
         return DocCheck(findings, 0, {}, 0, 0, True, [], problem_dicts([note]), docs_configured=False)
     diagnostics, limitations = _report_problems(report)
