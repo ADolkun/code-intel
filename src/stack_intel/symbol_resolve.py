@@ -703,7 +703,7 @@ def configured_side(config: Config, side: str) -> tuple[str, Problem | None]:
         stage=STAGE,
         file=config.display,
         line=None,
-        message=f"no [{missing[0]}] table in {config.display}: {what} definitions were not searched",
+        message=f"no [{missing[0]}] table: {what} definitions were not searched",
     )
     return searched, note
 

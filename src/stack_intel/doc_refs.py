@@ -557,7 +557,7 @@ class _Run:
                 stage=STAGE,
                 file=config.path,
                 line=None,
-                message=f"no [{side}] table in {config.path}: {what}",
+                message=f"no [{side}] table: {what}",
             )
             for side, what in notes
         ]

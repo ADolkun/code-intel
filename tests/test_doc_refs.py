@@ -2632,7 +2632,7 @@ def test_without_a_backend_only_a_page_match_resolves_a_route(tmp_path: Path) ->
     }
     assert ref_findings(report) == []
     assert not_configured_notes(report) == [
-        "no [backend] table in .stack-intel/config.toml: route references are not checked against backend "
+        "no [backend] table: route references are not checked against backend "
         "routes, and Python definitions are not indexed"
     ]
 
@@ -2651,7 +2651,7 @@ def test_without_a_frontend_a_bare_path_under_a_backend_root_can_be_missing(tmp_
         "/articles/7": "ok",
     }
     assert not_configured_notes(report) == [
-        "no [frontend] table in .stack-intel/config.toml: frontend pages and TypeScript definitions are not "
+        "no [frontend] table: frontend pages and TypeScript definitions are not "
         "indexed; frontend names still resolve through tracked code"
     ]
     assert "frontend_definitions_unavailable" not in {p.kind for p in report.limitations}

@@ -1957,7 +1957,7 @@ def test_symbol_search_covers_the_configured_side(
         assert notes == []
     else:
         [note] = notes
-        assert note.message.startswith(f"no [{missing}] table in .stack-intel/config.toml: ")
+        assert note.message.startswith(f"no [{missing}] table: ")
         assert result.complete is True and result.frontend_problem is None
 
 
@@ -1992,9 +1992,7 @@ def test_the_doc_report_says_which_side_it_did_not_index(
     rt = partial_runtime(tmp_path, config, fakes)
     found = rt.get_doc_report()
     notes = [p for p in found.report.limitations if p.kind == "not_configured"]
-    assert [note.message.split(":")[0] for note in notes] == [
-        f"no [{side}] table in .stack-intel/config.toml" for side in sides
-    ]
+    assert [note.message.split(":")[0] for note in notes] == [f"no [{side}] table" for side in sides]
     assert {note.file for note in notes} == {".stack-intel/config.toml"}
     assert "frontend_definitions_unavailable" not in {p.kind for p in found.report.limitations}
     assert found.frontend_problems == []
