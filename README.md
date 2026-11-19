@@ -32,6 +32,8 @@ Without Node or TypeScript:
 
 A helper that crashes while Node and TypeScript are present is reported the same way with `problem: "helper_failed"`, and `status` shows the toolchain as `helper_failed` until a run in the same mode succeeds. A crash in `facts` mode (JSX usage, frontend symbols, pages) and one in `routes` mode (route matching) are tracked apart.
 
+A config without `[frontend]` never needs Node or TypeScript: nothing probes or installs them, and `status` reports the toolchain as `not_configured`. Every tool that needs a table the config lacks answers with a [`not_configured`](#response-contract) error instead (see [Partial configs](#partial-configs)).
+
 ## Install and launch
 
 The package is `stack-intel` on PyPI. To try it, or to use it across repositories:
@@ -117,28 +119,28 @@ Every command takes `--repo-root PATH` (default: the git work tree containing th
 
 | Command | Does | Exit codes |
 | --- | --- | --- |
-| `config-check` | Validate the config file. Unknown keys, unknown client kinds and missing required keys are errors that name the key and the file. | 0 valid, 1 invalid |
+| `config-check` | Validate the config file and print `ok: <path>`, then `tables: <the configured tables>` (for example `tables: backend, docs`). Unknown keys, unknown client kinds and missing required keys are errors that name the key and the file, and so is a config that configures none of `[backend]`, `[frontend]`, `[docs]` and `[agents]`. | 0 valid, 1 invalid |
 | `mcp` | Serve the [tools](#tools) over stdio. | |
 | `setup` | Install the [TypeScript](#install-and-launch) the frontend analysis needs: an explicit prewarm, for CI. Other commands and the MCP server install it on first use. | 0, 1 failed |
-| `doc-check [--json]` | Check the [docs](#docs-check) and the agent instruction files against the code. | 0 no findings, 1 findings, 2 could not run or incomplete |
-| `verify [CHECK …]` | Check the analyzers against each other and against the source; see [Verification](#verification). Its `library-capture` check starts the app. | 0 passed, 1 a check failed, 2 a check could not run |
-| `summary` | Markdown counts and coverage of the analysis, one table per analyzer. | 0, 1 a section failed |
-| `runtime-check [--python PYTHON] [--set K=V …] [--env-file FILE]` | Compare the static route analysis with the running app. | 0, 1 unexplained difference, 2 could not run |
-| `capture [--check \| --if-stale] [--python PYTHON]` | Record what installed code contributes to the app (routers library factories build, library dependency trees) in `.stack-intel/library-capture.json`; `--check` compares without writing; `--if-stale` starts the app only when a static check finds the file stale; see [Library routers and dependencies](#library-routers-and-dependencies). Needs `[backend.capture]`; `--if-stale` without it prints a note and exits 0. | 0, 1 `--check` found a difference, 2 could not run or the environment differs from the lock |
-| `dump di [--json]` | Dependency-injection map: every route with its dependencies in FastAPI order. | 0, 1 could not run, 2 incomplete |
-| `dump routes [--json] [--unmatched]` | Backend routes matched with frontend calls. | 0, 1 could not run, 2 incomplete |
-| `dump jsx (COMPONENT \| --all) [--root DIR] [--include-tests] [--no-self-close] [--json]` | JSX usage of a component, or every element. | 0, 2 frontend unavailable |
-| `dump symbols (NAME \| --dump-ts \| --dump-py) [--side backend\|frontend\|both] [--kind KIND] [--file-hint TEXT] [--json]` | Where a symbol is defined, or every indexed declaration. | 0, 2 frontend unavailable |
+| `doc-check [--json]` | Check the [docs](#docs-check) and the agent instruction files against the code. Without `[docs]` it checks the agent files only. | 0 no findings, 1 findings, 2 could not run, incomplete, or nothing to check |
+| `verify [CHECK …]` | Check the analyzers against each other and against the source; see [Verification](#verification). Its `library-capture` check starts the app. A check whose tables the config lacks is skipped. | 0 passed, 1 a check failed, 2 a check could not run, or every check was skipped |
+| `summary` | Markdown counts and coverage of the analysis, one table per analyzer. A section whose tables the config lacks prints `Skipped`. | 0, 1 a section failed |
+| `runtime-check [--python PYTHON] [--set K=V …] [--env-file FILE]` | Compare the static route analysis with the running app. Needs `[backend]`. | 0, 1 unexplained difference, 2 could not run or no `[backend]` |
+| `capture [--check \| --if-stale] [--python PYTHON]` | Record what installed code contributes to the app (routers library factories build, library dependency trees) in `.stack-intel/library-capture.json`; `--check` compares without writing; `--if-stale` starts the app only when a static check finds the file stale; see [Library routers and dependencies](#library-routers-and-dependencies). Needs `[backend.capture]`; `--if-stale` without it (or without `[backend]`) prints a note and exits 0. | 0, 1 `--check` found a difference, 2 could not run, no `[backend]`, or the environment differs from the lock |
+| `dump di [--json]` | Dependency-injection map: every route with its dependencies in FastAPI order. Needs `[backend]`. | 0, 1 could not run or not configured, 2 incomplete |
+| `dump routes [--json] [--unmatched]` | Backend routes matched with frontend calls. Needs `[backend]` and `[frontend]`. | 0, 1 could not run or not configured, 2 incomplete |
+| `dump jsx (COMPONENT \| --all) [--root DIR] [--include-tests] [--no-self-close] [--json]` | JSX usage of a component, or every element. Needs `[frontend]`. | 0, 2 frontend unavailable or not configured |
+| `dump symbols (NAME \| --dump-ts \| --dump-py) [--side backend\|frontend\|both] [--kind KIND] [--file-hint TEXT] [--json]` | Where a symbol is defined, or every indexed declaration. `--side both` searches the side the config has. | 0, 2 frontend unavailable or not configured |
 
-The `dump` commands are for checking an analyzer by hand; their JSON is the same schema the tools return.
+The `dump` commands are for checking an analyzer by hand; their JSON is the same schema the tools return. A command that needs a table the config lacks prints the [`not_configured`](#response-contract) message (`dump di needs the [backend] table, and .stack-intel/config.toml has none. Fix: add [backend] with root, package and app.`) and exits with its "could not run" code.
 
-**Docs check.** `doc-check` needs only Python, git and the packaged Markdown parser. Standard output holds only the findings, one `path:line: message` line each, or with `--json` one JSON document (the [response contract](#response-contract) envelope with `findings`, `finding_count`, `doc_count` and `reference_counts`). Everything else goes to standard error: the `⚠ INCOMPLETE` banner with every diagnostic, the `ⓘ` limitations, and a one-line summary (`doc-check: N findings in D docs (R references, C checked)`, ending in `; INCOMPLETE` when the report is incomplete; R counts every reference the docs name, C the ones whose status decides the verdict). No GitHub workflow commands (`::error`) are printed, because messages quote doc text that a pull request controls.
+**Docs check.** `doc-check` needs only Python, git and the packaged Markdown parser. Standard output holds only the findings, one `path:line: message` line each, or with `--json` one JSON document (the [response contract](#response-contract) envelope with `findings`, `finding_count`, `doc_count` and `reference_counts`). Everything else goes to standard error: the `⚠ INCOMPLETE` banner with every diagnostic, the `ⓘ` limitations, and a one-line summary (`doc-check: N findings in D docs (R references, C checked)`, ending in `; INCOMPLETE` when the report is incomplete and in `; docs not configured` when the config has no `[docs]`; R counts every reference the docs name, C the ones whose status decides the verdict). No GitHub workflow commands (`::error`) are printed, because messages quote doc text that a pull request controls.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | No findings. Limitations (an uninitialized submodule, no Node or TypeScript, an unresolved include) are printed and do not count. |
+| 0 | No findings. Limitations (an uninitialized submodule, no Node or TypeScript, an unresolved include, a side the config does not configure) are printed and do not count. |
 | 1 | Findings. |
-| 2 | The check could not run (an interpreter older than the backend's, a git failure, an invalid config, an analyzer error, with the traceback for an internal error), or the report is incomplete (a doc or code file could not be read, decoded or parsed, or the app did not resolve), with or without findings, because an incomplete report can hide findings. A diagnostic of an untracked or ignored file does not count, because CI's checkout has no such file. |
+| 2 | The check could not run (an interpreter older than the backend's, a git failure, an invalid config, an analyzer error, with the traceback for an internal error), there is nothing to check (no `[docs]` and no agent files: `doc-check: .stack-intel/config.toml has no [docs] table and there are no agent files to check`), or the report is incomplete (a doc or code file could not be read, decoded or parsed, or the app did not resolve), with or without findings, because an incomplete report can hide findings. A diagnostic of an untracked or ignored file does not count, because CI's checkout has no such file. |
 
 What it checks and how to fix a finding: [Docs check](#docs-check).
 
@@ -153,6 +155,8 @@ echo '{"protocol": 1, "mode": "facts", "typescript_dir": "'"$TS_DIR"'",
 ## Configuration
 
 The analyzed repository carries `.stack-intel/config.toml`. Every path in it is relative to the repository root, uses forward slashes and has no `..`. Unknown keys, unknown `kind`s and missing required keys are errors that name the key and the file. The file is read again on every call and is part of every cache's fingerprint, so a config edit needs no restart.
+
+`[backend]`, `[frontend]`, `[docs]` and `[agents]` are each optional, but the config must have at least one of them (`[symbols]` alone does nothing): otherwise `config-check` fails with `the config configures nothing: add at least one of [backend], [frontend], [docs] or [agents]`. The full example:
 
 ```toml
 [backend]
@@ -222,7 +226,54 @@ skills_dir = ".claude/skills"
 instruction_map = { file = "AGENTS.md", heading = "Scoped instruction map" }
 ```
 
+### Partial configs
+
+A config may leave out `[backend]`, `[frontend]` or both. Each tool and command then answers exactly for the tables it has, and nothing that needs a missing table reports success: it answers [`not_configured`](#response-contract), is skipped, or carries a `not_configured` limitation.
+
+```toml
+# a backend-only API service
+[backend]
+root = "."
+package = "app"
+app = "app.main:app"
+
+[docs]
+scope = ["README.md", "docs/**/*.md"]
+```
+
+```toml
+# docs only
+[docs]
+scope = ["README.md", "docs/**/*.md"]
+```
+
+```toml
+# a frontend only
+[frontend]
+root = "web"
+tsconfig = "web/tsconfig.json"
+
+[docs]
+scope = ["docs/**/*.md"]
+```
+
+| Tool | No `[backend]` | No `[frontend]` | No `[docs]` |
+| --- | --- | --- | --- |
+| `di_deps`, `di_reverse` | `not_configured` (`["backend"]`) | answers | answers |
+| `route_match`, `route_unmatched` | `not_configured`, naming each missing side | same | answers |
+| `jsx_usage` | answers | `not_configured` (`["frontend"]`), even with an explicit `root` | answers |
+| `symbol_resolve` | `side="backend"`: `not_configured`; `side="both"`: frontend candidates only, with a `not_configured` limitation | `side="frontend"`: `not_configured`; `side="both"`: backend candidates only, with a `not_configured` limitation and no `frontend_unavailable` | answers |
+| `doc_refs` | answers; route mentions are `not_checked` unless a frontend page matches; a `route` query has `definitions: null` and says `Routes not analyzed: no [backend] table in <config>.`; a `not_configured` limitation | answers; no frontend pages or TypeScript definitions; a `not_configured` limitation | `not_configured` (`["docs"]`) |
+| `status` | answers: the analyzers that need the table are `not_configured` | answers; `toolchain.state` is `not_configured` and nothing is probed | answers |
+| `refresh` | drops the caches; nothing to rebuild, so `complete` is `null` | rebuilds DI only; the routes counts are `null` | answers |
+
+Neither side configured: `symbol_resolve` is `not_configured` with `["backend", "frontend"]`, and a `doc_refs` `symbol` query has `definitions: null` (`Symbol index not built: …`). A `not_configured` answer describes the config, not the machine: it never sets `complete: false` and is not worth retrying. Every tool checks its arguments first, then its tables, then the interpreter floor.
+
+Without `[backend]` the interpreter floor is the tool's own (Python 3.14): docs that name Python files still have their code words parsed, and a file needing a newer Python is a `parse_failed` diagnostic.
+
 ### `[backend]`
+
+Optional ([Partial configs](#partial-configs)); without it there is no DI, route matching, Python symbol index or runtime check.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
@@ -243,6 +294,8 @@ Optional. Its presence turns on the [library capture](#library-routers-and-depen
 | `env` | no | Environment variables the import sees besides `PATH`, `HOME`, `TMPDIR`, `LANG` and `LC_ALL`. Synthetic values only: the file is committed and shown in messages. |
 
 ### `[frontend]`
+
+Optional ([Partial configs](#partial-configs)); without it there is no route matching, JSX usage, TypeScript symbol index or frontend pages, and Node and TypeScript are never needed.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
@@ -481,16 +534,16 @@ Without the frontend toolchain no frontend definitions are indexed, so a `symbol
 
 ### `status`
 
-Reports the FastAPI version `backend.lock` locks and the include model it gives (`fastapi`: `fastapi_version`, `include_model`, `include_model_reason`, `source`, `summary`), `complete`, per-analyzer state (`not_run`, `complete`, `incomplete` or `failed`, with the failed step and error), cache freshness (`backend_model`, `di`, `routes`), the toolchain probe, the deduplicated diagnostics and limitations of the loaded analyses and, with `[backend.capture]`, the `library_capture` block (the file, its app and distributions, how many includes, routes and dependencies it holds and, once DI is built, how many were applied, and the stale findings; the status never builds anything or starts the app). A cache whose sources were modified within the last two seconds stays loaded but is not `fresh` until the window has passed (see [Freshness](#freshness-and-the-restart-rule)).
+Reports the FastAPI version `backend.lock` locks and the include model it gives (`fastapi`: `fastapi_version`, `include_model`, `include_model_reason`, `source`, `summary`), `complete`, per-analyzer state (`not_run`, `complete`, `incomplete` or `failed`, with the failed step and error, or `not_configured` when the config lacks a table the analyzer reads: `[backend]` for `di_map`, both sides for `route_map`), the configured tables (`config.tables`), cache freshness (`backend_model`, `di`, `routes`), the toolchain probe, the deduplicated diagnostics and limitations of the loaded analyses and, with `[backend.capture]`, the `library_capture` block (the file, its app and distributions, how many includes, routes and dependencies it holds and, once DI is built, how many were applied, and the stale findings; the status never builds anything or starts the app). A cache whose sources were modified within the last two seconds stays loaded but is not `fresh` until the window has passed (see [Freshness](#freshness-and-the-restart-rule)).
 
-The toolchain state is `ok`, `unavailable` (the probe found a problem) or `helper_failed` (the probe is fine, but the last TypeScript helper run in some mode crashed). `helper_failures` maps each helper mode whose last run crashed (`facts`, `routes`) to its problem; an entry clears when a run in that mode succeeds. The probe itself never runs the helper:
+`complete` counts only the configured analyzers, and is `null` when none is configured. The toolchain state is `ok`, `unavailable` (the probe found a problem), `helper_failed` (the probe is fine, but the last TypeScript helper run in some mode crashed) or `not_configured` (no `[frontend]`: nothing needs the toolchain, so it is never probed or installed). `helper_failures` maps each helper mode whose last run crashed (`facts`, `routes`) to its problem; an entry clears when a run in that mode succeeds. The probe itself never runs the helper:
 
 ```
 Frontend toolchain: node v26.13.0, typescript 7.1.0-beta (~/.cache/stack-intel/ts/<digest>/node_modules/typescript): ok
 Frontend toolchain: unavailable: …/node_modules/typescript/package.json not found. Fix: run "stack-intel setup" (or set STACK_INTEL_TYPESCRIPT_DIR to a typescript package directory). DI tools are unaffected; JSX usage, frontend symbols and route matching need it.
 ```
 
-`load_counts=true` runs DI and routes and adds `counts: {"di": {...}, "routes": {...}}`. Each analyzer runs on its own: one that fails leaves its counts `null` with the error under `counts_errors`, and routes counts are `null` with a `frontend_unavailable` error when the frontend could not be analyzed. On an old interpreter nothing runs: `counts` is `null` and `counts_error` names the refusal.
+`load_counts=true` runs DI and routes and adds `counts: {"di": {...}, "routes": {...}}`. Each analyzer runs on its own: one that fails leaves its counts `null` with the error under `counts_errors`, and routes counts are `null` with a `frontend_unavailable` error when the frontend could not be analyzed, or with the `not_configured` error body (text: `routes: not configured: …`) when the config lacks a table the analyzer reads. With no analyzer configured, `Complete` reads `n/a (no analyzer configured)`. On an old interpreter nothing runs: `counts` is `null` and `counts_error` names the refusal.
 
 ## Response contract
 
@@ -513,6 +566,7 @@ Rows use `file` and `line` (frontend rows add `def_line`); route matches nest `b
 | `runtime_incompatible` | `running`, `required` | backend analysis on an interpreter older than the backend's |
 | `analysis_failed` | `analyzer`, `step`, `missing` | an analyzer raised; the message names the step and the repository root |
 | `frontend_unavailable` | `missing`, `fix`, `problem` | the tool needs the frontend and it could not be analyzed; `problem` names the cause (below) |
+| `not_configured` | `tables`, `config`, `fix` | the tool needs config tables the config lacks: `tables` lists them in the order the tool names them (`["backend"]`, `["backend", "frontend"]`), `config` is the config file, `fix` says what to add. It describes the config, not the machine, so it is not worth retrying. Text: `di_deps needs the [backend] table, and .stack-intel/config.toml has none. Fix: add [backend] with root, package and app.` |
 | `internal_error` | `tool` | an unexpected exception in the tool itself; the message names the file, line and function that raised, and the server log has the traceback |
 
 `frontend_unavailable` `problem` codes: `node_not_found`, `node_failed`, `node_too_old`, `typescript_not_found`, `typescript_unreadable`, `typescript_unsupported` (TypeScript older than 7.1) and `toolchain_incomplete` (the probe returned no problem, yet node or TypeScript is missing) from the toolchain probe; `frontend_provisioning` when the MCP server is installing TypeScript in the background and the answer will be possible shortly; `frontend_not_found` when the checkout has no frontend root; and `helper_failed` when Node and TypeScript are present but the helper crashed (its message names the helper mode and the failed step; the fix is to [run the helper by hand](#commands)). `symbol_resolve` with `side="both"` keeps its backend candidates and carries the code in its diagnostic's `problem`.
@@ -573,6 +627,7 @@ Rows use `file` and `line` (frontend rows add `def_line`); route matches nest `b
 | `submodule_missing` | a git submodule is not checked out (`git submodule update --init --recursive`), so documentation links and paths into it get status `not_checked`; the docs check still passes |
 | `frontend_definitions_unavailable` | Node or TypeScript is unavailable, so the docs check indexes no frontend definitions: frontend symbols named in docs carry no definition location, but their existence still resolves through tracked code, so no status and no exit code changes |
 | `frontend_pages_unavailable` | the frontend pages could not be read (Node or TypeScript is unavailable), so a bare path that only a page could satisfy is `not_checked` |
+| `not_configured` | the config has no `[backend]` or no `[frontend]` table, so that side is not analyzed; `file` is the config file and the message names what the answer lacks (in `doc_refs` and `doc-check`: route references not checked against backend routes, or no frontend pages and TypeScript definitions; in `symbol_resolve` with `side="both"`: the side that was not searched). It never changes `complete` |
 | `frontend_provisioning` | the MCP server is installing TypeScript in the background (first use), so the frontend-derived parts of this answer are n/a; it is added to a reply whose `frontend_unavailable` diagnostic has `problem: "frontend_provisioning"`, and the next call after the install finishes answers in full |
 
 A test keeps these tables in sync with the registries in `problems.py`.
@@ -795,6 +850,8 @@ Two file-level findings complete the list: `orphaned doc` for a doc matching the
 
 **Pages.** Without Node or TypeScript, `react-router` pages are unavailable and a bare path that only a page could satisfy is `not_checked` (`frontend_pages_unavailable`); install the toolchain in the job (`stack-intel setup`) to check them.
 
+**Partial configs.** Without `[backend]` there are no backend routes to check a route against, and the docs probably name the API of a backend that lives elsewhere, so a `METHOD /path` mention, and a bare path that no frontend page satisfies, is `not_checked` (detail `no [backend] table`); a bare path a page satisfies is still `frontend`. Without `[frontend]` there are no pages, so a bare path under a backend route root that matches no route stays a `route not found` finding, as with `[frontend.pages] kind = "none"`. Python definitions come only from `backend.root` and TypeScript definitions only from `frontend.root`, and path roots only from the sides configured; names still resolve through the code words of every tracked code file. The report carries one `not_configured` limitation per missing side, when some doc in scope runs a check that side would feed (`routes` for `[backend]`; `routes` or `symbols` for `[frontend]`). Without `[docs]`, `doc-check` checks only the agent files and reports a `not_configured` limitation saying no docs were checked; with no agent files either it exits 2.
+
 **Library routes.** A route installed code adds is live once the [library capture](#library-routers-and-dependencies) has it, so a doc naming it resolves like any route, and a lookup of the route names the repository `include_router` that mounts it and where the library defines the handler. Without a capture entry it is missing from the analyzed list, so a doc naming it fails with `route not found`, with the limitation printed below. Giving every such doc an ignore entry is the intended fix, since treating the limitation as "not confirmed" would leave the route check unable to fail.
 
 **Ignore entries.** An ignore entry suppresses the failing references of one kind in one file whose text, as written, equals `text`, and needs a `reason`. A link's text is its target percent-decoded, and the entry may give it either way. An entry that suppresses nothing is itself a finding (`unused ignore entry`), so entries go away with the drift they covered. An entry for a reference that cannot be checked locally still counts as used.
@@ -853,7 +910,7 @@ When the interpreter is older than the backend's (`backend.python_version_file`)
 - `status` keeps working and names the interpreter; with `load_counts=true` it runs nothing and returns `counts: null` with `counts_error`;
 - `jsx_usage` and `symbol_resolve` with `side="frontend"` keep working.
 
-The tool itself requires Python 3.14, so this refusal applies when the backend's version file names a newer interpreter. `doc-check`, `verify`, `summary`, `runtime-check` and the `dump` commands refuse the same way.
+The tool itself requires Python 3.14, so this refusal applies when the backend's version file names a newer interpreter. `doc-check`, `verify`, `summary`, `runtime-check` and the `dump` commands refuse the same way. Without `[backend]` the floor is the tool's own 3.14, so nothing is refused; a tool that needs `[backend]` answers `not_configured` before the interpreter is considered.
 
 ## Performance
 
@@ -907,11 +964,11 @@ Runs sixteen checks, one line each (`PASS`, `FAIL`, `ERROR` for a check that cou
 | `docs-code-words` | The symbol check's two sources agree: a Python definition the index holds is also an identifier word of its file. |
 | `docs-lookups` | `doc_refs` finds a documented route, a documented symbol and a doc's inbound links the way the report holds them. |
 
-The two oracle checks compare only git-visible files. The `docs-*` checks are skipped when the config has no `[docs]` table and `library-capture` when it has no `[backend.capture]` table. Checks that need the frontend toolchain report `ERROR` with the `setup` fix when it is missing. Exit code: 0 when every check passed or was skipped, 1 when a check failed, 2 when a check could not run and none failed.
+The two oracle checks compare only git-visible files. A check whose config tables are missing is `SKIPPED` with the reason (`the config has no [backend] table`), never run against an empty side: `backend-content`, `handler-locations` and `python-index` need `[backend]`; `routes-content`, `di-matches-routes`, `call-sites` and `matched-backends-are-live` need `[backend]` and `[frontend]`; `library-capture` needs `[backend.capture]`; the two oracle checks need `[frontend]`; the `docs-*` checks need `[docs]`, and `docs-routes-are-live` and `docs-code-words` also `[backend]`, because they compare the report with the backend analysis. Checks that need the frontend toolchain report `ERROR` with the `setup` fix when it is missing. Exit code: 0 when every check passed or was skipped, 1 when a check failed, 2 when a check could not run and none failed, or when every selected check was skipped (`verify: no check applies to this config`).
 
 ### `summary`
 
-Prints one Markdown table per analyzer, for a job summary (`stack-intel summary >> "$GITHUB_STEP_SUMMARY"`): the app, FastAPI version and include model, routes, dependency targets, files scanned, diagnostics and limitations by kind and the cold analysis time; the route figures with their bounds and coverage; JSX elements and TypeScript declarations by kind; Python symbols by kind; and the docs (references, checked, findings). A section that crashes prints a `Failed` row naming the analyzer and the error instead of costing the other sections; one that cannot run prints `Unavailable` with the fix, and one that does not apply prints `Skipped`. The exit code is 1 only when a section failed.
+Prints one Markdown table per analyzer, for a job summary (`stack-intel summary >> "$GITHUB_STEP_SUMMARY"`): the app, FastAPI version and include model, routes, dependency targets, files scanned, diagnostics and limitations by kind and the cold analysis time; the route figures with their bounds and coverage; JSX elements and TypeScript declarations by kind; Python symbols by kind; and the docs (references, checked, findings). A section that crashes prints a `Failed` row naming the analyzer and the error instead of costing the other sections; one that cannot run prints `Unavailable` with the fix, and one that does not apply prints `Skipped`: its tables are missing (`Skipped | the config has no [backend] table`, checked first), or the interpreter is older than the backend's. The exit code is 1 only when a section failed.
 
 ### `runtime-check`
 

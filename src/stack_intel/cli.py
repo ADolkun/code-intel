@@ -123,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _config_check(context: Context) -> int:
     print(f"ok: {context.config.path}")
+    print(f"tables: {', '.join(context.config.tables)}")
     return 0
 
 

@@ -594,7 +594,7 @@ class FakeAnalyzers:
         self, repo_root: Path, config: Config, toolchain: Callable[[], Toolchain], clock: Callable[[], int]
     ) -> doc_rules.PageProvider:
         self._count("make_pages")
-        return self.page_provider or doc_rules.NoPages(config.frontend.pages.public_dir)
+        return self.page_provider or doc_rules.NoPages(config.require_frontend().pages.public_dir)
 
     def analyzers(self) -> analysis_runtime.Analyzers:
         return analysis_runtime.Analyzers(

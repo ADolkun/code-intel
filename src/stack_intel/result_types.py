@@ -54,6 +54,7 @@ ErrorCode = Literal[
     "runtime_incompatible",
     "analysis_failed",
     "frontend_unavailable",
+    "not_configured",
     "internal_error",
 ]
 
@@ -65,6 +66,7 @@ ERROR_FIELDS: dict[ErrorCode, tuple[str, ...]] = {
     "runtime_incompatible": ("running", "required"),
     "analysis_failed": ("analyzer", "step", "missing?"),
     "frontend_unavailable": ("missing", "fix", "problem"),
+    "not_configured": ("tables", "config", "fix"),
     "internal_error": ("tool",),
 }
 

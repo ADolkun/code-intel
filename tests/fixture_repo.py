@@ -151,3 +151,29 @@ def make_repo(root: Path, config: str = FULL_CONFIG) -> Path:
     write(root / "frontend" / "components" / "Page.tsx", "export const Page = () => <div/>;\n")
     write(root / "frontend" / "tsconfig.json", "{}\n")
     return root
+
+
+# Partial configs: each configures one side, or only the docs.
+BACKEND_ONLY_CONFIG = """\
+[backend]
+root = "backend"
+package = "service_backend"
+app = "service_backend.main:app"
+
+[docs]
+scope = ["docs/**/*.md"]
+"""
+
+FRONTEND_ONLY_CONFIG = """\
+[frontend]
+root = "frontend"
+tsconfig = "frontend/tsconfig.json"
+
+[docs]
+scope = ["docs/**/*.md"]
+"""
+
+DOCS_ONLY_CONFIG = """\
+[docs]
+scope = ["docs/**/*.md"]
+"""

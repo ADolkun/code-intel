@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
-from fixture_repo import MINIMAL_CONFIG, git_init
+from fixture_repo import BACKEND_ONLY_CONFIG, MINIMAL_CONFIG, git_init
 
 from stack_intel import code_paths, jsx_usage, ts_bridge, ts_facts
 from stack_intel.oracles import compare_facts
@@ -1302,3 +1302,15 @@ def test_generated_output_directly_under_frontend_is_skipped(typescript_toolchai
         },
     )
     assert [u.file for u in tree.find(".", "Widget")] == ["frontend/app/build/page.tsx"]
+
+
+def test_cli_without_a_frontend_table_says_so_and_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from stack_intel import cli
+
+    (tmp_path / ".stack-intel").mkdir()
+    (tmp_path / ".stack-intel" / "config.toml").write_text(BACKEND_ONLY_CONFIG, encoding="utf-8")
+    assert cli.main(["dump", "jsx", "Page", "--root", "backend", "--repo-root", str(tmp_path)]) == 2
+    assert capsys.readouterr().err == (
+        "stack-intel: dump jsx needs the [frontend] table, and .stack-intel/config.toml has none. "
+        "Fix: add [frontend] with root and tsconfig.\n"
+    )

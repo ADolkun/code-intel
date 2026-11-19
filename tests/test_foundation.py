@@ -301,6 +301,7 @@ EXPECTED_LIMITATIONS = {
     "frontend_definitions_unavailable",
     "frontend_pages_unavailable",
     "frontend_provisioning",
+    "not_configured",
 }
 EXPECTED_DIAGNOSTICS = {
     "read_failed",
@@ -601,7 +602,9 @@ def test_error_fields_cover_every_error_code() -> None:
         "analysis_failed",
         "frontend_unavailable",
         "internal_error",
+        "not_configured",
     }
+    assert result_types.ERROR_FIELDS["not_configured"] == ("tables", "config", "fix")
 
 
 # ── toolchain_pins ───────────────────────────────────────────────────────

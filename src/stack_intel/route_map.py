@@ -29,7 +29,7 @@ from stack_intel import provision, queries, route_matching, ts_bridge
 from stack_intel.backend_model import BackendModel, LiveRoute
 from stack_intel.cli import Context
 from stack_intel.code_paths import TS_SUFFIXES, SourceFile, is_test_path, iter_source_files, rel_posix
-from stack_intel.config import BackendConfig, Config, FrontendConfig
+from stack_intel.config import BackendConfig, Config, FrontendConfig, NotConfigured
 from stack_intel.problems import (
     Problem,
     diagnostic,
@@ -484,10 +484,11 @@ def compute_routes(
     The helper is a separate node process, so the scan overlaps the backend
     build instead of adding to it.
     """
+    backend, frontend = config.require_backend(), config.require_frontend()
     toolchain = toolchain or provision.find_toolchain(repo_root)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        scan_future = pool.submit(scan_frontend, repo_root, config.frontend, toolchain)
-        model = (model_builder or build_backend_model)(repo_root, config.backend)
+        scan_future = pool.submit(scan_frontend, repo_root, frontend, toolchain)
+        model = (model_builder or build_backend_model)(repo_root, backend)
         scan = scan_future.result()
     return build_routes(model, scan)
 
@@ -551,7 +552,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace, context: Context) -> int:
-    repo_root, backend = context.repo_root, context.config.backend
+    repo_root, config = context.repo_root, context.config
+    try:
+        config.require("backend", "frontend")
+        backend = config.require_backend()
+    except NotConfigured as exc:
+        print(f"stack-intel: {exc.describe('dump routes')}", file=sys.stderr)
+        return 1
     if (refusal := runtime_refusal(repo_root, backend.python_version_file)) is not None:
         print(refusal, file=sys.stderr)
         return 1
