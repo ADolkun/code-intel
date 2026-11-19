@@ -20,7 +20,7 @@ from fixture_repo import hermetic_git
 
 from stack_intel import code_paths, doc_presenters, doc_queries, doc_refs
 from stack_intel.code_paths import FileStamp
-from stack_intel.config import CONFIG_REL, ConfigError, load_config, parse_config
+from stack_intel.config import CONFIG_REL, NotConfigured, load_config, parse_config
 from stack_intel.doc_refs import DocIndex, Reference
 from stack_intel.doc_report import symbol_rows
 from stack_intel.doc_rules import (
@@ -1542,9 +1542,9 @@ def test_path_roots_leave_out_the_repository_root(layout: str, roots: list[tuple
 
 def test_the_docs_table_is_required() -> None:
     config = parse_config(LAYOUT, CONFIG_REL, FAKE_ROOT / CONFIG_REL)
-    with pytest.raises(ConfigError) as caught:
+    with pytest.raises(NotConfigured) as caught:
         DocRefsConfig.from_config(config, FAKE_ROOT)
-    assert str(caught.value) == f"{CONFIG_REL}: missing required table [docs]"
+    assert (caught.value.tables, str(caught.value)) == (("docs",), f"{CONFIG_REL} has no [docs] table")
 
 
 def test_the_config_file_is_named_relative_to_the_repository(tmp_path: Path) -> None:
@@ -2053,3 +2053,96 @@ def test_symbol_rows_accept_index_pairs() -> None:
         ("A", "backend/a.py", 3, "python"),
         ("b", "frontend/b.ts", 1, "typescript"),
     ]
+
+
+# ── Partial configs ──────────────────────────────────────────────────────
+
+FRONTEND_LAYOUT = '[frontend]\nroot = "frontend"\ntsconfig = "frontend/tsconfig.json"\n\n'
+BACKEND_LAYOUT = '[backend]\nroot = "backend"\npackage = "service_backend"\napp = "service_backend.main:app"\n\n'
+
+NO_BACKEND_DOC = """\
+# A
+
+`GET /appointments/{appointment_id}` and `POST /api/x` name a backend elsewhere.
+
+Open `/articles/7` in the app, then `/appointments/7/nope`.
+"""
+
+
+def not_configured_notes(report: doc_refs.DocReport) -> list[str]:
+    return [p.message for p in report.limitations if p.kind == "not_configured"]
+
+
+def test_without_a_backend_only_a_page_match_resolves_a_route(tmp_path: Path) -> None:
+    report = build(tmp_path, {"docs/a.md": NO_BACKEND_DOC}, routes=[], cfg=doc_config(layout=FRONTEND_LAYOUT))
+    by_text = {r.text: (r.status, r.detail, r.checked) for r in refs(report, kind="route")}
+    assert by_text == {
+        "GET /appointments/{appointment_id}": ("not_checked", "no [backend] table", False),
+        "POST /api/x": ("not_checked", "no [backend] table", False),
+        "/articles/7": ("frontend", "a frontend page, route handler or public file", True),
+        # Under a root the docs declare with a method: a finding with a backend, a guess without one.
+        "/appointments/7/nope": ("not_checked", "no [backend] table", False),
+    }
+    assert ref_findings(report) == []
+    assert not_configured_notes(report) == [
+        "no [backend] table in .stack-intel/config.toml: route references are not checked against backend "
+        "routes, and Python definitions are not indexed"
+    ]
+
+
+def test_the_same_doc_with_a_backend_fails_on_the_missing_route(tmp_path: Path) -> None:
+    report = build(tmp_path, {"docs/a.md": NO_BACKEND_DOC})
+    assert {r.text: r.status for r in refs(report, kind="route")}["/appointments/7/nope"] == "missing"
+    assert not_configured_notes(report) == []
+
+
+def test_without_a_frontend_a_bare_path_under_a_backend_root_can_be_missing(tmp_path: Path) -> None:
+    docs = {"docs/a.md": "# A\n\nOpen `/appointments/7/nope` and `/articles/7`.\n"}
+    report = build(tmp_path, docs, pages=NoPages(), cfg=doc_config(layout=BACKEND_LAYOUT))
+    assert {r.text: r.status for r in refs(report, kind="route")} == {
+        "/appointments/7/nope": "missing",
+        "/articles/7": "ok",
+    }
+    assert not_configured_notes(report) == [
+        "no [frontend] table in .stack-intel/config.toml: frontend pages and TypeScript definitions are not "
+        "indexed; frontend names still resolve through tracked code"
+    ]
+    assert "frontend_definitions_unavailable" not in {p.kind for p in report.limitations}
+
+
+@pytest.mark.parametrize(
+    ("layout", "checks", "sides"),
+    [
+        (FRONTEND_LAYOUT, ["links", "paths", "symbols"], []),
+        (FRONTEND_LAYOUT, ["routes"], ["backend"]),
+        (BACKEND_LAYOUT, ["links", "paths"], []),
+        (BACKEND_LAYOUT, ["symbols"], ["frontend"]),
+        ("", ["routes"], ["backend", "frontend"]),
+        ("", ["symbols"], ["frontend"]),
+    ],
+    ids=["no-backend-no-routes", "no-backend", "no-frontend-no-symbols", "no-frontend", "docs-only", "docs-symbols"],
+)
+def test_a_side_is_named_only_when_a_check_it_feeds_runs(
+    tmp_path: Path, layout: str, checks: list[str], sides: list[str]
+) -> None:
+    rules = [{"paths": ["docs/**"], "checks": checks, "reason": "test"}]
+    cfg = doc_config(layout=layout, rules=rules)
+    report = build(tmp_path, {"docs/a.md": "# A\n"}, routes=[], pages=NoPages(), cfg=cfg)
+    assert [note.split(" table")[0] for note in not_configured_notes(report)] == [f"no [{side}]" for side in sides]
+
+
+def test_path_roots_come_only_from_configured_sides() -> None:
+    assert [r.prefix for r in doc_config(layout=FRONTEND_LAYOUT).path_roots] == ["frontend/"]
+    assert [r.prefix for r in doc_config(layout=BACKEND_LAYOUT).path_roots] == ["backend/", "backend/service_backend/"]
+    docs_only = doc_config(layout="")
+    assert (docs_only.path_roots, docs_only.frontend_root, docs_only.backend_configured) == ((), None, False)
+
+
+def test_without_a_frontend_a_script_may_be_in_any_package_json(tmp_path: Path) -> None:
+    docs = {
+        "docs/a.md": "# A\n\nRun `npm run build` and `npm run nope`.\n",
+        "package.json": '{"scripts": {}}\n',
+        "web/package.json": '{"scripts": {"build": "tsc"}}\n',
+    }
+    report = build(tmp_path, docs, cfg=doc_config(layout=BACKEND_LAYOUT))
+    assert {r.text: r.status for r in refs(report, kind="script")} == {"npm run build": "ok", "npm run nope": "missing"}

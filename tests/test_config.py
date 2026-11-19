@@ -10,7 +10,15 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from fixture_repo import FULL_CONFIG, MINIMAL_CONFIG, hermetic_git, make_repo
+from fixture_repo import (
+    BACKEND_ONLY_CONFIG,
+    DOCS_ONLY_CONFIG,
+    FRONTEND_ONLY_CONFIG,
+    FULL_CONFIG,
+    MINIMAL_CONFIG,
+    hermetic_git,
+    make_repo,
+)
 
 from stack_intel import cli, config
 from stack_intel.result_types import ClientSpec
@@ -40,9 +48,9 @@ def test_full_config_is_read() -> None:
         lock="backend/uv.lock",
         python_version_file="backend/.python-version",
     )
-    assert cfg.frontend.root == "frontend"
-    assert cfg.frontend.lockfile == "frontend/package-lock.json"
-    assert cfg.frontend.clients == (
+    assert cfg.require_frontend().root == "frontend"
+    assert cfg.require_frontend().lockfile == "frontend/package-lock.json"
+    assert cfg.require_frontend().clients == (
         ClientSpec(kind="instance", module="frontend/lib/api.ts", export="api", base_path="/api"),
         ClientSpec(kind="global", name="fetch", url_arg=0, init_arg=1, same_origin_only=True),
         ClientSpec(kind="call", module="frontend/lib/http.ts", export="request", url_arg=0, init_arg=1),
@@ -50,7 +58,9 @@ def test_full_config_is_read() -> None:
             kind="options", module="frontend/lib/download.ts", export="download", options_arg=0, url_property="url"
         ),
     )
-    assert cfg.frontend.pages == config.PagesConfig("react-router", ("frontend/src/App.tsx",), "frontend/public")
+    assert cfg.require_frontend().pages == config.PagesConfig(
+        "react-router", ("frontend/src/App.tsx",), "frontend/public"
+    )
     assert cfg.symbols.primary_prefixes == ("frontend/components/", "backend/service_backend/")
     assert cfg.docs is not None
     assert cfg.docs.route_prefixes == ("/api",)
@@ -68,9 +78,9 @@ def test_full_config_is_read() -> None:
 
 def test_a_minimal_config_takes_the_defaults() -> None:
     cfg = parse(MINIMAL_CONFIG)
-    assert cfg.backend.lock is None and cfg.backend.python_version_file is None
-    assert cfg.frontend.clients == ()
-    assert cfg.frontend.pages == config.PagesConfig("none", (), None)
+    assert cfg.require_backend().lock is None and cfg.require_backend().python_version_file is None
+    assert cfg.require_frontend().clients == ()
+    assert cfg.require_frontend().pages == config.PagesConfig("none", (), None)
     assert cfg.symbols == config.SymbolsConfig(())
     assert cfg.docs is None and cfg.agents is None
 
@@ -86,7 +96,7 @@ def test_client_defaults_by_kind() -> None:
         '\n[[frontend.clients]]\nkind = "global"\nname = "fetch"\n'
         '\n[[frontend.clients]]\nkind = "instance"\nmodule = "frontend/api.ts"\nexport = "api"\n'
     )
-    fetch, instance = parse(text).frontend.clients
+    fetch, instance = parse(text).require_frontend().clients
     assert (fetch.url_arg, fetch.init_arg, fetch.same_origin_only, fetch.default_method) == (0, 1, False, "GET")
     assert instance.base_path == "" and instance.default_method == "GET"
 
@@ -126,7 +136,7 @@ def test_an_instance_client_can_be_an_npm_package_export() -> None:
         + '\n[[frontend.clients]]\nkind = "instance"\npackage = "axios"\n'
         + '\n[[frontend.clients]]\nkind = "instance"\npackage = "ky"\nexport = "ky"\nbase_path = "/api"\n'
     )
-    default, named = parse(text).frontend.clients
+    default, named = parse(text).require_frontend().clients
     assert (default.package, default.module, default.export, default.base_path) == ("axios", None, "default", "")
     assert (named.package, named.module, named.export, named.base_path) == ("ky", None, "ky", "/api")
     assert default.as_request() == {
@@ -151,9 +161,9 @@ def test_an_instance_client_names_a_module_or_a_package_not_both() -> None:
 
 
 def test_the_capture_table_is_optional_and_takes_its_defaults() -> None:
-    assert parse(MINIMAL_CONFIG).backend.capture is None
+    assert parse(MINIMAL_CONFIG).require_backend().capture is None
     cfg = parse(MINIMAL_CONFIG + '\n[backend.capture]\npython = "backend/.venv/bin/python"\n')
-    assert cfg.backend.capture == config.CaptureConfig(
+    assert cfg.require_backend().capture == config.CaptureConfig(
         "backend/.venv/bin/python", ".stack-intel/library-capture.json", ()
     )
 
@@ -162,7 +172,7 @@ def test_the_capture_table_reads_its_file_and_a_sorted_environment() -> None:
     cfg = parse(
         MINIMAL_CONFIG + '\n[backend.capture]\npython = "py"\nfile = "x/cap.json"\nenv = { B_KEY = "2", A_KEY = "" }\n'
     )
-    assert cfg.backend.capture == config.CaptureConfig("py", "x/cap.json", (("A_KEY", ""), ("B_KEY", "2")))
+    assert cfg.require_backend().capture == config.CaptureConfig("py", "x/cap.json", (("A_KEY", ""), ("B_KEY", "2")))
 
 
 @pytest.mark.parametrize(
@@ -188,9 +198,6 @@ def test_a_bad_capture_table_is_named(table: str, expected: str) -> None:
 def test_missing_required_keys_are_named() -> None:
     assert error_of(MINIMAL_CONFIG.replace('package = "service_backend"\n', "")) == (
         "cfg.toml: missing required key 'package' in [backend]"
-    )
-    assert error_of('[backend]\nroot = "b"\npackage = "p"\napp = "p.m:a"\n') == (
-        "cfg.toml: missing required key 'frontend' in the config"
     )
     assert error_of(MINIMAL_CONFIG + "\n[[frontend.clients]]\nname = 'fetch'\n") == (
         "cfg.toml: missing required key 'kind' in [[frontend.clients]] #1"
@@ -325,7 +332,9 @@ def test_load_config_error_names_the_file_as_given(tmp_path: Path) -> None:
 def test_config_check_accepts_a_valid_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     repo = make_repo(tmp_path / "repo")
     assert cli.main(["config-check", "--repo-root", str(repo)]) == 0
-    assert capsys.readouterr().out == f"ok: {(repo / '.stack-intel' / 'config.toml').resolve()}\n"
+    assert capsys.readouterr().out == (
+        f"ok: {(repo / '.stack-intel' / 'config.toml').resolve()}\ntables: backend, frontend, docs, agents\n"
+    )
 
 
 def test_config_check_takes_an_explicit_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -334,7 +343,7 @@ def test_config_check_takes_an_explicit_config(tmp_path: Path, capsys: pytest.Ca
     explicit = tmp_path / "explicit.toml"
     explicit.write_text(MINIMAL_CONFIG, encoding="utf-8")
     assert cli.main(["config-check", "--repo-root", str(repo), "--config", str(explicit)]) == 0
-    assert capsys.readouterr().out == f"ok: {explicit.resolve()}\n"
+    assert capsys.readouterr().out == f"ok: {explicit.resolve()}\ntables: backend, frontend\n"
 
 
 def test_config_check_rejects_a_bad_config_naming_key_and_file(
@@ -358,7 +367,7 @@ def test_config_check_finds_the_repo_root_from_git(
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     monkeypatch.chdir(repo / "frontend" / "components")
     assert cli.main(["config-check"]) == 0
-    assert capsys.readouterr().out == f"ok: {(repo / '.stack-intel' / 'config.toml').resolve()}\n"
+    assert capsys.readouterr().out.splitlines()[0] == f"ok: {(repo / '.stack-intel' / 'config.toml').resolve()}"
 
 
 def test_outside_a_git_work_tree_needs_a_repo_root(
@@ -428,3 +437,99 @@ def test_a_command_with_a_bad_config_exits_2(
     assert cli.main(["fake", "--repo-root", str(tmp_path)]) == 2
     assert calls == []
     assert "cannot read the config" in capsys.readouterr().err
+
+
+# ── Partial configs ──────────────────────────────────────────────────────
+
+NOTHING = "cfg.toml: the config configures nothing: add at least one of [backend], [frontend], [docs] or [agents]"
+
+
+@pytest.mark.parametrize(
+    ("text", "tables"),
+    [
+        (BACKEND_ONLY_CONFIG, ("backend", "docs")),
+        (FRONTEND_ONLY_CONFIG, ("frontend", "docs")),
+        (DOCS_ONLY_CONFIG, ("docs",)),
+        ('[agents]\nrules_dir = ".claude/rules"\nskills_dir = ".claude/skills"\n', ("agents",)),
+    ],
+    ids=["backend-only", "frontend-only", "docs-only", "agents-only"],
+)
+def test_a_partial_config_parses(text: str, tables: tuple[str, ...]) -> None:
+    cfg = parse(text)
+    assert cfg.tables == tables
+    assert cfg.display == "cfg.toml"
+
+
+@pytest.mark.parametrize("text", ["", '[symbols]\nprimary_prefixes = ["src/"]\n'], ids=["empty", "symbols-only"])
+def test_a_config_must_configure_something(text: str) -> None:
+    assert error_of(text) == NOTHING
+
+
+def test_an_unknown_key_is_named_before_an_empty_config() -> None:
+    assert error_of("colour = 1\n") == "cfg.toml: unknown key 'colour' in the config"
+
+
+def test_each_accessor_names_the_table_it_lacks() -> None:
+    cfg = parse(DOCS_ONLY_CONFIG)
+    for accessor, tables in (
+        (cfg.require_backend, ("backend",)),
+        (cfg.require_frontend, ("frontend",)),
+        (cfg.require_capture, ("backend",)),
+    ):
+        with pytest.raises(config.NotConfigured) as caught:
+            accessor()
+        assert (caught.value.tables, caught.value.config) == (tables, "cfg.toml")
+    assert cfg.require_docs() is cfg.docs
+    with pytest.raises(config.NotConfigured) as caught:
+        parse(BACKEND_ONLY_CONFIG).require_capture()
+    assert caught.value.tables == ("backend.capture",)
+    with pytest.raises(config.NotConfigured) as caught:
+        parse(FRONTEND_ONLY_CONFIG.split("[docs]")[0]).require_docs()
+    assert caught.value.tables == ("docs",)
+
+
+def test_require_names_every_missing_table_in_order() -> None:
+    cfg = parse(DOCS_ONLY_CONFIG)
+    assert cfg.missing("backend", "docs", "frontend", "backend.capture") == ("backend", "frontend", "backend.capture")
+    with pytest.raises(config.NotConfigured) as caught:
+        cfg.require("backend", "frontend")
+    exc = caught.value
+    assert str(exc) == "cfg.toml has no [backend] or [frontend] table"
+    assert exc.describe("route_match") == (
+        "route_match needs the [backend] and [frontend] tables, and cfg.toml has neither. "
+        "Fix: add [backend] with root, package and app; add [frontend] with root and tsconfig."
+    )
+    assert exc.fields() == {
+        "tables": ["backend", "frontend"],
+        "config": "cfg.toml",
+        "fix": "add [backend] with root, package and app; add [frontend] with root and tsconfig",
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "tables"),
+    [
+        (DOCS_ONLY_CONFIG, "docs"),
+        (BACKEND_ONLY_CONFIG, "backend, docs"),
+        (FULL_CONFIG, "backend, frontend, docs, agents"),
+    ],
+)
+def test_config_check_lists_the_configured_tables(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], text: str, tables: str
+) -> None:
+    explicit = tmp_path / "explicit.toml"
+    explicit.write_text(text, encoding="utf-8")
+    assert cli.main(["config-check", "--repo-root", str(tmp_path), "--config", str(explicit)]) == 0
+    assert capsys.readouterr().out == f"ok: {explicit.resolve()}\ntables: {tables}\n"
+
+
+def test_config_check_refuses_a_config_that_configures_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    empty = tmp_path / "empty.toml"
+    empty.write_text("[symbols]\n", encoding="utf-8")
+    assert cli.main(["config-check", "--repo-root", str(tmp_path), "--config", str(empty)]) == 1
+    assert capsys.readouterr().err == (
+        f"stack-intel: {empty}: the config configures nothing: add at least one of [backend], [frontend], "
+        "[docs] or [agents]\n"
+    )

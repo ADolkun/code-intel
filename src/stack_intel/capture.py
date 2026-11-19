@@ -397,6 +397,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace, context: Context) -> int:
     repo_root, backend = context.repo_root, context.config.backend
+    if backend is None:
+        reason = "nothing to refresh" if args.if_stale else "there is no app to capture"
+        print(f"capture: {context.config.display} has no [backend] table; {reason}", file=sys.stderr)
+        return 0 if args.if_stale else 2
     if args.if_stale and backend.capture is None:
         print(f"capture: {context.config.path} has no [backend.capture] table; nothing to refresh", file=sys.stderr)
         return 0

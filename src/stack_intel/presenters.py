@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from stack_intel import problems, queries, ts_bridge
+from stack_intel.config import NotConfigured, table_names
 from stack_intel.result_types import ERROR_FIELDS, SCHEMA_VERSION, ErrorCode, library_text, route_where
 
 STALE_CODE_WARNING = (
@@ -107,6 +108,11 @@ def frontend_unavailable(message: str, missing: str | None, fix: str, problem: s
     ``frontend_not_found``. A message that already ends in the fix is not given it twice."""
     text = f"Frontend analysis unavailable: {problems.strip_fix(message, fix)}. Fix: {fix}."
     return error_body("frontend_unavailable", text, missing=missing, fix=fix, problem=problem)
+
+
+def not_configured(tool: str, exc: NotConfigured) -> Body:
+    """The tool needs tables the config lacks: a fact about the config, never retried."""
+    return error_body("not_configured", exc.describe(tool), **exc.fields())
 
 
 # ── Envelope ─────────────────────────────────────────────────────────────
@@ -932,6 +938,8 @@ def _problem_detail(problem: Mapping[str, Any]) -> str:
 
 
 def _toolchain_text(t: Mapping[str, Any]) -> str:
+    if t["state"] == "not_configured":
+        return "Frontend toolchain: not needed (no [frontend] table), so it is not probed"
     ts = t["typescript"]
     found = f"node {t['node']['version']}, typescript {ts['version']} ({ts['dir']})"
     if t["state"] == "ok":
@@ -1084,7 +1092,11 @@ def _status_incomplete_banner(s: Any) -> str:
 def refresh(result: Any) -> Body:
     """``result`` is an `analysis_runtime.RefreshResult`. Without an analyzed
     frontend the matched counts would read as "nothing matched", so they are
-    null and the text names the problem instead."""
+    null and the text names the problem instead. An analyzer the config does
+    not configure was not rebuilt: its counts are null and the text says which
+    table it lacks."""
+    if result.not_configured is not None:
+        return _refresh_not_configured(result)
     routes = dict(result.routes_summary)
     frontend_problem = result.frontend_problem
     if frontend_problem is None:
@@ -1108,5 +1120,28 @@ def refresh(result: Any) -> Body:
         "di_route_count": result.di_route_count,
         "routes_summary": routes,
         "frontend_problem": problem_text,
+    }
+    return Body(text, payload)
+
+
+def _refresh_not_configured(result: Any) -> Body:
+    """A refresh that rebuilt DI only (no ``[frontend]``) or nothing (no ``[backend]``)."""
+    exc = result.not_configured
+    missing = f"no {table_names(exc.tables, 'or')} table in {exc.config}"
+    if result.dependency_function_count is None:
+        text = f"Caches dropped; nothing to rebuild: {missing}."
+    else:
+        text = (
+            f"Caches dropped and rebuilt.\n"
+            f"  DI: {result.dependency_function_count} dependency targets, {result.di_route_count} routes\n"
+            f"  Routes: not rebuilt: {missing}"
+        )
+    payload = {
+        "status": "refreshed",
+        "dependency_function_count": result.dependency_function_count,
+        "di_route_count": result.di_route_count,
+        "routes_summary": None,
+        "frontend_problem": None,
+        "not_configured": exc.fields(),
     }
     return Body(text, payload)

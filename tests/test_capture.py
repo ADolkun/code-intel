@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 import test_verify
-from fixture_repo import hermetic_git
+from fixture_repo import FRONTEND_ONLY_CONFIG, hermetic_git
 from library_fixture import checkout, lock_text
 from mcp_fixtures import write
 
@@ -773,3 +773,22 @@ def test_no_mcp_tool_starts_the_interpreter(marker_repo: Path, monkeypatch: pyte
     assert mcp_server.di_deps(path="/api/items")
     assert mcp_server.status(load_counts=True)
     assert not started(marker_repo)
+
+
+@pytest.mark.parametrize(
+    ("args", "code", "reason"),
+    [
+        ((), 2, "there is no app to capture"),
+        (("--check",), 2, "there is no app to capture"),
+        (("--if-stale",), 0, "nothing to refresh"),
+    ],
+)
+def test_without_a_backend_table_only_the_refresh_hook_passes(
+    tmp_path: Path, args: tuple[str, ...], code: int, reason: str
+) -> None:
+    write(tmp_path / ".stack-intel" / "config.toml", FRONTEND_ONLY_CONFIG)
+    assert run_capture(tmp_path, *args) == (
+        code,
+        "",
+        f"capture: .stack-intel/config.toml has no [backend] table; {reason}\n",
+    )

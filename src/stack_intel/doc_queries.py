@@ -36,7 +36,8 @@ class DocCheck:
     (skipped, not-checked and Tier B references are not). ``limitations``
     are the report's own plus the DI route gaps the runtime passed in
     (`queries.BACKEND_ROUTE_GAP_KINDS`): a "route not found" finding may be a
-    route the analysis cannot see."""
+    route the analysis cannot see. ``docs_configured`` is False when the
+    config has no ``[docs]`` table: only the agent files were checked."""
 
     findings: list[Any]
     doc_count: int
@@ -46,6 +47,7 @@ class DocCheck:
     complete: bool
     diagnostics: list[dict]
     limitations: list[dict]
+    docs_configured: bool = True
 
     @property
     def analysis(self) -> dict[str, Any]:
@@ -68,8 +70,12 @@ def _report_problems(report: Any, extra: Iterable[Any] = ()) -> tuple[list[dict]
 
 
 def doc_check(report: Any, extra_findings: Iterable[Any] = ()) -> DocCheck:
-    """``report`` is a `doc_refs.DocReport`; ``extra_findings`` (the agent
-    files') are merged into its findings in the same order."""
+    """``report`` is a `doc_refs.DocReport`, or None without ``[docs]``;
+    ``extra_findings`` (the agent files') are merged into its findings in the
+    same order."""
+    if report is None:
+        findings = sorted(extra_findings, key=lambda f: (f.file, f.line, f.kind, f.text))
+        return DocCheck(findings, 0, {}, 0, 0, True, [], [], docs_configured=False)
     diagnostics, limitations = _report_problems(report)
     references = list(report.references())
     findings = sorted([*report.findings(), *extra_findings], key=lambda f: (f.file, f.line, f.kind, f.text))

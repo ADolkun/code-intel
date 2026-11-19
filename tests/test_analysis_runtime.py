@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fixture_repo import git_init
+from fixture_repo import BACKEND_ONLY_CONFIG, DOCS_ONLY_CONFIG, FRONTEND_ONLY_CONFIG, git_init
 from mcp_fixtures import (
     E2E_LAYOUT,
     LATE_NS,
@@ -45,7 +45,7 @@ from mcp_fixtures import (
 
 from stack_intel import analysis_runtime, problems, ts_bridge
 from stack_intel.analysis_runtime import AnalysisFailed, InvalidRoot
-from stack_intel.config import BackendConfig, ConfigFile, load_config
+from stack_intel.config import BackendConfig, ConfigFile, NotConfigured, load_config
 from stack_intel.result_types import LimitationDict
 
 # The runtime's timeline is fixture mtimes and an injected Clock; the kernel's
@@ -1161,7 +1161,7 @@ def test_backend_rebuilds_reanalyze_only_changed_modules(tmp_path: Path, monkeyp
     real = router_bases.analyze
     monkeypatch.setattr(router_bases, "analyze", lambda mod: analyzed.append(mod.name) or real(mod))
     real_build = analysis_runtime.Analyzers.real().build_backend_model
-    backend = load_config(repo).backend
+    backend = load_config(repo).require_backend()
     visible = frozenset(path.relative_to(repo).as_posix() for path in repo.rglob("*.py"))
 
     def build(sources: Any, config: BackendConfig = backend) -> Any:
@@ -1572,16 +1572,16 @@ def test_a_missing_config_names_the_missing_file(docs: Path) -> None:
     assert (caught.value.step, caught.value.missing) == ("read config", ".stack-intel/config.toml")
 
 
-def test_a_config_without_docs_is_an_analysis_failure_of_the_docs_only(docs: Path) -> None:
+def test_a_config_without_docs_is_not_configured_for_the_docs_only(docs: Path) -> None:
     from mcp_fixtures import LAYOUT
 
     write_config(docs, LAYOUT, 2000)
     fakes = doc_fakes()
     rt = make_runtime(docs, fakes)
-    with pytest.raises(AnalysisFailed) as caught:
+    with pytest.raises(NotConfigured) as caught:
         rt.get_doc_report()
-    assert (caught.value.analyzer, caught.value.step) == ("doc_refs", "read docs config")
-    assert "missing required table [docs]" in caught.value.message
+    assert (caught.value.tables, caught.value.config) == (("docs",), ".stack-intel/config.toml")
+    assert "doc_refs" not in rt.last_state, "a missing table is not a failed analysis"
     assert "build_di" not in fakes.calls, "fails before the backend analysis runs"
     assert rt.get_di()["complete"] is True
 
@@ -1760,7 +1760,7 @@ def test_a_config_edit_reaches_the_frontend_and_the_symbol_layout(repo: Path, fa
     rt.get_routes()
     rt.resolve_symbol("X", side="backend", kind=None, file_hint=None)
     assert fakes.scan_files == ["web/lib/api.ts"]
-    assert [c.frontend.root for c in fakes.symbol_configs] == ["frontend", "web"], "a new layout, a new index"
+    assert [c.require_frontend().root for c in fakes.symbol_configs] == ["frontend", "web"], "a new layout, a new index"
     assert fakes.calls["make_facts_cache"] == 1, "the facts cache does not depend on the config"
 
 
@@ -1870,3 +1870,197 @@ def test_the_page_provider_follows_the_pages_kind(tmp_path: Path, pages: str, ex
     assert found.available
     assert [page.display for page in found.pages] == displays
     assert [p.kind for p in found.problems] == kinds
+
+
+# ── Partial configs ──────────────────────────────────────────────────────
+
+
+def partial_runtime(tmp_path: Path, config: str, fakes: FakeAnalyzers) -> Any:
+    repo = make_repo(tmp_path / "repo")
+    write_config(repo, config, 2000)
+    write(repo / "docs" / "a.md", "# A\n\nCall `GET /api/x`, see `Page` and [b](b.md).\n")
+    write(repo / "docs" / "b.md", "# B\n")
+    return make_runtime(repo, fakes)
+
+
+def not_configured(call: Any) -> tuple[str, ...]:
+    with pytest.raises(NotConfigured) as caught:
+        call()
+    assert caught.value.config == ".stack-intel/config.toml"
+    return caught.value.tables
+
+
+@pytest.mark.parametrize(
+    ("config", "di", "routes", "jsx"),
+    [
+        (BACKEND_ONLY_CONFIG, None, ("frontend",), ("frontend",)),
+        (FRONTEND_ONLY_CONFIG, ("backend",), ("backend",), None),
+        (DOCS_ONLY_CONFIG, ("backend",), ("backend", "frontend"), ("frontend",)),
+    ],
+    ids=["backend-only", "frontend-only", "docs-only"],
+)
+def test_each_analysis_names_the_tables_it_lacks(
+    tmp_path: Path,
+    fakes: FakeAnalyzers,
+    config: str,
+    di: tuple[str, ...] | None,
+    routes: tuple[str, ...],
+    jsx: tuple[str, ...] | None,
+) -> None:
+    rt = partial_runtime(tmp_path, config, fakes)
+    if di is None:
+        assert rt.get_di()["complete"] is True
+    else:
+        assert not_configured(rt.get_di) == di
+    assert not_configured(rt.get_routes) == routes
+    if jsx is not None:
+        assert not_configured(lambda: rt.get_jsx_usage("W", rt.repo_root / "frontend")) == jsx
+    assert "scan_frontend" not in fakes.calls and "build_routes" not in fakes.calls
+    assert "failed" not in rt.last_state.values(), "a missing table is not a failed analysis"
+    if jsx is not None:
+        assert rt.toolchain_state["probes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("config", "side", "searched", "missing"),
+    [
+        (BACKEND_ONLY_CONFIG, "both", "backend", "frontend"),
+        (FRONTEND_ONLY_CONFIG, "both", "frontend", "backend"),
+        (BACKEND_ONLY_CONFIG, "backend", "backend", None),
+        (FRONTEND_ONLY_CONFIG, "frontend", "frontend", None),
+    ],
+)
+def test_symbol_search_covers_the_configured_side(
+    tmp_path: Path, fakes: FakeAnalyzers, config: str, side: str, searched: str, missing: str | None
+) -> None:
+    rt = partial_runtime(tmp_path, config, fakes)
+    result = rt.resolve_symbol("X", side=side, kind=None, file_hint=None)
+    assert fakes.symbol_calls[-1]["side"] == searched
+    notes = [p for p in result.problems if p.kind == "not_configured"]
+    if missing is None:
+        assert notes == []
+    else:
+        [note] = notes
+        assert note.message.startswith(f"no [{missing}] table in .stack-intel/config.toml: ")
+        assert result.complete is True and result.frontend_problem is None
+
+
+@pytest.mark.parametrize(
+    ("config", "side", "tables"),
+    [
+        (BACKEND_ONLY_CONFIG, "frontend", ("frontend",)),
+        (FRONTEND_ONLY_CONFIG, "backend", ("backend",)),
+        (DOCS_ONLY_CONFIG, "both", ("backend", "frontend")),
+    ],
+)
+def test_symbol_search_of_an_unconfigured_side_is_not_configured(
+    tmp_path: Path, fakes: FakeAnalyzers, config: str, side: str, tables: tuple[str, ...]
+) -> None:
+    rt = partial_runtime(tmp_path, config, fakes)
+    assert not_configured(lambda: rt.resolve_symbol("X", side=side, kind=None, file_hint=None)) == tables
+    assert "resolve" not in fakes.calls
+
+
+@pytest.mark.parametrize(
+    ("config", "sides", "skipped"),
+    [
+        (BACKEND_ONLY_CONFIG, ["frontend"], {"typescript_decls", "make_pages"}),
+        (FRONTEND_ONLY_CONFIG, ["backend"], {"build_di", "python_symbols"}),
+        (DOCS_ONLY_CONFIG, ["backend", "frontend"], {"build_di", "python_symbols", "typescript_decls", "make_pages"}),
+    ],
+    ids=["backend-only", "frontend-only", "docs-only"],
+)
+def test_the_doc_report_says_which_side_it_did_not_index(
+    tmp_path: Path, fakes: FakeAnalyzers, config: str, sides: list[str], skipped: set[str]
+) -> None:
+    rt = partial_runtime(tmp_path, config, fakes)
+    found = rt.get_doc_report()
+    notes = [p for p in found.report.limitations if p.kind == "not_configured"]
+    assert [note.message.split(":")[0] for note in notes] == [
+        f"no [{side}] table in .stack-intel/config.toml" for side in sides
+    ]
+    assert {note.file for note in notes} == {".stack-intel/config.toml"}
+    assert "frontend_definitions_unavailable" not in {p.kind for p in found.report.limitations}
+    assert found.frontend_problems == []
+    assert not skipped & set(fakes.calls)
+    if "frontend" in sides:
+        assert rt.toolchain_state["probes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("config", "tables", "states", "toolchain"),
+    [
+        (BACKEND_ONLY_CONFIG, ["backend", "docs"], ("not_run", "not_configured"), "not_configured"),
+        (FRONTEND_ONLY_CONFIG, ["frontend", "docs"], ("not_configured", "not_configured"), "ok"),
+        (DOCS_ONLY_CONFIG, ["docs"], ("not_configured", "not_configured"), "not_configured"),
+    ],
+    ids=["backend-only", "frontend-only", "docs-only"],
+)
+def test_status_reports_what_is_configured(
+    tmp_path: Path, fakes: FakeAnalyzers, config: str, tables: list[str], states: tuple[str, str], toolchain: str
+) -> None:
+    rt = partial_runtime(tmp_path, config, fakes)
+    snapshot = rt.status()
+    assert snapshot.config["tables"] == tables
+    assert (snapshot.analyzers["di_map"]["state"], snapshot.analyzers["route_map"]["state"]) == states
+    assert snapshot.toolchain["state"] == toolchain
+    assert snapshot.complete is None
+    if toolchain == "not_configured":
+        assert rt.toolchain_state["probes"] == 0
+        assert snapshot.toolchain["problem"] is None
+
+
+def test_status_completeness_counts_only_the_configured_analyzers(tmp_path: Path, fakes: FakeAnalyzers) -> None:
+    rt = partial_runtime(tmp_path, BACKEND_ONLY_CONFIG, fakes)
+    rt.get_di()
+    snapshot = rt.status()
+    assert snapshot.complete is True
+    assert snapshot.analyzers["route_map"]["state"] == "not_configured"
+    assert snapshot.fastapi != {} and snapshot.library_capture is None
+
+
+def test_status_counts_name_the_missing_table_per_analyzer(tmp_path: Path, fakes: FakeAnalyzers) -> None:
+    rt = partial_runtime(tmp_path, BACKEND_ONLY_CONFIG, fakes)
+    snapshot = rt.status(load_counts=True)
+    assert snapshot.counts is not None and snapshot.counts["di"] is not None and snapshot.counts["routes"] is None
+    assert snapshot.counts_errors == {
+        "routes": {
+            "error": "not_configured",
+            "message": "route_map needs the [frontend] table, and .stack-intel/config.toml has none. "
+            "Fix: add [frontend] with root and tsconfig.",
+            "tables": ["frontend"],
+            "config": ".stack-intel/config.toml",
+            "fix": "add [frontend] with root and tsconfig",
+        }
+    }
+    assert rt.toolchain_state["probes"] == 0
+
+
+def test_refresh_rebuilds_only_what_is_configured(tmp_path: Path, fakes: FakeAnalyzers) -> None:
+    rt = partial_runtime(tmp_path, BACKEND_ONLY_CONFIG, fakes)
+    result = rt.refresh()
+    assert (result.dependency_function_count, result.di_route_count, result.routes_summary) == (0, 0, None)
+    assert result.not_configured is not None and result.not_configured.tables == ("frontend",)
+    assert result.complete is True
+    assert fakes.calls["build_di"] == 1 and "scan_frontend" not in fakes.calls
+    assert rt.toolchain_state["probes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("config", "tables"),
+    [(FRONTEND_ONLY_CONFIG, ("backend",)), (DOCS_ONLY_CONFIG, ("backend", "frontend"))],
+)
+def test_refresh_without_a_backend_rebuilds_nothing(
+    tmp_path: Path, fakes: FakeAnalyzers, config: str, tables: tuple[str, ...]
+) -> None:
+    rt = partial_runtime(tmp_path, config, fakes)
+    result = rt.refresh()
+    assert (result.dependency_function_count, result.di_route_count, result.routes_summary) == (None, None, None)
+    assert result.not_configured is not None and result.not_configured.tables == tables
+    assert "build_backend_model" not in fakes.calls
+
+
+def test_the_python_floor_without_a_backend_is_the_tools_own(tmp_path: Path, fakes: FakeAnalyzers) -> None:
+    rt = partial_runtime(tmp_path, DOCS_ONLY_CONFIG, fakes)
+    assert rt.min_python() == problems.min_python_version(None)
+    assert rt.runtime_compatible()

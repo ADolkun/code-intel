@@ -9,13 +9,13 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
-from fixture_repo import hermetic_git
-from mcp_fixtures import LAYOUT, FakeAnalyzers, make_repo, make_runtime, write_config
+from fixture_repo import BACKEND_ONLY_CONFIG, DOCS_ONLY_CONFIG, FRONTEND_ONLY_CONFIG, hermetic_git
+from mcp_fixtures import LAYOUT, FakeAnalyzers, make_repo, make_runtime, write, write_config
 from test_verify import checkout
 
 from stack_intel import cli, summary, ts_bridge
 from stack_intel.analysis_runtime import AnalysisFailed, AnalysisRuntime, FrontendFailed, FrontendProblem
-from stack_intel.config import ConfigFile
+from stack_intel.config import ConfigFile, NotConfigured
 from stack_intel.ts_bridge import HelperError, ToolchainProblem, ToolchainUnavailable
 
 
@@ -135,3 +135,51 @@ def test_the_command_exits_1_when_a_section_failed(repo: Path, monkeypatch: pyte
         code = cli.main(["summary", "--repo-root", str(repo)])
     assert code == 1
     assert "| Failed | di_map: KeyError: 'x' |" in out.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("config", "skipped"),
+    [
+        (
+            BACKEND_ONLY_CONFIG,
+            {"Frontend calls and matching": "[frontend]", "JSX and TypeScript declarations": "[frontend]"},
+        ),
+        (
+            DOCS_ONLY_CONFIG,
+            {
+                "Backend routes and dependencies": "[backend]",
+                "Frontend calls and matching": "[backend] or [frontend]",
+                "JSX and TypeScript declarations": "[frontend]",
+                "Python symbols": "[backend]",
+            },
+        ),
+    ],
+)
+def test_a_section_without_its_tables_is_skipped(tmp_path: Path, config: str, skipped: dict[str, str]) -> None:
+    repo = make_repo(tmp_path / "repo")
+    write_config(repo, config)
+    runtime = make_runtime(repo, FakeAnalyzers())
+    text, _ = summary.summarize(runtime)
+    for title, tables in skipped.items():
+        assert (
+            f"### {title}\n\n| Metric | Value |\n| --- | --- |\n| Skipped | the config has no {tables} table |" in text
+        )
+    assert text.count("| Skipped |") == len(skipped)
+    assert runtime.toolchain_state["probes"] == 0
+
+
+def test_a_missing_table_is_named_before_the_interpreter_floor(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo")
+    write_config(repo, FRONTEND_ONLY_CONFIG)
+    write(repo / ".python-version", "99.0\n")
+    text, _ = summary.summarize(make_runtime(repo, FakeAnalyzers(), version_info=(3, 10)))
+    backend = text.split("### Frontend calls")[0]
+    assert backend.endswith("| Skipped | the config has no [backend] table |\n\n")
+    assert "older than the backend's" not in backend
+
+
+def test_a_section_that_meets_a_missing_table_is_skipped(runtime: AnalysisRuntime) -> None:
+    def needs_docs(runtime: AnalysisRuntime) -> summary.Rows:
+        raise NotConfigured(("docs",), ".stack-intel/config.toml")
+
+    assert summary.section_rows(runtime, "doc_refs", needs_docs) == [("Skipped", "the config has no [docs] table")]

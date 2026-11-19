@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from fixture_repo import git_init, hermetic_git
+from fixture_repo import BACKEND_ONLY_CONFIG, DOCS_ONLY_CONFIG, FRONTEND_ONLY_CONFIG, git_init, hermetic_git
 from mcp import Client
 from mcp.types import CallToolResult, TextContent
 from mcp_fixtures import (
@@ -93,7 +93,7 @@ def test_configure_watches_the_package_and_the_pin_file(tmp_path: Path, monkeypa
     assert mcp_server.runtime is rt
     assert rt.code_watch.modules == tuple(analysis_runtime.watched_files())
     assert rt.code_watch.pins == (repo / ".stack-intel" / "requirements.txt",)
-    assert rt.config().backend.package == "service_backend"
+    assert rt.config().require_backend().package == "service_backend"
 
 
 def test_a_server_without_a_repository_says_how_to_start_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2178,3 +2178,225 @@ def test_a_config_edit_changes_the_next_reply_without_a_restart(server: SimpleNa
     assert server.fakes.jsx_calls[-1]["root"] == (server.repo / "web").resolve()
     assert server.fakes.jsx_calls[-1]["frontend_root"] == "web"
     assert "Config:         .stack-intel/config.toml" in mcp_server.status()
+
+
+# ── Partial configs ──────────────────────────────────────────────────────
+
+FIXES = {
+    "backend": "add [backend] with root, package and app",
+    "frontend": "add [frontend] with root and tsconfig",
+    "docs": "add [docs] with scope",
+}
+CONFIGS = {
+    "backend-only": BACKEND_ONLY_CONFIG,
+    "frontend-only": FRONTEND_ONLY_CONFIG,
+    "docs-only": DOCS_ONLY_CONFIG,
+    "no-docs": BACKEND_ONLY_CONFIG.split("[docs]")[0] + FRONTEND_ONLY_CONFIG.split("[docs]")[0],
+}
+
+
+def _partial_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str, **runtime_kwargs: Any
+) -> SimpleNamespace:
+    s = _server(tmp_path, monkeypatch, **runtime_kwargs)
+    write_config(s.repo, CONFIGS[config], 2000)
+    write(s.repo / "docs" / "a.md", "# A\n\nCall `GET /api/x` from `frontend/lib/api.ts`.\n", 2000)
+    return s
+
+
+NOT_CONFIGURED_CELLS = [
+    ("frontend-only", "di_deps", {}, ["backend"]),
+    ("docs-only", "di_reverse", {"dep_function": "get_db"}, ["backend"]),
+    ("backend-only", "route_match", {}, ["frontend"]),
+    ("frontend-only", "route_match", {"path": "/x"}, ["backend"]),
+    ("docs-only", "route_unmatched", {}, ["backend", "frontend"]),
+    ("backend-only", "route_unmatched", {"side": "backend"}, ["frontend"]),
+    ("backend-only", "jsx_usage", {"component_name": "Page"}, ["frontend"]),
+    ("backend-only", "jsx_usage", {"component_name": "Page", "root": "backend"}, ["frontend"]),
+    ("frontend-only", "symbol_resolve", {"name": "X", "side": "backend"}, ["backend"]),
+    ("backend-only", "symbol_resolve", {"name": "X", "side": "frontend"}, ["frontend"]),
+    ("docs-only", "symbol_resolve", {"name": "X"}, ["backend", "frontend"]),
+    ("no-docs", "doc_refs", {"doc": "docs/a.md"}, ["docs"]),
+]
+
+
+@pytest.mark.parametrize(("config", "tool", "arguments", "tables"), NOT_CONFIGURED_CELLS)
+def test_a_tool_whose_table_is_missing_answers_not_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str, tool: str, arguments: dict, tables: list[str]
+) -> None:
+    s = _partial_server(tmp_path, monkeypatch, config)
+    fn = getattr(mcp_server, tool)
+    text = fn(**arguments)
+    assert isinstance(text, mcp_server.ErrorText)
+    names = " and ".join(f"[{t}]" for t in tables)
+    noun, has = ("table", "none") if len(tables) == 1 else ("tables", "neither")
+    fix = "; ".join(FIXES[t] for t in tables)
+    assert text == f"{tool} needs the {names} {noun}, and .stack-intel/config.toml has {has}. Fix: {fix}."
+    payload = j(fn(**arguments, output_format="json"))
+    assert {key: value for key, value in payload.items() if not key.startswith("analyzer_code")} == {
+        "schema_version": 2,
+        "error": "not_configured",
+        "message": str(text),
+        "tables": tables,
+        "config": ".stack-intel/config.toml",
+        "fix": fix,
+    }
+    wire = _call_over_the_wire(tool, arguments)
+    assert wire.is_error is True and _text(wire) == text
+    assert not {"build_backend_model", "scan_frontend", "find_jsx_usage", "resolve"} & set(s.fakes.calls)
+    assert s.rt.toolchain_state["probes"] == 0
+    assert "failed" not in s.rt.last_state.values()
+
+
+def test_argument_errors_come_before_a_missing_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _partial_server(tmp_path, monkeypatch, "frontend-only")
+    assert j(mcp_server.di_deps(method="GET", output_format="json"))["error"] == "invalid_argument"
+    assert j(mcp_server.route_match(limit=-1, output_format="json"))["error"] == "invalid_argument"
+
+
+def test_a_missing_table_comes_before_the_interpreter_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _partial_server(tmp_path, monkeypatch, "frontend-only", version_info=(3, 12))
+    assert j(mcp_server.di_deps(output_format="json"))["error"] == "not_configured"
+    assert j(mcp_server.status(output_format="json"))["runtime"]["runtime_compatible"] is False
+
+
+@pytest.mark.parametrize(
+    ("config", "tool", "arguments"),
+    [
+        ("backend-only", "di_deps", {}),
+        ("backend-only", "di_reverse", {"dep_function": "get_db"}),
+        ("frontend-only", "jsx_usage", {"component_name": "Page"}),
+        ("backend-only", "symbol_resolve", {"name": "X", "side": "backend"}),
+        ("frontend-only", "symbol_resolve", {"name": "X", "side": "frontend"}),
+    ],
+)
+def test_a_tool_with_its_tables_is_unaffected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str, tool: str, arguments: dict
+) -> None:
+    _partial_server(tmp_path, monkeypatch, config)
+    payload = j(getattr(mcp_server, tool)(**arguments, output_format="json"))
+    assert "error" not in payload
+    assert "not_configured" not in {lim["kind"] for lim in payload["analysis_limitations"]}
+    assert _call_over_the_wire(tool, arguments).is_error is False
+
+
+@pytest.mark.parametrize(
+    ("config", "searched", "missing"),
+    [("backend-only", "backend", "frontend"), ("frontend-only", "frontend", "backend")],
+)
+def test_symbol_resolve_both_searches_the_configured_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str, searched: str, missing: str
+) -> None:
+    s = _partial_server(tmp_path, monkeypatch, config)
+    s.fakes.symbols = FakeSymbolResult([FakeCandidate("X", "x.py", 1, 2, "function", "def X()", "python")])
+    payload = j(mcp_server.symbol_resolve("X", output_format="json"))
+    assert s.fakes.symbol_calls[-1]["side"] == searched
+    assert payload["complete"] is True and payload["diagnostics"] == []
+    [note] = [lim for lim in payload["analysis_limitations"] if lim["kind"] == "not_configured"]
+    assert note["message"].startswith(f"no [{missing}] table in .stack-intel/config.toml: ")
+    text = mcp_server.symbol_resolve("X")
+    assert "not_configured" in text and "frontend_unavailable" not in text
+    assert _call_over_the_wire("symbol_resolve", {"name": "X"}).is_error is False
+
+
+def test_doc_refs_without_a_backend_marks_route_mentions_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _partial_server(tmp_path, monkeypatch, "frontend-only")
+    payload = j(mcp_server.doc_refs(doc="docs/a.md", output_format="json"))
+    [route] = [ref for ref in payload["references"] if ref["kind"] == "route"]
+    assert (route["status"], route["detail"]) == ("not_checked", "no [backend] table")
+    assert payload["complete"] is True
+    kinds = {lim["kind"] for lim in payload["analysis_limitations"]}
+    assert "not_configured" in kinds and "frontend_definitions_unavailable" not in kinds
+    assert "build_di" not in s.fakes.calls
+    assert _call_over_the_wire("doc_refs", {"doc": "docs/a.md"}).is_error is False
+
+
+def test_doc_refs_without_a_frontend_indexes_no_frontend_definitions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _partial_server(tmp_path, monkeypatch, "backend-only")
+    payload = j(mcp_server.doc_refs(symbol="Page", output_format="json"))
+    assert payload["complete"] is True and payload["diagnostics"] == []
+    notes = [lim["message"] for lim in payload["analysis_limitations"] if lim["kind"] == "not_configured"]
+    assert notes == [
+        "no [frontend] table in .stack-intel/config.toml: frontend pages and TypeScript definitions are not "
+        "indexed; frontend names still resolve through tracked code"
+    ]
+    assert "typescript_decls" not in s.fakes.calls and s.rt.toolchain_state["probes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("config", "tables", "states"),
+    [
+        ("backend-only", ["backend", "docs"], {"di_map": "complete", "route_map": "not_configured"}),
+        ("frontend-only", ["frontend", "docs"], {"di_map": "not_configured", "route_map": "not_configured"}),
+        ("docs-only", ["docs"], {"di_map": "not_configured", "route_map": "not_configured"}),
+    ],
+)
+def test_status_always_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str, tables: list[str], states: dict[str, str]
+) -> None:
+    s = _partial_server(tmp_path, monkeypatch, config)
+    payload = j(mcp_server.status(load_counts=True, output_format="json"))
+    assert payload["config"]["tables"] == tables
+    assert {name: info["state"] for name, info in payload["analyzers"].items()} == states
+    for name, analyzer in (("di", "di_map"), ("routes", "route_map")):
+        if states[analyzer] == "not_configured":
+            assert payload["counts_errors"][name]["error"] == "not_configured"
+    text = mcp_server.status()
+    if "frontend" not in tables:
+        assert payload["toolchain"]["state"] == "not_configured"
+        assert "Frontend toolchain: not needed (no [frontend] table), so it is not probed" in text
+        assert s.rt.toolchain_state["probes"] == 0
+    assert _call_over_the_wire("status", {}).is_error is False
+
+
+def test_refresh_with_only_a_backend_rebuilds_di(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _partial_server(tmp_path, monkeypatch, "backend-only")
+    text = mcp_server.refresh()
+    assert text.splitlines()[-1] == "  Routes: not rebuilt: no [frontend] table in .stack-intel/config.toml"
+    payload = j(mcp_server.refresh(output_format="json"))
+    assert (payload["di_route_count"], payload["routes_summary"]) == (0, None)
+    assert payload["not_configured"]["tables"] == ["frontend"]
+    assert s.rt.toolchain_state["probes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("config", "missing"), [("frontend-only", "[backend]"), ("docs-only", "[backend] or [frontend]")]
+)
+def test_refresh_without_a_backend_rebuilds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str, missing: str
+) -> None:
+    s = _partial_server(tmp_path, monkeypatch, config)
+    text = mcp_server.refresh()
+    assert text.endswith(f"Caches dropped; nothing to rebuild: no {missing} table in .stack-intel/config.toml.")
+    payload = j(mcp_server.refresh(output_format="json"))
+    assert (payload["dependency_function_count"], payload["di_route_count"]) == (None, None)
+    assert "build_backend_model" not in s.fakes.calls
+    assert _call_over_the_wire("refresh", {}).is_error is False
+
+
+@pytest.mark.parametrize("config", ["backend-only", "docs-only"])
+def test_the_server_never_provisions_typescript_without_a_frontend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
+) -> None:
+    from stack_intel import provision
+
+    probes: list[Path] = []
+
+    def provisioning(repo_root: Path, **kwargs: Any) -> Any:
+        probes.append(repo_root)
+        raise AssertionError("the toolchain was probed")
+
+    monkeypatch.setattr(provision, "find_toolchain", provisioning)
+    hermetic_git(monkeypatch, tmp_path / "home")
+    repo = make_repo(git_init(tmp_path / "repo"))
+    write_config(repo, CONFIGS[config], 2000)
+    write(repo / "docs" / "a.md", "# A\n\nSee `Page` and `GET /api/x`.\n", 2000)
+    monkeypatch.setattr(mcp_server, "runtime", None)
+    mcp_server.configure(repo, ConfigFile.locate(repo))
+    assert j(mcp_server.status(output_format="json"))["toolchain"]["state"] == "not_configured"
+    assert "error" not in j(mcp_server.doc_refs(doc="docs/a.md", output_format="json"))
+    assert probes == []

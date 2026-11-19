@@ -20,6 +20,7 @@ fakes; `Analyzers.real()` binds this package's own modules.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import posixpath
 import subprocess
@@ -39,7 +40,15 @@ from stack_intel import include_model as include_models
 from stack_intel.code_paths import GIT_CREATIONFLAGS as _GIT_CREATIONFLAGS
 from stack_intel.code_paths import GIT_ERRORS as _GIT_ERRORS
 from stack_intel.code_paths import FileStamp, SourceFile
-from stack_intel.config import BackendConfig, Config, ConfigError, ConfigFile, FrontendConfig, PagesConfig
+from stack_intel.config import (
+    BackendConfig,
+    Config,
+    ConfigError,
+    ConfigFile,
+    FrontendConfig,
+    NotConfigured,
+    PagesConfig,
+)
 from stack_intel.repo_files import RepoFiles, RepoFilesError
 from stack_intel.ts_bridge import Toolchain, ToolchainProblem, ToolchainUnavailable
 
@@ -50,6 +59,8 @@ PACKAGE_DIR = loaded_code.PACKAGE_DIR
 PIN_REL = ".stack-intel/requirements.txt"
 
 ANALYZERS = ("di_map", "route_map")
+# The config tables each analyzer reads; without them it is `not_configured`.
+ANALYZER_TABLES: Mapping[str, tuple[str, ...]] = {"di_map": ("backend",), "route_map": ("backend", "frontend")}
 
 # Analyzer steps, named in `AnalysisFailed` messages so a failure says which step broke.
 STEP_READ_CONFIG = "read config"
@@ -169,7 +180,13 @@ class FrontendNotFound(FrontendFailed):
 
 
 # Exceptions that already say what failed, so `_step` lets them through unwrapped.
-_PASSTHROUGH: tuple[type[Exception], ...] = (AnalysisFailed, ToolchainUnavailable, InvalidRoot, FrontendFailed)
+_PASSTHROUGH: tuple[type[Exception], ...] = (
+    AnalysisFailed,
+    ToolchainUnavailable,
+    InvalidRoot,
+    FrontendFailed,
+    NotConfigured,
+)
 
 
 # ── Analyzers ────────────────────────────────────────────────────────────
@@ -516,14 +533,17 @@ class DocReportResult:
 
 @dataclass(frozen=True)
 class RefreshResult:
-    dependency_function_count: int
-    di_route_count: int
-    routes_summary: dict
+    # None for an analyzer that was not rebuilt (`not_configured` names the tables it lacked).
+    dependency_function_count: int | None
+    di_route_count: int | None
+    routes_summary: dict | None
     complete: bool
     diagnostics: list[dict]
     limitations: list[dict]
     # Why routes have no frontend; its counts are then meaningless.
     frontend_problem: FrontendProblem | None = None
+    # Why DI or routes were not rebuilt: the missing tables, and the config's display path.
+    not_configured: NotConfigured | None = None
 
     @property
     def analysis(self) -> dict[str, Any]:
@@ -596,6 +616,10 @@ def settled(built: _Fingerprint, current: _Fingerprint) -> bool:
     if current.racy:
         return False
     return content_digest(built.racy_paths) == built.racy_digest
+
+
+# What the docs check reads from DI when the config has no backend: nothing.
+_NO_DI: Mapping[str, list] = {"routes": [], "unmounted_routes": [], "diagnostics": [], "analysis_limitations": []}
 
 
 @dataclass(frozen=True)
@@ -672,6 +696,19 @@ def toolchain_status(
         "helper_failures": {mode: failure.as_dict() for mode, failure in failures.items()},
         "warnings": list(toolchain.warnings),
         "facts_cache": dict(facts_stats) if facts_stats is not None else None,
+    }
+
+
+def toolchain_not_configured() -> dict[str, Any]:
+    """The `status` toolchain block without ``[frontend]``: nothing needs the toolchain, so it is never probed."""
+    return {
+        "state": "not_configured",
+        "node": {"path": None, "version": None},
+        "typescript": {"dir": None, "version": None, "source": None, "lockfile_version": None},
+        "problem": None,
+        "helper_failures": {},
+        "warnings": [],
+        "facts_cache": None,
     }
 
 
@@ -829,7 +866,8 @@ class AnalysisRuntime:
     def min_python(self) -> tuple[int, int]:
         """The backend's Python floor from its configured version file, read on
         every call: a bump applies to the next answer."""
-        version_file = self.config().backend.python_version_file
+        backend = self.config().backend
+        version_file = backend.python_version_file if backend is not None else None
         return problems.min_python_version(self.repo_root / version_file if version_file else None)
 
     def runtime_compatible(self) -> bool:
@@ -1000,7 +1038,7 @@ class AnalysisRuntime:
         return _Fingerprint(digest.hexdigest(), racy, tuple(files), racy_paths=racy_paths, racy_digest=racy_digest)
 
     def _backend_fingerprint(self, analyzer: str, config: Config, visible: AbstractSet[str]) -> _Fingerprint:
-        backend = config.backend
+        backend = config.require_backend()
         package = self.repo_root / backend.root / backend.package.replace(".", "/")
         with self._step(analyzer, STEP_WALK_BACKEND):
             if not package.is_dir():
@@ -1022,7 +1060,7 @@ class AnalysisRuntime:
             return self._fingerprint(package, code_paths.PY_SUFFIXES, extras, "fingerprint backend sources", visible)
 
     def _frontend_fingerprint(self, analyzer: str, config: Config, visible: AbstractSet[str]) -> _Fingerprint:
-        frontend = config.frontend
+        frontend = config.require_frontend()
         root = self.repo_root / frontend.root
         with self._step(analyzer, STEP_WALK_FRONTEND):
             if not root.is_dir():
@@ -1046,7 +1084,7 @@ class AnalysisRuntime:
                 return self._model
         previous = getattr(self._model, "sources", None)
         with self._step(analyzer, STEP_BUILD_GRAPH):
-            model = self.analyzers.build_backend_model(self.repo_root, config.backend, previous, visible)
+            model = self.analyzers.build_backend_model(self.repo_root, config.require_backend(), previous, visible)
         self._model, self._model_key = model, key
         return model
 
@@ -1073,6 +1111,8 @@ class AnalysisRuntime:
                 return self._di
             with self._step("di_map", STEP_RESOLVE_DEPS):
                 result = self.analyzers.build_di(model)
+        except NotConfigured:
+            raise
         except Exception as exc:
             self._record_failure("di_map", exc)
             raise
@@ -1109,7 +1149,7 @@ class AnalysisRuntime:
             return self._backend_model("route_map", config, backend, visible), self._scan, False
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
-                self.analyzers.scan_frontend, self.repo_root, config.frontend, toolchain, list(frontend.files)
+                self.analyzers.scan_frontend, self.repo_root, config.require_frontend(), toolchain, list(frontend.files)
             )
             model = self._backend_model("route_map", config, backend, visible)
             with self._step("route_map", STEP_ROUTES_HELPER):
@@ -1126,6 +1166,7 @@ class AnalysisRuntime:
             started = time.perf_counter()
             try:
                 config = self.config("route_map")
+                config.require(*ANALYZER_TABLES["route_map"])
                 visible = self._repo_files("route_map").files
                 backend = self._backend_fingerprint("route_map", config, visible)
                 frontend = self._frontend_fingerprint("route_map", config, visible)
@@ -1141,6 +1182,8 @@ class AnalysisRuntime:
                 model, scan, scanned = self._frontend_scan(config, backend, frontend, toolchain, visible)
                 with self._step("route_map", STEP_MATCH_ROUTES):
                     result = self.analyzers.build_routes(model, scan)
+            except NotConfigured:
+                raise
             except Exception as exc:
                 self._record_failure("route_map", exc)
                 raise
@@ -1180,7 +1223,8 @@ class AnalysisRuntime:
     def frontend_root_problem(self, analyzer: str = "jsx_usage") -> FrontendProblem | None:
         """`FRONTEND_NOT_FOUND` when the checkout has no configured frontend root,
         worded as the routes scan words it."""
-        problem = ts_bridge.frontend_not_found_problem(self.repo_root, self.config(analyzer).frontend.root)
+        root = self.config(analyzer).require_frontend().root
+        problem = ts_bridge.frontend_not_found_problem(self.repo_root, root)
         return None if problem is None else FrontendProblem.from_toolchain(problem)
 
     def resolve_root(self, root: str) -> Path:
@@ -1197,7 +1241,7 @@ class AnalysisRuntime:
         if candidate != repo and repo not in candidate.parents:
             raise InvalidRoot(root, f"root {root!r} resolves to {candidate.as_posix()}, outside the repository {repo}")
         if not candidate.is_dir():
-            frontend = (repo / self.config("jsx_usage").frontend.root).resolve()
+            frontend = (repo / self.config("jsx_usage").require_frontend().root).resolve()
             missing = self.frontend_root_problem()
             if missing is not None and (candidate == frontend or frontend in candidate.parents):
                 raise FrontendNotFound("jsx_usage", missing)
@@ -1216,7 +1260,7 @@ class AnalysisRuntime:
         suffixes) and reads the per-file facts cache, so an edit to any scanned
         file shows up next call."""
         with self._lock:
-            config = self.config("jsx_usage")
+            frontend = self.config("jsx_usage").require_frontend()
             toolchain = self.toolchain()
             if not toolchain.available:
                 raise ToolchainUnavailable(ts_bridge.incomplete_toolchain_problem(toolchain))
@@ -1229,7 +1273,7 @@ class AnalysisRuntime:
                         root,
                         facts=self._facts_cache(),
                         repo_root=self.repo_root,
-                        frontend_root=config.frontend.root,
+                        frontend_root=frontend.root,
                         include_self_close=include_self_close,
                         include_tests=include_tests,
                         problems=found,
@@ -1240,20 +1284,34 @@ class AnalysisRuntime:
             self._helper_failures.pop(FACTS_MODE, None)
             return JsxResult(list(usages), found)
 
+    def symbol_side(self, side: str) -> str:
+        """The side a ``side`` search covers under the current config
+        (`symbol_resolve.configured_side`). Raises `NotConfigured`."""
+        from stack_intel import symbol_resolve
+
+        return symbol_resolve.configured_side(self.config("symbol_resolve"), side)[0]
+
     def resolve_symbol(self, name: str, *, side: str, kind: str | None, file_hint: str | None) -> Any:
         """`SymbolIndex.resolve`; ``side="frontend"`` raises `ToolchainUnavailable`
         without a toolchain, ``side="both"`` returns backend candidates marked
-        incomplete."""
+        incomplete. ``both`` with one side unconfigured searches the other and
+        adds a `not_configured` limitation."""
+        from stack_intel import symbol_resolve
+
         with self._lock:
-            if side == "frontend" and (missing := self.frontend_root_problem("symbol_resolve")) is not None:
+            config = self.config("symbol_resolve")
+            searched, note = symbol_resolve.configured_side(config, side)
+            if searched == "frontend" and (missing := self.frontend_root_problem("symbol_resolve")) is not None:
                 raise FrontendNotFound("symbol_resolve", missing)
-            index = self._symbol_index(self.config("symbol_resolve"))
+            index = self._symbol_index(config)
             with self._step("symbol_resolve", STEP_RESOLVE_SYMBOL):
                 try:
-                    result = index.resolve(name, side=side, kind_filter=kind, file_hint=file_hint)
+                    result = index.resolve(name, side=searched, kind_filter=kind, file_hint=file_hint)
                 except ts_bridge.HelperError as exc:
                     raise self._helper_failed("symbol_resolve", exc) from exc
-            if side != "backend":
+            if note is not None:
+                result = dataclasses.replace(result, problems=[*result.problems, note])
+            if searched != "backend":
                 frontend_problem = getattr(result, "frontend_problem", None)
                 if getattr(frontend_problem, "code", None) == HELPER_FAILED:
                     self._helper_failures[FACTS_MODE] = FrontendProblem(
@@ -1274,8 +1332,11 @@ class AnalysisRuntime:
 
         Shares the DI cache with the DI tools and the symbol index with symbol
         search; the per-file Markdown and code-word caches live in the doc
-        index. Resolution itself runs on every call. Raises `AnalysisFailed`
-        for a git failure, a config without ``[docs]`` and any analyzer error.
+        index. Resolution itself runs on every call. Raises `NotConfigured`
+        without ``[docs]``, and `AnalysisFailed` for a git failure and any
+        analyzer error. Without ``[backend]`` there are no routes and no Python
+        definitions, and without ``[frontend]`` no pages and no TypeScript
+        definitions; the report says so (`doc_refs`).
 
         Frontend definitions only add definition locations (a frontend name
         still resolves through tracked code words), so a missing toolchain or
@@ -1298,15 +1359,10 @@ class AnalysisRuntime:
 
             config = self.config("doc_refs")
             with self._step("doc_refs", STEP_READ_DOC_CONFIG):
-                try:
-                    doc_config = doc_rules.DocRefsConfig.from_config(config, self.repo_root)
-                except ConfigError as exc:
-                    raise AnalysisFailed.build(
-                        "doc_refs", STEP_READ_DOC_CONFIG, str(exc), self.repo_root, None
-                    ) from exc
+                doc_config = doc_rules.DocRefsConfig.from_config(config, self.repo_root)
             index = self._doc_index_cache()
             files = self._repo_files("doc_refs")
-            di = self._get_di(files.files)
+            di = self._get_di(files.files) if config.backend is not None else _NO_DI
             symbols, symbol_problems, frontend_problems, frontend_available = self._doc_symbols(config)
 
             def kept(file: Any) -> bool:
@@ -1343,6 +1399,8 @@ class AnalysisRuntime:
     def _page_provider(self, config: Config) -> doc_rules.PageProvider:
         """The page provider for ``config``'s frontend, kept while its root and
         ``[frontend.pages]`` are unchanged so its facts stay cached."""
+        if config.frontend is None:
+            return doc_rules.NoPages()
         key = (config.frontend.root, config.frontend.pages)
         if self._pages is None or self._pages_key != key:
             self._pages = self.analyzers.make_pages(self.repo_root, config, self.toolchain, self._clock)
@@ -1371,25 +1429,29 @@ class AnalysisRuntime:
         """(symbol rows, Python index problems, frontend problems, whether
         frontend definitions were indexed). The TypeScript helper runs in a
         worker thread while the Python index builds, as symbol search does
-        with ``side="both"``."""
+        with ``side="both"``. A side without its table is not indexed, and
+        without ``[frontend]`` the toolchain is never probed."""
         index = self._symbol_index(config)
         backend: list[problems.Problem] = []
         frontend: list[problems.Problem] = []
         unavailable: FrontendProblem | None = None
+        rows: list[Any] = []
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(index.typescript_decls, frontend)
-            with self._step("doc_refs", STEP_INDEX_DOC_SYMBOLS):
-                rows = list(index.python_symbols(backend))
-            with self._step("doc_refs", STEP_FACTS_HELPER):
-                try:
-                    rows.extend(future.result())
-                except ToolchainUnavailable as exc:
-                    unavailable = FrontendProblem.from_toolchain(exc.problem)
-                except ts_bridge.HelperError as exc:
-                    unavailable = FrontendProblem.from_helper_error(exc)
-                    self._helper_failures[FACTS_MODE] = unavailable
-                else:
-                    self._helper_failures.pop(FACTS_MODE, None)
+            future = pool.submit(index.typescript_decls, frontend) if config.frontend is not None else None
+            if config.backend is not None:
+                with self._step("doc_refs", STEP_INDEX_DOC_SYMBOLS):
+                    rows.extend(index.python_symbols(backend))
+            if future is not None:
+                with self._step("doc_refs", STEP_FACTS_HELPER):
+                    try:
+                        rows.extend(future.result())
+                    except ToolchainUnavailable as exc:
+                        unavailable = FrontendProblem.from_toolchain(exc.problem)
+                    except ts_bridge.HelperError as exc:
+                        unavailable = FrontendProblem.from_helper_error(exc)
+                        self._helper_failures[FACTS_MODE] = unavailable
+                    else:
+                        self._helper_failures.pop(FACTS_MODE, None)
         if unavailable is not None:
             frontend.append(
                 problems.diagnostic(
@@ -1431,19 +1493,24 @@ class AnalysisRuntime:
             self.last_state.clear()
 
     def refresh(self) -> RefreshResult:
-        """Drop every cache and rebuild DI and routes now."""
+        """Drop every cache and rebuild now what the config configures: DI
+        with ``[backend]``, routes with ``[backend]`` and ``[frontend]``."""
         with self._lock:
             self.reset()
-            di = self.get_di()
-            routes = self.get_routes()
+            config = self.config()
+            missing = config.missing(*ANALYZER_TABLES["route_map"])
+            di = self.get_di() if config.backend is not None else None
+            routes = self.get_routes() if not missing else None
+            built = [result for result in (di, routes) if result is not None]
             return RefreshResult(
-                dependency_function_count=len(di["dependency_functions"]),
-                di_route_count=len(di["routes"]),
-                routes_summary=dict(routes["summary"]),
-                complete=bool(di["complete"]) and bool(routes["complete"]),
-                diagnostics=_dedupe([*di["diagnostics"], *routes["diagnostics"]]),
-                limitations=_dedupe([*di["analysis_limitations"], *routes["analysis_limitations"]]),
+                dependency_function_count=None if di is None else len(di["dependency_functions"]),
+                di_route_count=None if di is None else len(di["routes"]),
+                routes_summary=None if routes is None else dict(routes["summary"]),
+                complete=all(bool(result["complete"]) for result in built),
+                diagnostics=_dedupe(d for result in built for d in result["diagnostics"]),
+                limitations=_dedupe(lim for result in built for lim in result["analysis_limitations"]),
                 frontend_problem=self._routes_frontend,
+                not_configured=NotConfigured(missing, config.display) if missing else None,
             )
 
     def _load_counts(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, dict]]:
@@ -1464,6 +1531,10 @@ class AnalysisRuntime:
         for name, load in loaders:
             try:
                 data = load()
+            except NotConfigured as exc:
+                analyzer = "di_map" if name == "di" else "route_map"
+                errors[name] = {"error": "not_configured", "message": exc.describe(analyzer), **exc.fields()}
+                continue
             except AnalysisFailed as exc:
                 errors[name] = {
                     "error": "analysis_failed",
@@ -1501,8 +1572,10 @@ class AnalysisRuntime:
         if config is not None:
             try:
                 visible = self._repo_files("di_map").files
-                backend = self._backend_fingerprint("di_map", config, visible)
-                frontend = self._frontend_fingerprint("route_map", config, visible)
+                if config.backend is not None:
+                    backend = self._backend_fingerprint("di_map", config, visible)
+                if config.frontend is not None:
+                    frontend = self._frontend_fingerprint("route_map", config, visible)
             except AnalysisFailed:
                 pass
         di_fresh = self._revalidate_di(backend)
@@ -1554,11 +1627,15 @@ class AnalysisRuntime:
             loaded = [c for c in (self._di, self._routes) if c is not None]
             diagnostics = _dedupe(d for c in loaded for d in c["diagnostics"])
             limitations = _dedupe(lim for c in loaded for lim in c["analysis_limitations"])
-            states = {name: self.last_state.get(name, "not_run") for name in ANALYZERS}
+            unconfigured = (
+                set() if config is None else {name for name in ANALYZERS if config.missing(*ANALYZER_TABLES[name])}
+            )
+            states = {name: self.last_state.get(name, "not_run") for name in ANALYZERS if name not in unconfigured}
+            fresh = {"di_map": di_fresh, "route_map": routes_fresh}
             complete: bool | None
             if any(s == "failed" for s in states.values()) or any(c["complete"] is False for c in loaded):
                 complete = False
-            elif di_fresh and routes_fresh and all(s == "complete" for s in states.values()):
+            elif states and all(fresh[name] and state == "complete" for name, state in states.items()):
                 complete = True
             else:
                 complete = None
@@ -1580,24 +1657,36 @@ class AnalysisRuntime:
                 python_required=required,
                 diagnostics=diagnostics,
                 limitations=limitations,
-                analyzers={name: self._analyzer_status(name) for name in ANALYZERS},
+                analyzers={name: self._analyzer_status(name, name not in unconfigured) for name in ANALYZERS},
                 cache={
                     "backend_model": {"loaded": self._model is not None},
                     "di": {"loaded": self._di is not None, "fresh": di_fresh},
                     "routes": {"loaded": self._routes is not None, "fresh": routes_fresh},
                 },
-                toolchain=toolchain_status(self.toolchain(), self.repo_root, facts_stats, self._helper_failures),
+                toolchain=(
+                    toolchain_not_configured()
+                    if config is not None and config.frontend is None
+                    else toolchain_status(self.toolchain(), self.repo_root, facts_stats, self._helper_failures)
+                ),
                 counts=counts,
                 counts_error=counts_error,
                 counts_errors=counts_errors,
                 code_unconfirmed=self.code_unconfirmed(code),
-                fastapi={} if config is None else self._fastapi_status(config),
-                library_capture=None if config is None else self._library_status(config, limitations),
-                config={"path": code_paths.rel_posix(self.config_file.path, self.repo_root), "error": config_error},
+                fastapi={} if config is None or config.backend is None else self._fastapi_status(config.backend),
+                library_capture=(
+                    None
+                    if config is None or config.backend is None
+                    else self._library_status(config.backend, limitations)
+                ),
+                config={
+                    "path": code_paths.rel_posix(self.config_file.path, self.repo_root),
+                    "error": config_error,
+                    "tables": None if config is None else list(config.tables),
+                },
             )
 
-    def _fastapi_status(self, config: Config) -> dict[str, Any]:
-        model = include_models.read(self.repo_root, config.backend.lock)
+    def _fastapi_status(self, backend: BackendConfig) -> dict[str, Any]:
+        model = include_models.read(self.repo_root, backend.lock)
         return {
             "fastapi_version": model.fastapi_version,
             "include_model": model.kind,
@@ -1606,13 +1695,13 @@ class AnalysisRuntime:
             "summary": include_models.describe(model),
         }
 
-    def _library_status(self, config: Config, limitations: list[dict]) -> dict[str, Any] | None:
+    def _library_status(self, backend: BackendConfig, limitations: list[dict]) -> dict[str, Any] | None:
         """The capture file as the analysis reads it now, what the loaded DI applied of it
         (None until it is built), and why it is stale. The status never builds anything."""
-        capture = config.backend.capture
+        capture = backend.capture
         if capture is None:
             return None
-        view = library_view.read(self.repo_root, capture.file, app=config.backend.app, lock=config.backend.lock)
+        view = library_view.read(self.repo_root, capture.file, app=backend.app, lock=backend.lock)
         file = view.capture
         return {
             "file": capture.file,
@@ -1629,8 +1718,8 @@ class AnalysisRuntime:
             "stale": [lim["message"] for lim in limitations if lim["kind"] == "library_capture_stale"],
         }
 
-    def _analyzer_status(self, name: str) -> dict[str, Any]:
-        state = self.last_state.get(name, "not_run")
+    def _analyzer_status(self, name: str, configured: bool) -> dict[str, Any]:
+        state = self.last_state.get(name, "not_run") if configured else "not_configured"
         return {
             "state": state,
             "last_step": self.failed_steps.get(name) if state == "failed" else None,
