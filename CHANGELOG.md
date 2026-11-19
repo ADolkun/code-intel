@@ -6,6 +6,14 @@ Releases up to 0.2.3 were published as `code-intel`, installed from git; the nam
 
 ## Unreleased
 
+### Added
+
+- `doc-check` checks documented commands beyond npm scripts: pnpm, yarn and bun scripts, make targets and mise tasks, in code spans and shell fences. A command whose outcome the tracked files cannot settle is `not_checked` with the reason, never `missing`.
+
+### Changed
+
+- The docs check `scripts` is renamed `commands`, and the reference kind `script` is renamed `command`. A config that still uses the old names fails with an error naming the new one.
+
 ## 0.2.3 - 2026-11-05
 
 ### Added
