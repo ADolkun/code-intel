@@ -285,6 +285,11 @@ def mark_missing(
     return draft.set("missing", detail)
 
 
+def _repo_path(path: str) -> str | None:
+    """``normalize_repo_path``, except the repository root is ``""`` rather than an escape."""
+    return "" if posixpath.normpath(path) == "." else normalize_repo_path(path)
+
+
 # ── Links ────────────────────────────────────────────────────────────────
 
 
@@ -300,9 +305,7 @@ class LinkResolver:
         """The repository path a link reaches; ``""`` is the repository root
         (``/``, or ``../`` from a top-level directory), None when it escapes."""
         joined = posixpath.join("" if path_part.startswith("/") else posixpath.dirname(doc), path_part.lstrip("/"))
-        if posixpath.normpath(joined) == ".":
-            return ""
-        return normalize_repo_path(joined)
+        return _repo_path(joined)
 
     def _is_dir(self, target: str) -> bool:
         return target == "" or target in self.ctx.repo.dirs
@@ -468,10 +471,12 @@ class PathResolver:
         tries: list[str] = []
         want_dir = path.endswith("/")
         for base in bases:
-            full = normalize_repo_path(posixpath.join(base, path))
+            full = _repo_path(posixpath.join(base, path))
             if full is None:
                 continue
             tries.append(full)
+            if full == "":
+                return full, tries
             if has_glob(full):
                 pattern = glob_regex(full)
                 hits = sorted(p for p in (repo.files | repo.dirs) if pattern.fullmatch(p))
