@@ -11,6 +11,8 @@ import pytest
 from doc_config import doc_config
 from fake_repo_files import repo_files_on_disk
 
+from stack_intel import package_manifest
+from stack_intel.definition_files import Unreadable
 from stack_intel.doc_refs import build_report
 
 ALL_DOCS = {"scope": ["**/*.md"], "reachability": None, "rules": [], "ignore": []}
@@ -327,12 +329,6 @@ def test_a_mise_file_that_cannot_be_settled_says_why(tmp_path: Path, files: Mapp
     ("files", "text", "detail"),
     [
         pytest.param(
-            {"package.json": "[" * 100_000 + "]" * 100_000},
-            "`npm run build`",
-            "package.json could not be read: nested too deeply to parse",
-            id="C4-deep-package-json",
-        ),
-        pytest.param(
             {"package.json": _scripts("other"), ".npmrc": b"if-present=\xff\n"},
             "`npm run build`",
             ".npmrc could not be read: not UTF-8 (byte 0xff at offset 11)",
@@ -361,3 +357,15 @@ def test_the_reason_names_the_file_and_the_cause(
 ) -> None:
     (row,) = _commands(tmp_path, {**files, "README.md": text + "\n"})
     assert row[3] == detail
+
+
+def test_a_package_json_nested_too_deeply_to_parse_is_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # How deep json can nest depends on the interpreter build, so the depth
+    # failure is raised directly.
+    def too_deep(_data: bytes) -> object:
+        raise RecursionError
+
+    monkeypatch.setattr(package_manifest.json, "loads", too_deep)
+    assert package_manifest.package_scripts_from_bytes("package.json", b"[]") == Unreadable(
+        "package.json", "nested too deeply to parse"
+    )
