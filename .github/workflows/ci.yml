@@ -13,38 +13,98 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  UV_LINK_MODE: copy
+
 jobs:
-  checks:
-    name: Lint, types and tests
+  lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No version: installs the newest uv that satisfies `required-version` in pyproject.toml.
+      # Only main saves the cache: a pull request's cache would not be reused after it merges.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          package-manager-cache: false
+
+      - run: uv sync --locked
+
+      # With a token zizmor adds the online audits (impostor commits, known-vulnerable actions).
+      - name: Audit workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --no-sync zizmor --quiet .github
+
+      - run: uv run --no-sync ruff check
+
+      - run: uv run --no-sync ruff format --check
+
+      - run: uv run --no-sync pyrefly check
+
+      # `xargs -r` is GNU-only, which keeps this job on Linux.
+      - name: Syntax-check the JavaScript
+        run: git ls-files '*.cjs' | xargs -r -n1 node --check
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     env:
-      UV_LINK_MODE: copy
       STACK_INTEL_REQUIRE_TOOLCHAIN: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          enable-cache: false
+          enable-cache: true
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
+          package-manager-cache: false
 
       - run: uv sync --locked
 
-      - run: uv run ruff check
+      - run: uv run --no-sync stack-intel setup
 
-      - run: uv run ruff format --check
+      - run: uv run --no-sync pytest -n auto --dist worksteal
 
-      - run: uv run pyrefly check
+  wheel:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Syntax-check the JavaScript
-        run: git ls-files '*.cjs' | xargs -r -n1 node --check
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
-      - run: uv run stack-intel setup
+      # Builds the sdist, then the wheel from it: a complete wheel proves the sdist complete.
+      - run: uv build --no-sources
 
-      - run: uv run pytest -n auto
+      - uses: $/.github/actions/wheel-smoke
+        with:
+          wheel: dist/*.whl

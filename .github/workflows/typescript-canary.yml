@@ -1,0 +1,68 @@
+name: TypeScript canary
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [beta, rc, next]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      UV_LINK_MODE: copy
+      TS_TAG: ${{ matrix.tag }}
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          package-manager-cache: false
+
+      - name: Resolve the dist-tag
+        id: resolve
+        run: |
+          version=$(npm view "typescript@$TS_TAG" version)
+          if node -e 'const [major, minor] = process.argv[1].split(".").map(Number); process.exit(major > 7 || (major === 7 && minor >= 1) ? 0 : 1)' "$version"; then
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::typescript@$TS_TAG is $version, older than 7.1: skipped"
+          fi
+
+      - if: steps.resolve.outputs.version
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - if: steps.resolve.outputs.version
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          save-cache: false
+
+      - name: Install TypeScript
+        if: steps.resolve.outputs.version
+        env:
+          TS_VERSION: ${{ steps.resolve.outputs.version }}
+        # The canary exists to test the dist-tag's current build, which no lockfile can hold.
+        run: | # zizmor: ignore[adhoc-packages]
+          npm install --prefix "$RUNNER_TEMP/ts-$TS_TAG" --ignore-scripts "typescript@$TS_VERSION"
+          echo "STACK_INTEL_TYPESCRIPT_DIR=$RUNNER_TEMP/ts-$TS_TAG/node_modules/typescript" >> "$GITHUB_ENV"
+
+      - name: Test against it
+        if: steps.resolve.outputs.version
+        env:
+          STACK_INTEL_REQUIRE_TOOLCHAIN: "1"
+        run: |
+          uv sync --locked
+          uv run --no-sync pytest -n auto --dist worksteal
