@@ -190,7 +190,7 @@ def _check_rule(
     meta = read.meta
     if meta is None:
         return None
-    if _paths_cut_off(rel, read, meta, text, findings):
+    if _paths_cut_off(rel, read, meta, text, findings) or _paths_cut_inside(rel, read, meta, checkout, findings):
         return None
     if strict:
         findings.extend(meta.repeat_findings(rel))
@@ -201,7 +201,7 @@ def _check_rule(
     if "paths" in read.as_text and isinstance(value, str):
         return _check_paths_as_text(rel, read, meta, value, checkout, findings)
     globs = _glob_items(meta, "paths")
-    if value is not None and value != [] and not globs:
+    if not _is_placeholder(value) and not globs:
         message = "Claude Code finds no glob in 'paths' and loads the rule for every file"
         findings.append(finding(rel, meta.line("paths"), "paths", message))
         return None
@@ -215,6 +215,33 @@ def _check_rule(
             return None
     _check_globs(rel, "paths", globs, checkout, findings)
     return tuple(glob for (_, pieces), _ in globs for glob, _ in pieces)
+
+
+def _is_placeholder(value: object) -> bool:
+    """``paths:``, ``paths: ""``, ``paths: []`` or ``paths: [""]``: left empty, a strict finding only."""
+    if isinstance(value, list):
+        return all(isinstance(item, str) and not item.strip() for item in value)
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _paths_cut_inside(
+    rel: str, read: FrontmatterRead, meta: Frontmatter, checkout: _Checkout, findings: list[Finding]
+) -> bool:
+    """A ``---`` inside the ``paths`` value cuts it short: report it when what
+    is left names no glob that may match."""
+    if read.cut is None or read.cut[1] != "paths":
+        return False
+    globs = _glob_items(meta, "paths")
+    if any(_any_piece_may_match(pieces, checkout) for (_, pieces), _ in globs):
+        return False
+    if globs:
+        names = ", ".join(repr(text) for (text, _), _ in globs)
+        left = f"{names}, which matches no git-visible file"
+    else:
+        left = "no glob, so it loads the rule for every file"
+    message = f"Claude Code ends the frontmatter at the '---' inside 'paths', which leaves {left}; quote the value or avoid '---' in it"
+    findings.append(finding(rel, read.cut[0], "paths", message))
+    return True
 
 
 def _paths_cut_off(rel: str, read: FrontmatterRead, meta: Frontmatter, text: str, findings: list[Finding]) -> bool:

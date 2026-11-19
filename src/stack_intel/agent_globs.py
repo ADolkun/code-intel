@@ -16,7 +16,7 @@ Constructs whose reading is not modelled are ``unmodelled`` and skip the
 check: negation, extglobs, backslash escapes, POSIX classes, brace ranges, a
 comma inside braces or brackets of a comma-split value, and globs past the
 work bound (longer than 256 characters, more than 64 brace expansions).
-Matching runs an NFA over each path once, so no glob backtracks.
+Matching never backtracks for long (``_Matcher``).
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from __future__ import annotations
 import functools
 import re
 from collections.abc import Collection
-from dataclasses import dataclass
 from typing import Literal
 
 Verdict = Literal["matches", "no_match", "unmodelled"]
@@ -126,55 +125,51 @@ def _class_end(pattern: str, start: int) -> int | None:
     return None if end < 0 else end
 
 
-_Token = tuple[str, object]
+_Token = tuple[str, str]  # (kind, a regex for one character when kind is "one")
 _State = tuple[int, bool]  # (token index, inside a ``**/`` that has consumed characters)
 _Pending = frozenset[_State]
+_FLAGS = re.IGNORECASE | re.DOTALL
+_Engine = Literal["auto", "regex", "automaton"]
+_WILDCARDS = {"star": "[^/]*", "gstar": ".*", "gslash": "(?:.*/)?"}
 
 
-@dataclass(frozen=True)
-class _Class:
-    negate: bool
-    chars: frozenset[str]
-    ranges: tuple[tuple[str, str], ...]
-
-    def contains(self, char: str) -> bool:
-        inside = char in self.chars or any(low <= char <= high for low, high in self.ranges)
-        return char != "/" and inside != self.negate
-
-
-def _class_token(body: str) -> _Token:
-    """A ``[...]`` body as a class token (members lowered); raises
-    ``ValueError`` for a reversed range (``[z-a]``), which the readers'
-    matchers reject."""
+def _class_regex(body: str) -> str:
+    """A ``[...]`` body as a regex for one character other than ``/``,
+    bounds kept in their case; raises ``re.error`` for a reversed range
+    (``[z-a]``), which the readers' matchers reject."""
     negate = body[:1] in ("!", "^")
     members = body[1:] if negate else body
-    chars: set[str] = set()
-    ranges: list[tuple[str, str]] = []
+    out: list[str] = []
     i = 0
     while i < len(members):
         if i + 2 < len(members) and members[i + 1] == "-":
             low, high = members[i], members[i + 2]
             if low > high:
-                raise ValueError(f"reversed range {low}-{high}")
-            ranges.append((low.lower(), high.lower()))
+                raise re.error(f"bad character range {low}-{high}")
+            out.append(f"{re.escape(low)}-{re.escape(high)}")
             i += 3
         else:
-            chars.update(members[i].lower())
+            out.append(re.escape(members[i]))
             i += 1
-    return ("class", _Class(negate, frozenset(chars), tuple(ranges)))
+    return f"[^{''.join(out)}/]" if negate else f"(?!/)[{''.join(out)}]"
 
 
 class _Matcher:
-    """A glob as an NFA run over the path once, with each set of states'
-    move on a character memoized: linear in the path, never backtracking.
-    Paths are lowered before matching, so it is case-insensitive."""
+    """A glob matched case-insensitively, one character at a time as ``re``
+    folds case (so a path is never lowered and lengths always line up).
 
-    def __init__(self, tokens: list[_Token]) -> None:
+    With at most two unbounded wildcards the glob runs as one regex, which
+    backtracks at most quadratically. With more it runs as an NFA over the
+    path once, each set of states' move on a character memoized, its
+    single-character tests the same regexes: linear, never backtracking."""
+
+    def __init__(self, tokens: list[_Token], engine: _Engine) -> None:
         self.tokens = tokens
-        # Two unbounded wildcards backtrack at most quadratically over a path,
-        # so the faster regex engine is safe for them.
-        wildcards = sum(kind in ("star", "gstar", "gslash") for kind, _ in tokens)
-        self.regex = _regex(tokens) if wildcards <= 2 else None
+        wildcards = sum(kind in _WILDCARDS for kind, _ in tokens)
+        source = "".join(_WILDCARDS.get(kind, one) for kind, one in tokens)
+        use_regex = engine == "regex" or (engine == "auto" and wildcards <= 2)
+        self.regex = re.compile(source, _FLAGS) if use_regex else None
+        self.ones = [re.compile(one, _FLAGS) if kind == "one" else None for kind, one in tokens]
         self.end: _State = (len(tokens), False)
         self.moves: dict[tuple[_Pending, str], _Pending] = {}
         self.start = self._closure({(0, False)})
@@ -183,7 +178,7 @@ class _Matcher:
         pending = list(states)
         while pending:
             index, inside = pending.pop()
-            if not inside and index < len(self.tokens) and self.tokens[index][0] in ("star", "gstar", "gslash"):
+            if not inside and index < len(self.tokens) and self.tokens[index][0] in _WILDCARDS:
                 skipped = (index + 1, False)
                 if skipped not in states:
                     states.add(skipped)
@@ -195,23 +190,19 @@ class _Matcher:
         for index, _inside in states:
             if index == len(self.tokens):
                 continue
-            kind, arg = self.tokens[index]
+            kind = self.tokens[index][0]
+            one = self.ones[index]
             if kind == "gslash":
                 out.add((index, True))
                 if char == "/":
                     out.add((index + 1, False))
             elif kind == "gstar" or (kind == "star" and char != "/"):
                 out.add((index, False))
-            elif (
-                (kind == "lit" and char == arg)
-                or (kind == "any" and char != "/")
-                or (isinstance(arg, _Class) and arg.contains(char))
-            ):
+            elif one is not None and one.fullmatch(char) is not None:
                 out.add((index + 1, False))
         return self._closure(out)
 
     def matches(self, path: str) -> bool:
-        """``path`` lowered."""
         if self.regex is not None:
             return self.regex.fullmatch(path) is not None
         states = self.start
@@ -226,45 +217,32 @@ class _Matcher:
         return self.end in states
 
 
-def _regex(tokens: list[_Token]) -> re.Pattern[str]:
-    out: list[str] = []
-    for kind, arg in tokens:
-        if isinstance(arg, _Class):
-            members = "".join(re.escape(c) for c in sorted(arg.chars))
-            members += "".join(f"{re.escape(low)}-{re.escape(high)}" for low, high in arg.ranges)
-            out.append(f"[^{members}/]" if arg.negate else f"(?!/)[{members}]")
-        elif isinstance(arg, str):
-            out.append(re.escape(arg))
-        else:
-            out.append({"any": "[^/]", "star": "[^/]*", "gstar": ".*", "gslash": "(?:.*/)?"}[kind])
-    return re.compile("".join(out), re.DOTALL)
-
-
 @functools.lru_cache(maxsize=4096)
-def _matcher(pattern: str, classes: bool) -> _Matcher:
-    """Raises ``ValueError`` for a class that cannot compile (``[z-a]``)."""
+def _matcher(pattern: str, classes: bool, engine: _Engine = "auto") -> _Matcher:
+    """Raises ``re.error`` for a class that cannot compile (``[z-a]``).
+    ``engine`` forces one engine, for testing them against each other."""
     tokens: list[_Token] = []
     i = 0
     while i < len(pattern):
         if pattern.startswith("**/", i):
-            tokens.append(("gslash", None))
+            tokens.append(("gslash", ""))
             i += 3
         elif pattern.startswith("**", i):
-            tokens.append(("gstar", None))
+            tokens.append(("gstar", ""))
             i += 2
         elif pattern[i] == "*":
-            tokens.append(("star", None))
+            tokens.append(("star", ""))
             i += 1
         elif pattern[i] == "?":
-            tokens.append(("any", None))
+            tokens.append(("one", "[^/]"))
             i += 1
         elif pattern[i] == "[" and classes and (end := _class_end(pattern, i)) is not None:
-            tokens.append(_class_token(pattern[i + 1 : end]))
+            tokens.append(("one", _class_regex(pattern[i + 1 : end])))
             i = end + 1
         else:
-            tokens.extend(("lit", char) for char in pattern[i].lower())
+            tokens.append(("one", re.escape(pattern[i])))
             i += 1
-    return _Matcher(tokens)
+    return _Matcher(tokens, engine)
 
 
 def _readings(alternative: str) -> list[str]:
@@ -297,10 +275,9 @@ def glob_verdict(glob: str, paths: Collection[str]) -> Verdict:
         for classes in (True, False):
             try:
                 matchers.append(_matcher(form, classes))
-            except ValueError:
+            except re.error:
                 continue
-    lowered = [rel.lower() for rel in paths]
-    return "matches" if any(matcher.matches(rel) for matcher in matchers for rel in lowered) else "no_match"
+    return "matches" if any(matcher.matches(rel) for matcher in matchers for rel in paths) else "no_match"
 
 
 _GLOB_CHARS = re.compile(r"[*?\[{\\!]")

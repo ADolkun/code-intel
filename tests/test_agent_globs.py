@@ -3,11 +3,13 @@ verdict is ``no_match`` only when no reading matches a file or directory."""
 
 from __future__ import annotations
 
+import random
+import re
 import time
 
 import pytest
 
-from stack_intel.agent_globs import glob_groups, glob_verdict, literal_directory, sample_paths, split_globs
+from stack_intel.agent_globs import _matcher, glob_groups, glob_verdict, literal_directory, sample_paths, split_globs
 
 FILES = frozenset(
     {
@@ -185,3 +187,47 @@ def test_comma_strings_split_outside_braces_and_brackets() -> None:
 def test_literal_directory_and_sample_paths(glob: str, directory: str, samples: list[str]) -> None:
     assert literal_directory(glob) == directory
     assert sample_paths(glob) == samples
+
+
+@pytest.mark.parametrize(
+    ("glob", "path", "verdict"),
+    [
+        ("docs/[B-a]*.md", "docs/x.md", "matches"),
+        ("docs/[Z-a]*.md", "docs/x.md", "no_match"),
+        ("docs/[A-_]*.md", "docs/x.md", "matches"),
+        ("docs/[A-z]*.md", "docs/_index.md", "matches"),
+        ("docs/[A-z]*-*-*.md", "docs/_a-b-c.md", "matches"),
+        ("docs/[B-a]*-*-*.md", "docs/x-b-c.md", "matches"),
+        ("docs/?stanbul.md", "docs/İstanbul.md", "matches"),
+        ("docs/?stanbul-*-*.md", "docs/İstanbul-a-b.md", "matches"),
+        ("docs/k.md", "docs/K.md", "matches"),
+    ],
+)
+def test_case_folds_per_character_with_bounds_in_their_case(glob: str, path: str, verdict: str) -> None:
+    assert glob_verdict(glob, frozenset({path})) == verdict
+
+
+_ATOMS = [
+    "a", "b", "A", "B", "z", "_", ".", "-", "/", "*", "**", "**/", "?",
+    "[ab]", "[!a]", "[^b]", "[a-c]", "[A-C]", "[A-z]", "[B-a]", "[]a]", "[a-]", "[-a]", "[0-9]",
+    "ß", "İ", "K", "k",
+]  # fmt: skip
+_PATH_CHARS = "abzABZ_.-/ 0ßSsİiıKkK"
+
+
+def test_the_automaton_agrees_with_the_regex() -> None:
+    """Both read each glob character through the same one-character regexes
+    (``re``'s per-character case folding), so they agree on every pair."""
+    rng = random.Random(20261119)
+    compared = 0
+    for _ in range(4000):
+        pattern = "".join(rng.choice(_ATOMS) for _ in range(rng.randint(1, 6)))
+        try:
+            fast, slow = _matcher(pattern, True, "regex"), _matcher(pattern, True, "automaton")
+        except re.error:
+            continue
+        for _ in range(60):
+            path = "".join(rng.choice(_PATH_CHARS) for _ in range(rng.randint(0, 14)))
+            assert fast.matches(path) == slow.matches(path), (pattern, path)
+            compared += 1
+    assert compared > 150_000

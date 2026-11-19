@@ -327,12 +327,59 @@ def test_a_bracket_value_that_breaks_alone_names_paths_as_the_cause(tmp_path: Pa
     )
 
 
-@pytest.mark.parametrize("paths", ["123", "\n  nested: map", '""', "[3, 4]"], ids=["number", "map", "blank", "numbers"])
+@pytest.mark.parametrize("paths", ["123", "\n  nested: map", "[3, 4]"], ids=["number", "map", "numbers"])
 def test_paths_with_no_string_glob_left_is_reported(repo: Path, paths: str) -> None:
     put(repo, ".claude/rules/api.md", f"---\npaths: {paths}\n---\n")
     assert lines(repo, DEFAULT) == [
         ".claude/rules/api.md:2: Claude Code finds no glob in 'paths' and loads the rule for every file"
     ]
+
+
+@pytest.mark.parametrize(
+    "paths", ['""', "'  '", '[""]', "[' ', '']"], ids=["blank", "whitespace", "blank-item", "blank-items"]
+)
+def test_an_empty_paths_placeholder_is_reported_only_under_strict(repo: Path, paths: str) -> None:
+    put(repo, ".claude/rules/api.md", f"---\npaths: {paths}\n---\n")
+    assert lines(repo, DEFAULT) == []
+    assert lines(repo, AgentsConfig(strict=True)) == [
+        ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings (strict)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rel", "text"),
+    [
+        (".claude/rules/r.md", '---\npaths: ["docs/[B-a]*.md"]\n---\n'),
+        (".claude/rules/r.md", '---\npaths: ["docs/[Z-a]*.md", "docs/*.md"]\n---\n'),
+        (".claude/rules/r.md", '---\npaths: ["docs/[Z-a]*.md"]\n---\n'),
+        (".claude/rules/r.md", '---\npaths: ["docs/[A-_]*.md"]\n---\n'),
+        (".github/instructions/d.instructions.md", '---\napplyTo: "docs/[B-a]*.md"\n---\n'),
+    ],
+    ids=["rule-b-a", "rule-z-a", "rule-z-a-underscore", "rule-a-underscore", "instructions-b-a"],
+)
+def test_a_range_spanning_cases_is_read_case_insensitively(tmp_path: Path, rel: str, text: str) -> None:
+    put(tmp_path, "docs/x.md", "x\n")
+    put(tmp_path, "docs/_x.md", "x\n")
+    put(tmp_path, rel, text)
+    assert lines(tmp_path, DEFAULT) == []
+
+
+@pytest.mark.parametrize(
+    ("paths", "file"),
+    [('["docs/[A-z]*.md"]', "docs/_index.md"), ('["docs/?stanbul.md"]', "docs/İstanbul.md")],
+)
+def test_case_folding_never_narrows_a_match(tmp_path: Path, paths: str, file: str) -> None:
+    put(tmp_path, file, "x\n")
+    put(tmp_path, ".claude/rules/r.md", f"---\npaths: {paths}\n---\n")
+    assert lines(tmp_path, DEFAULT) == []
+
+
+@pytest.mark.parametrize("paths", ['["src/---/**"]', "[src/---/**, lib/**]"], ids=["quoted", "flow"])
+def test_dashes_inside_paths_name_the_cut_as_the_cause(repo: Path, paths: str) -> None:
+    put(repo, ".claude/rules/api.md", f"---\npaths: {paths}\n---\n")
+    (found,) = lines(repo, DEFAULT)
+    assert found.startswith(".claude/rules/api.md:2: Claude Code ends the frontmatter at the '---' inside 'paths', ")
+    assert found.endswith(", which matches no git-visible file; quote the value or avoid '---' in it")
 
 
 def test_a_mixed_paths_list_is_reported_only_under_strict(repo: Path) -> None:
