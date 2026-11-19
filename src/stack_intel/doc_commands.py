@@ -342,7 +342,16 @@ _NPM_FLAGS = frozenset({"-s", "--silent", "-q", "--quiet", "-d", "-dd", "-ddd", 
 _NPM_PREFIX = frozenset({"--prefix", "-C"})
 # Options that change which package.json runs or whether a missing script
 # fails; npm expands any unambiguous abbreviation of them (`--if-pres`).
-_NPM_RESOLUTION = ("if-present", "prefix", "workspace", "workspaces", "include-workspace-root", "global", "location", "ws")
+_NPM_RESOLUTION = (
+    "if-present",
+    "prefix",
+    "workspace",
+    "workspaces",
+    "include-workspace-root",
+    "global",
+    "location",
+    "ws",
+)
 _PNPM_FLAGS = frozenset({"-s", "--silent", "--stream", "--parallel", "--sequential", "--aggregate-output"})
 
 
