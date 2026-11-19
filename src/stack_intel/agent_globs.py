@@ -15,8 +15,8 @@ tried under the most lenient matching a known reader uses:
 Constructs whose reading is not modelled are ``unmodelled`` and skip the
 check: negation, extglobs, backslash escapes, POSIX classes, brace ranges, a
 comma inside braces or brackets of a comma-split value, and globs past the
-work bound (long patterns, many wildcards), so the regex never backtracks
-for long.
+work bound (longer than 256 characters, more than 64 brace expansions).
+Matching runs an NFA over each path once, so no glob backtracks.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from __future__ import annotations
 import functools
 import re
 from collections.abc import Collection
+from dataclasses import dataclass
 from typing import Literal
 
 Verdict = Literal["matches", "no_match", "unmodelled"]
@@ -33,8 +34,6 @@ _EXTGLOB = re.compile(r"[@!+*?]\(")
 _REPEATED_GLOBSTAR = re.compile(r"(?:\*\*/)+")
 _MAX_EXPANSIONS = 64
 _MAX_LENGTH = 256
-_MAX_GLOBSTARS = 4
-_MAX_STARS_PER_SEGMENT = 4
 
 
 def split_globs(value: str) -> list[str]:
@@ -85,7 +84,6 @@ def glob_groups(value: object) -> list[GlobGroup]:
 
 
 def _unmodelled(glob: str) -> bool:
-    collapsed = _REPEATED_GLOBSTAR.sub("**/", glob)
     return (
         glob.startswith("!")
         or "\\" in glob
@@ -93,8 +91,6 @@ def _unmodelled(glob: str) -> bool:
         or "[[:" in glob
         or any(".." in match.group(1) for match in _BRACES.finditer(glob))
         or len(glob) > _MAX_LENGTH
-        or collapsed.count("**") > _MAX_GLOBSTARS
-        or any(segment.count("*") > _MAX_STARS_PER_SEGMENT for segment in collapsed.split("/") if segment != "**")
     )
 
 
@@ -130,39 +126,145 @@ def _class_end(pattern: str, start: int) -> int | None:
     return None if end < 0 else end
 
 
-def _class_members(body: str) -> str:
-    """Class members escaped for ``re``, keeping ``-`` as the range operator."""
-    return "".join(c if c == "-" else re.escape(c) for c in body)
+_Token = tuple[str, object]
+_State = tuple[int, bool]  # (token index, inside a ``**/`` that has consumed characters)
+_Pending = frozenset[_State]
+
+
+@dataclass(frozen=True)
+class _Class:
+    negate: bool
+    chars: frozenset[str]
+    ranges: tuple[tuple[str, str], ...]
+
+    def contains(self, char: str) -> bool:
+        inside = char in self.chars or any(low <= char <= high for low, high in self.ranges)
+        return char != "/" and inside != self.negate
+
+
+def _class_token(body: str) -> _Token:
+    """A ``[...]`` body as a class token (members lowered); raises
+    ``ValueError`` for a reversed range (``[z-a]``), which the readers'
+    matchers reject."""
+    negate = body[:1] in ("!", "^")
+    members = body[1:] if negate else body
+    chars: set[str] = set()
+    ranges: list[tuple[str, str]] = []
+    i = 0
+    while i < len(members):
+        if i + 2 < len(members) and members[i + 1] == "-":
+            low, high = members[i], members[i + 2]
+            if low > high:
+                raise ValueError(f"reversed range {low}-{high}")
+            ranges.append((low.lower(), high.lower()))
+            i += 3
+        else:
+            chars.update(members[i].lower())
+            i += 1
+    return ("class", _Class(negate, frozenset(chars), tuple(ranges)))
+
+
+class _Matcher:
+    """A glob as an NFA run over the path once, with each set of states'
+    move on a character memoized: linear in the path, never backtracking.
+    Paths are lowered before matching, so it is case-insensitive."""
+
+    def __init__(self, tokens: list[_Token]) -> None:
+        self.tokens = tokens
+        # Two unbounded wildcards backtrack at most quadratically over a path,
+        # so the faster regex engine is safe for them.
+        wildcards = sum(kind in ("star", "gstar", "gslash") for kind, _ in tokens)
+        self.regex = _regex(tokens) if wildcards <= 2 else None
+        self.end: _State = (len(tokens), False)
+        self.moves: dict[tuple[_Pending, str], _Pending] = {}
+        self.start = self._closure({(0, False)})
+
+    def _closure(self, states: set[_State]) -> _Pending:
+        pending = list(states)
+        while pending:
+            index, inside = pending.pop()
+            if not inside and index < len(self.tokens) and self.tokens[index][0] in ("star", "gstar", "gslash"):
+                skipped = (index + 1, False)
+                if skipped not in states:
+                    states.add(skipped)
+                    pending.append(skipped)
+        return frozenset(states)
+
+    def _move(self, states: _Pending, char: str) -> _Pending:
+        out: set[_State] = set()
+        for index, _inside in states:
+            if index == len(self.tokens):
+                continue
+            kind, arg = self.tokens[index]
+            if kind == "gslash":
+                out.add((index, True))
+                if char == "/":
+                    out.add((index + 1, False))
+            elif kind == "gstar" or (kind == "star" and char != "/"):
+                out.add((index, False))
+            elif (
+                (kind == "lit" and char == arg)
+                or (kind == "any" and char != "/")
+                or (isinstance(arg, _Class) and arg.contains(char))
+            ):
+                out.add((index + 1, False))
+        return self._closure(out)
+
+    def matches(self, path: str) -> bool:
+        """``path`` lowered."""
+        if self.regex is not None:
+            return self.regex.fullmatch(path) is not None
+        states = self.start
+        for char in path:
+            key = (states, char)
+            moved = self.moves.get(key)
+            if moved is None:
+                moved = self.moves[key] = self._move(states, char)
+            if not moved:
+                return False
+            states = moved
+        return self.end in states
+
+
+def _regex(tokens: list[_Token]) -> re.Pattern[str]:
+    out: list[str] = []
+    for kind, arg in tokens:
+        if isinstance(arg, _Class):
+            members = "".join(re.escape(c) for c in sorted(arg.chars))
+            members += "".join(f"{re.escape(low)}-{re.escape(high)}" for low, high in arg.ranges)
+            out.append(f"[^{members}/]" if arg.negate else f"(?!/)[{members}]")
+        elif isinstance(arg, str):
+            out.append(re.escape(arg))
+        else:
+            out.append({"any": "[^/]", "star": "[^/]*", "gstar": ".*", "gslash": "(?:.*/)?"}[kind])
+    return re.compile("".join(out), re.DOTALL)
 
 
 @functools.lru_cache(maxsize=4096)
-def _regex(pattern: str, classes: bool) -> re.Pattern[str]:
-    """Raises ``re.error`` for a class ``re`` cannot compile (``[z-a]``)."""
-    out: list[str] = []
+def _matcher(pattern: str, classes: bool) -> _Matcher:
+    """Raises ``ValueError`` for a class that cannot compile (``[z-a]``)."""
+    tokens: list[_Token] = []
     i = 0
     while i < len(pattern):
         if pattern.startswith("**/", i):
-            out.append("(?:.*/)?")
+            tokens.append(("gslash", None))
             i += 3
         elif pattern.startswith("**", i):
-            out.append(".*")
+            tokens.append(("gstar", None))
             i += 2
         elif pattern[i] == "*":
-            out.append("[^/]*")
+            tokens.append(("star", None))
             i += 1
         elif pattern[i] == "?":
-            out.append("[^/]")
+            tokens.append(("any", None))
             i += 1
         elif pattern[i] == "[" and classes and (end := _class_end(pattern, i)) is not None:
-            body = pattern[i + 1 : end]
-            negate = body[:1] in ("!", "^")
-            members = _class_members(body[1:] if negate else body)
-            out.append(f"[^{members}/]" if negate else f"[{members}]")
+            tokens.append(_class_token(pattern[i + 1 : end]))
             i = end + 1
         else:
-            out.append(re.escape(pattern[i]))
+            tokens.extend(("lit", char) for char in pattern[i].lower())
             i += 1
-    return re.compile("".join(out), re.IGNORECASE)
+    return _Matcher(tokens)
 
 
 def _readings(alternative: str) -> list[str]:
@@ -190,14 +292,15 @@ def glob_verdict(glob: str, paths: Collection[str]) -> Verdict:
     expanded = _expand_braces(glob)
     if expanded is None:
         return "unmodelled"
-    regexes: list[re.Pattern[str]] = []
+    matchers: list[_Matcher] = []
     for form in dict.fromkeys(reading for alternative in expanded for reading in _readings(alternative)):
         for classes in (True, False):
             try:
-                regexes.append(_regex(form, classes))
-            except re.error:
+                matchers.append(_matcher(form, classes))
+            except ValueError:
                 continue
-    return "matches" if any(regex.fullmatch(rel) for rel in paths for regex in regexes) else "no_match"
+    lowered = [rel.lower() for rel in paths]
+    return "matches" if any(matcher.matches(rel) for matcher in matchers for rel in lowered) else "no_match"
 
 
 _GLOB_CHARS = re.compile(r"[*?\[{\\!]")

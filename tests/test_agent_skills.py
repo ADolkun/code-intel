@@ -213,26 +213,31 @@ def test_the_agent_skills_rules_are_not_default_findings_for_the_conventional_ro
     assert lines(tmp_path) == []
 
 
-@pytest.mark.parametrize(
-    ("root", "agents", "reader"),
-    [
-        (".agents/skills", DEFAULT, "VS Code skips the skill"),
-        (".github/skills", DEFAULT, "VS Code skips the skill"),
-        (
-            "skills",
-            AgentsConfig(skill_dirs=("skills",)),
-            "the Agent Skills reader cannot read its name and description",
-        ),
-    ],
-)
-def test_frontmatter_that_does_not_parse_is_reported_for_every_root(
-    tmp_path: Path, root: str, agents: AgentsConfig, reader: str
-) -> None:
-    write(tmp_path / root / "deploy" / "SKILL.md", BROKEN)
-    assert lines(tmp_path, agents) == [
-        f"{root}/deploy/SKILL.md:5: invalid YAML frontmatter: expected alphabetic or numeric character, "
-        f"but found '*'; {reader}"
+def test_frontmatter_that_does_not_parse_is_reported_for_a_configured_root(tmp_path: Path) -> None:
+    write(tmp_path / "skills/deploy/SKILL.md", BROKEN)
+    assert lines(tmp_path, AgentsConfig(skill_dirs=("skills",))) == [
+        "skills/deploy/SKILL.md:5: invalid YAML frontmatter: expected alphabetic or numeric character, "
+        "but found '*'; the Agent Skills reader cannot read its name and description"
     ]
+
+
+@pytest.mark.parametrize(
+    ("rel", "text"),
+    [
+        (".github/skills/fmt/SKILL.md", "---\nname: fmt\ndescription: 'it''s unclosed\n---\n"),
+        (".agents/skills/lint/SKILL.md", "---\nname: lint\ndescription: x\nmetadata:\n  a: 1\n b: 2\n---\n"),
+        (".github/skills/deploy/SKILL.md", BROKEN),
+        (".agents/skills/deploy/SKILL.md", "---\nname: deploy\ndescription: x\n"),
+    ],
+    ids=["unclosed-quote", "mis-indented-map", "block-item", "unclosed-header"],
+)
+def test_vscode_loads_a_skill_whose_frontmatter_does_not_parse(tmp_path: Path, rel: str, text: str) -> None:
+    write(tmp_path / rel, text)
+    assert lines(tmp_path) == []
+    (found,) = lines(tmp_path, STRICT)
+    assert found.startswith(f"{rel}:")
+    assert found.endswith(" (strict)")
+    assert "VS Code" not in found
 
 
 @pytest.mark.parametrize("root", [".agents/skills", ".github/skills"])

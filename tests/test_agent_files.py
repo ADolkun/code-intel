@@ -213,10 +213,7 @@ def test_a_broken_rule_is_reported_by_default(repo: Path, text: str, expected: s
         "---\npaths:\n---\n",
         "---\npaths: []\n---\n",
         "---\n- a\n---\n",
-        '---\npaths: ""\n---\n',
         '---\npaths:\n  - "src/api/**"\n  - " "\n---\n',
-        "---\npaths:\n  - 3\n---\n",
-        "---\npaths: {a: b}\n---\n",
         '---\npaths:\n  - "src/renamed/**"\npaths:\n  - "src/api/**"\n---\n',
         '---\npaths: "src/api/**, src/ui/**"\n---\n',
         '---\napplyTo: "src/**"\npaths:\n  - "src/api/**"\n---\n',
@@ -231,6 +228,9 @@ def test_a_broken_rule_is_reported_by_default(repo: Path, text: str, expected: s
         '---\npaths: ["src/**/*.py, lib/**/*.ts"]\n---\n',
         '---\npaths: ["src/ui/*.{ tsx, ts }"]\n---\n',
         '---\npaths: [["src/**"], 3]\n---\n',
+        '---\npaths: ["src/api/**", 3]\n---\n',
+        "---\n\n# API\n\nRules for the handlers.\n",
+        '---\npaths: ["src/api/**"]\ndescription: Backend --- API layer\n---\n',
         '---\npaths: ["**/*.PY", "SRC/API/HANDLER.PY"]\n---\n',
         '---\npaths: ["src/**"]\n-----\n',
     ],
@@ -241,10 +241,7 @@ def test_a_broken_rule_is_reported_by_default(repo: Path, text: str, expected: s
         "null-paths",
         "empty-list",
         "not-a-mapping",
-        "blank-string",
         "blank-item",
-        "non-string-item",
-        "mapping",
         "repeated-key-last-wins",
         "comma-string",
         "apply-to-beside-paths",
@@ -259,6 +256,9 @@ def test_a_broken_rule_is_reported_by_default(repo: Path, text: str, expected: s
         "comma-in-an-item",
         "spaced-brace-options",
         "nested-list-and-number",
+        "mixed-list-keeps-a-string",
+        "horizontal-rule-unclosed",
+        "dashes-after-paths",
         "case-insensitive",
         "five-dash-close",
     ],
@@ -286,9 +286,91 @@ def test_a_rule_glob_matching_under_a_lenient_reading_is_not_reported(tmp_path: 
     assert lines(tmp_path, DEFAULT) == []
 
 
-def test_a_flow_list_the_retry_quotes_is_one_glob_matching_nothing(repo: Path) -> None:
-    put(repo, ".claude/rules/api.md", '---\ndescription: API rules: keep handlers thin\npaths: ["src/api/**"]\n---\n')
-    assert lines(repo, DEFAULT) == [".claude/rules/api.md:3: paths glob '[\"src/api/**\"]' matches no git-visible file"]
+@pytest.mark.parametrize(
+    "paths",
+    ['"src/**"', "'src/**/*.ts'", '["src/api/**"]', "['src/**', 'src/api/**']"],
+    ids=["double-quoted", "single-quoted", "flow-list", "single-quoted-flow-list"],
+)
+def test_the_retry_leaves_quoted_values_and_valid_lists_alone(tmp_path: Path, paths: str) -> None:
+    put(tmp_path, "src/api/a.ts", "x\n")
+    put(tmp_path, ".claude/rules/api.md", f"---\ndescription: API rules: keep handlers thin\npaths: {paths}\n---\n")
+    assert lines(tmp_path, DEFAULT) == []
+
+
+def test_a_bracket_value_the_retry_quotes_is_reported_when_no_piece_matches(tmp_path: Path) -> None:
+    put(tmp_path, "src/api/a.ts", "x\n")
+    put(
+        tmp_path,
+        ".claude/rules/api.md",
+        "---\ndescription: API rules: keep handlers thin\npaths: [src/api/**, {lib]\n---\n",
+    )
+    assert lines(tmp_path, DEFAULT) == [
+        ".claude/rules/api.md:3: Claude Code reads 'paths' as the single string '[src/api/**, {lib]', which "
+        "matches no git-visible file: the unquoted ': ' in 'description' (line 2) makes the frontmatter invalid "
+        "YAML, and Claude Code's recovery then quotes 'paths' as text. Quote the description "
+        "(\"API rules: keep handlers thin\") and write 'paths' as a valid list."
+    ]
+
+
+def test_a_bracket_value_the_retry_quotes_is_not_reported_when_a_piece_matches(tmp_path: Path) -> None:
+    put(tmp_path, "src/api/a.ts", "x\n")
+    put(tmp_path, ".claude/rules/api.md", "---\ndescription: a: b\npaths: [x, src/api/**, {lib]\n---\n")
+    assert lines(tmp_path, DEFAULT) == []
+
+
+def test_a_bracket_value_that_breaks_alone_names_paths_as_the_cause(tmp_path: Path) -> None:
+    put(tmp_path, "src/a.ts", "x\n")
+    put(tmp_path, ".claude/rules/api.md", "---\npaths: [lib/**, {x]\n---\n")
+    (found,) = lines(tmp_path, DEFAULT)
+    assert found.endswith(
+        "'paths' is not a valid YAML list, so Claude Code's recovery quotes it as text. Write 'paths' as a valid list."
+    )
+
+
+@pytest.mark.parametrize("paths", ["123", "\n  nested: map", '""', "[3, 4]"], ids=["number", "map", "blank", "numbers"])
+def test_paths_with_no_string_glob_left_is_reported(repo: Path, paths: str) -> None:
+    put(repo, ".claude/rules/api.md", f"---\npaths: {paths}\n---\n")
+    assert lines(repo, DEFAULT) == [
+        ".claude/rules/api.md:2: Claude Code finds no glob in 'paths' and loads the rule for every file"
+    ]
+
+
+def test_a_mixed_paths_list_is_reported_only_under_strict(repo: Path) -> None:
+    put(repo, ".claude/rules/api.md", '---\npaths: ["src/api/**", 3]\n---\n')
+    assert lines(repo, DEFAULT) == []
+    assert lines(repo, AgentsConfig(strict=True)) == [
+        ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings (strict)"
+    ]
+
+
+def test_dashes_inside_a_value_before_paths_are_reported(repo: Path) -> None:
+    put(repo, ".claude/rules/api.md", '---\ndescription: Backend --- API layer\npaths: ["src/api/**"]\n---\n')
+    assert lines(repo, DEFAULT) == [
+        ".claude/rules/api.md:2: Claude Code ends the frontmatter at the '---' inside 'description', drops "
+        "'paths' after it and loads the rule for every file; quote the value or avoid '---' in it"
+    ]
+
+
+def test_frontmatter_the_library_cannot_load_during_the_retry_is_unknown(repo: Path) -> None:
+    put(repo, ".claude/rules/api.md", f'---\ndescription: a: b\npaths: ["src/**"]\nn: {"9" * 5001}\n---\n')
+    assert lines(repo, DEFAULT) == []
+    (found,) = lines(repo, AgentsConfig(strict=True))
+    assert found.startswith(".claude/rules/api.md:1: frontmatter could not be checked (ValueError")
+
+
+def test_a_subagent_the_library_cannot_load_is_reported_under_strict(tmp_path: Path) -> None:
+    put(tmp_path, ".claude/agents/r.md", "---\nname: r\ndescription: x\nx: !!float abc\n---\n")
+    assert lines(tmp_path, DEFAULT) == []
+    (found,) = lines(tmp_path, AgentsConfig(strict=True))
+    assert found.startswith(".claude/agents/r.md:1: frontmatter could not be checked (")
+
+
+def test_frontmatter_that_is_not_a_mapping_is_reported_under_strict(repo: Path) -> None:
+    put(repo, ".claude/rules/api.md", "---\n- a\n---\n")
+    assert lines(repo, DEFAULT) == []
+    assert ".claude/rules/api.md:2: YAML frontmatter is not a mapping of keys (strict)" in lines(
+        repo, AgentsConfig(strict=True)
+    )
 
 
 def test_a_comma_in_a_list_item_is_reported_only_when_no_piece_matches(tmp_path: Path) -> None:
@@ -655,7 +737,7 @@ def test_a_missing_map_file_is_reported(repo: Path) -> None:
 def test_a_rule_with_unreadable_paths_is_reported_once_not_also_as_a_map_mismatch(repo: Path) -> None:
     put(repo, ".claude/rules/api.md", "---\npaths: 3\n---\n")
     assert lines(repo) == [
-        ".claude/rules/api.md:2: frontmatter 'paths' must be a non-blank string or a list of non-blank strings (strict)"
+        ".claude/rules/api.md:2: Claude Code finds no glob in 'paths' and loads the rule for every file"
     ]
 
 

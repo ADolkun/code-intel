@@ -7,11 +7,12 @@ A ``SKILL.md`` deeper down (a template under ``references/``) is not a skill.
   else the directory) of ``anthropic-skills`` or ``anthropic-skills:*``, or
   one with a ``<``, control, zero-width, bidi or private-use character, which
   Claude Code does not load.
-- ``.agents/skills`` and ``.github/skills`` (VS Code): only frontmatter that
-  does not parse, which makes VS Code skip the skill. VS Code loads a skill
-  with a missing, mismatched or upper-case name under its folder name and
-  cuts long names and descriptions, so the Agent Skills rules are not
-  default findings there.
+- ``.agents/skills`` and ``.github/skills`` (VS Code): nothing by default.
+  VS Code 1.147.0 (``promptFileParser.ts``) collects YAML errors instead of
+  failing, reads an unclosed header to the end of the file, and loads a skill
+  with a missing, mismatched or upper-case name under its folder name, so
+  neither a parse failure nor the Agent Skills rules are default findings
+  there.
 - The Agent Skills rules apply to configured ``skill_dirs`` and, under
   ``strict``, to every root: frontmatter present; ``name`` 1-64 lowercase
   letters, digits and single inner hyphens, equal to the directory;
@@ -166,14 +167,15 @@ def check_root(
         directory = posixpath.basename(posixpath.dirname(rel))
         read = parse_frontmatter(text, claude=claude, retry=True)
         if read.error is not None:
-            reader = (
-                "Claude Code loads the skill without it"
-                if claude
-                else "the Agent Skills reader cannot read its name and description"
-                if root not in SPEC_ROOTS
-                else "VS Code skips the skill"
-            )
-            findings.append(finding(rel, read.error.line, "frontmatter", f"{read.error.message}; {reader}"))
+            if claude:
+                message = f"{read.error.message}; Claude Code loads the skill without it"
+            elif root not in SPEC_ROOTS:
+                message = f"{read.error.message}; the Agent Skills reader cannot read its name and description"
+            else:
+                # VS Code collects YAML errors and loads the skill under its folder name.
+                message = f"{read.error.message} (strict)"
+            if root not in SPEC_ROOTS or strict:
+                findings.append(finding(rel, read.error.line, "frontmatter", message))
         meta = read.meta
         if strict:
             findings.extend(strict_parse_findings(rel, read))

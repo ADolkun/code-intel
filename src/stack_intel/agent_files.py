@@ -9,9 +9,11 @@ finding. Frontmatter is read as each reader reads it (``agent_frontmatter``):
 
 - ``.claude/rules/**/*.md`` (Claude Code; Copilot CLI), through a symlinked
   ``.claude/rules`` inside the repository: frontmatter Claude Code cannot
-  read even after its retry, which makes it load the rule for every file;
-  a ``paths`` glob that matches no git-visible file under any reading
-  (``agent_globs``).
+  read even after its retry, a ``---`` inside a value that ends its
+  frontmatter before ``paths``, or a ``paths`` with no string glob left, each
+  of which makes it load the rule for every file; a ``paths`` glob that
+  matches no git-visible file under any reading (``agent_globs``), including
+  a ``[...]`` value the retry turned into one string.
 - ``.claude/agents/**/*.md`` (Claude Code; Copilot CLI): with a ``name``,
   frontmatter that Claude Code can read, a non-blank ``description``, a name
   of at most 256 characters, not starting with ``-``, without ``:``, unique
@@ -47,20 +49,28 @@ from __future__ import annotations
 import functools
 import posixpath
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from stack_intel import agent_imports, agent_json, agent_skills
 from stack_intel.agent_frontmatter import (
     Frontmatter,
+    FrontmatterRead,
     finding,
     is_blank,
     parse_frontmatter,
     read_text,
     strict_parse_findings,
 )
-from stack_intel.agent_globs import GlobGroup, glob_groups, glob_verdict, literal_directory, sample_paths
+from stack_intel.agent_globs import (
+    GlobGroup,
+    glob_groups,
+    glob_verdict,
+    literal_directory,
+    sample_paths,
+    split_globs,
+)
 from stack_intel.config import AgentsConfig, InstructionMap
 from stack_intel.doc_report import Finding
 from stack_intel.markdown_facts import doc_facts_from_text
@@ -142,16 +152,19 @@ def _is_glob_value(value: object) -> bool:
     return not is_blank(value)
 
 
+def _any_piece_may_match(pieces: Iterable[tuple[str, bool]], checkout: _Checkout) -> bool:
+    return any(
+        unmodelled or glob_verdict(glob, checkout.paths) != "no_match" or checkout.unproven(glob)
+        for glob, unmodelled in pieces
+    )
+
+
 def _check_globs(
     rel: str, key: str, globs: list[tuple[GlobGroup, int]], checkout: _Checkout, findings: list[Finding]
 ) -> None:
     for (text, pieces), line in globs:
-        if any(
-            unmodelled or glob_verdict(glob, checkout.paths) != "no_match" or checkout.unproven(glob)
-            for glob, unmodelled in pieces
-        ):
-            continue
-        findings.append(finding(rel, line, text, f"{key} glob {text!r} matches no git-visible file"))
+        if not _any_piece_may_match(pieces, checkout):
+            findings.append(finding(rel, line, text, f"{key} glob {text!r} matches no git-visible file"))
 
 
 # ── .claude/rules ────────────────────────────────────────────────────────
@@ -177,22 +190,81 @@ def _check_rule(
     meta = read.meta
     if meta is None:
         return None
+    if _paths_cut_off(rel, read, meta, text, findings):
+        return None
     if strict:
         findings.extend(meta.repeat_findings(rel))
         if "applyTo" in meta.keys:
             message = "frontmatter key 'applyTo' is not allowed; use 'paths' (strict)"
             findings.append(finding(rel, meta.line("applyTo"), "applyTo", message))
-        value = meta.data.get("paths")
+    value = meta.data.get("paths")
+    if "paths" in read.as_text and isinstance(value, str):
+        return _check_paths_as_text(rel, read, meta, value, checkout, findings)
+    globs = _glob_items(meta, "paths")
+    if value is not None and value != [] and not globs:
+        message = "Claude Code finds no glob in 'paths' and loads the rule for every file"
+        findings.append(finding(rel, meta.line("paths"), "paths", message))
+        return None
+    if strict:
         if value is not None and value != [] and not _is_glob_value(value):
             message = "frontmatter 'paths' must be a non-blank string or a list of non-blank strings (strict)"
             findings.append(finding(rel, meta.line("paths"), "paths", message))
             return None
-    globs = _glob_items(meta, "paths")
-    if strict and not globs:
-        findings.append(finding(rel, meta.line("paths"), "paths", "frontmatter 'paths' must name a glob (strict)"))
-        return None
+        if not globs:
+            findings.append(finding(rel, meta.line("paths"), "paths", "frontmatter 'paths' must name a glob (strict)"))
+            return None
     _check_globs(rel, "paths", globs, checkout, findings)
     return tuple(glob for (_, pieces), _ in globs for glob, _ in pieces)
+
+
+def _paths_cut_off(rel: str, read: FrontmatterRead, meta: Frontmatter, text: str, findings: list[Finding]) -> bool:
+    """A ``---`` inside a value ends Claude Code's frontmatter there; report
+    it when that drops a ``paths`` the full frontmatter has."""
+    if read.cut is None or "paths" in meta.keys:
+        return False
+    full = parse_frontmatter(text, claude=False, retry=True).meta
+    if full is None or "paths" not in full.keys:
+        return False
+    line, key = read.cut
+    where = f"inside {key!r}" if key else "inside a value"
+    message = (
+        f"Claude Code ends the frontmatter at the '---' {where}, drops 'paths' after it and loads the rule "
+        "for every file; quote the value or avoid '---' in it"
+    )
+    findings.append(finding(rel, line, key or "frontmatter", message))
+    return True
+
+
+def _check_paths_as_text(
+    rel: str,
+    read: FrontmatterRead,
+    meta: Frontmatter,
+    value: str,
+    checkout: _Checkout,
+    findings: list[Finding],
+) -> tuple[str, ...] | None:
+    """``paths: [...]`` that is not a list on its own, which Claude Code's
+    retry quoted into one string: reported only when no piece of it matches."""
+    pieces = {glob: False for glob in split_globs(value)} | {
+        piece.strip(): False for piece in value.split(",") if piece.strip()
+    }
+    if _any_piece_may_match(list(pieces.items()), checkout):
+        return tuple(split_globs(value))
+    culprit = read.culprit
+    if culprit is not None and culprit.key != "paths":
+        cause = (
+            f"the unquoted {culprit.reason} in {culprit.key!r} (line {culprit.line}) makes the frontmatter "
+            "invalid YAML, and Claude Code's recovery then quotes 'paths' as text. "
+            f"Quote the {culprit.key} (\"{culprit.value}\") and write 'paths' as a valid list."
+        )
+    else:
+        cause = (
+            "'paths' is not a valid YAML list, so Claude Code's recovery quotes it as text. "
+            "Write 'paths' as a valid list."
+        )
+    message = f"Claude Code reads 'paths' as the single string {value!r}, which matches no git-visible file: {cause}"
+    findings.append(finding(rel, meta.line("paths"), "paths", message))
+    return None
 
 
 # ── .claude/agents ───────────────────────────────────────────────────────
@@ -208,10 +280,11 @@ def _check_subagent(rel: str, text: str, first_by_name: dict[str, str], strict: 
         return
     meta = read.meta
     name = None if meta is None else meta.data.get("name")
+    if strict and (read.has_name or isinstance(name, str)):
+        findings.extend(strict_parse_findings(rel, read))
     if meta is None or not isinstance(name, str):
         return
     if strict:
-        findings.extend(strict_parse_findings(rel, read))
         findings.extend(meta.repeat_findings(rel))
     line = meta.line("name")
     loads = True

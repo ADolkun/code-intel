@@ -98,12 +98,36 @@ def test_unmodelled_constructs_skip_the_existence_check(glob: str) -> None:
     assert glob_verdict(glob, PATHS) == "unmodelled"
 
 
+def test_globs_past_the_expansion_bound_are_unmodelled() -> None:
+    assert glob_verdict("x/" + "{a,b,c,d}" * 4, PATHS) == "unmodelled"
+
+
 @pytest.mark.parametrize(
-    "glob",
-    ["a/**/b/**/c/**/d/**/e/**/zz", "*a*b*c*d*e*/zz", "x/" + "{a,b,c,d}" * 4],
+    ("glob", "path"),
+    [
+        ("*a*a*a*a/*a*a*a*b", "a" * 40 + "/" + "a" * 40),
+        ("*a*a*a*a/*a*a*a*a/*a*a*a*a/*a*a*a*b", "/".join(["a" * 40] * 4)),
+        ("a/**/b/**/c/**/d/**/e/**/zz", "a/" + "b/c/d/e/" * 10 + "z"),
+    ],
+    ids=["two-segments", "four-segments", "many-globstars"],
 )
-def test_globs_past_the_work_bound_are_unmodelled(glob: str) -> None:
-    assert glob_verdict(glob, PATHS) == "unmodelled"
+def test_wildcards_never_backtrack(glob: str, path: str) -> None:
+    started = time.perf_counter()
+    assert glob_verdict(glob, frozenset({path})) == "no_match"
+    assert time.perf_counter() - started < 1
+
+
+@pytest.mark.parametrize(
+    ("glob", "path"),
+    [
+        ("*a*b*c*d*e*/zz", "xaybzcwdveu/zz"),
+        ("a/**/b/**/c/**/d/**/e/**/zz", "a/1/b/c/2/d/e/zz"),
+        ("src/**/x/**/*.ts", "src/a/x/b/c.ts"),
+        ("src/*.ts", "SRC/A.TS"),
+    ],
+)
+def test_many_wildcards_still_match(glob: str, path: str) -> None:
+    assert glob_verdict(glob, frozenset({path})) == "matches"
 
 
 def test_repeated_globstars_collapse_and_stay_fast() -> None:
