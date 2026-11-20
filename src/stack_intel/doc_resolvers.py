@@ -536,9 +536,14 @@ class PathResolver:
         if is_placeholder_path(path):
             return draft.set("skipped", "placeholder", checked=False)
         if cwd is not None:
-            bases = self._cd_dirs(doc, cwd)
-            if not bases:
+            dirs = self._cd_dirs(doc, cwd)
+            if not dirs:
                 return draft.set("not_checked", "runs after a cd the docs check cannot follow", checked=False)
+            bases = self._anchored(dirs, path)
+            if not bases:
+                return draft.set(
+                    "skipped", "its first directory is not in the directory the command runs in", checked=False
+                )
             cls = "cd-rel"
         if cls == "unknown":
             return draft.set("skipped", "its first directory is not in the repository", checked=False)
@@ -598,7 +603,11 @@ class PathResolver:
         if not tries:
             return draft.set("not_checked", "points outside the repository", checked=False)
         if cls == "shell-rel":
-            tries = self._anchored(bases, expansion)
+            tries = [
+                full
+                for base in self._anchored(bases, expansion)
+                if (full := _repo_path(posixpath.join(base, expansion))) is not None
+            ]
             if not tries:
                 return draft.set(
                     "not_checked", "may point outside the repository from where the command runs", checked=False
@@ -620,19 +629,15 @@ class PathResolver:
         return mark_missing(self.ctx, draft, tries, where, example_of=path)
 
     def _anchored(self, bases: Sequence[str], path: str) -> list[str]:
-        """The paths a command's ``../x/…`` reaches from ``bases`` where ``x``
-        is a directory there. Otherwise the command may as well run from a
-        directory whose parent holds ``x`` outside the repository: a sibling
-        checkout (``uv pip install -e ../sibling``)."""
+        """The ``bases`` under which the first directory ``path`` names (after
+        its leading ``..``) is there. Under another base a command's path may
+        name output it writes (``> out/data.json``), or a sibling checkout
+        outside the repository (``uv pip install -e ../sibling``)."""
         parts = path.split("/")
         ups = next((i for i, part in enumerate(parts) if part != ".."), len(parts))
         anchor = "/".join(parts[: ups + 1])
-        out: list[str] = []
-        for base in bases:
-            full = _repo_path(posixpath.join(base, path))
-            if full is not None and _repo_path(posixpath.join(base, anchor)) in self.ctx.repo.dirs:
-                out.append(full)
-        return out
+        dirs = self.ctx.repo.dirs
+        return [base for base in bases if _repo_path(posixpath.join(base, anchor)) in dirs]
 
     def _first_match(self, pattern: str) -> str | None:
         """The first git-visible path, in sorted order, that glob ``pattern``

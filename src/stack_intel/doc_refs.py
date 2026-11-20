@@ -463,9 +463,24 @@ class _Run:
                 if found.top is not None:
                     tops[rel] = found.top
             self._words = CodeWords(frozenset(words), frozenset(dotted))
-            backend = [root.prefix for root in self.config.path_roots if root.name == "backend-rel"]
-            self._modules = module_bindings(tops, (*IMPORT_ROOTS, *backend))
+            self._modules = module_bindings(tops, self._import_roots())
         return self._words
+
+    def _import_roots(self) -> tuple[str, ...]:
+        """Where an absolute import may resolve from: ``IMPORT_ROOTS``, the
+        backend root, and each directory holding a tracked ``pyproject.toml``
+        or ``setup.py`` with its ``src/`` (a monorepo's packages)."""
+        backend = [root.prefix for root in self.config.path_roots if root.name == "backend-rel"]
+        projects = sorted(
+            posixpath.dirname(rel)
+            for rel in self.repo.tracked
+            if posixpath.basename(rel) in ("pyproject.toml", "setup.py")
+        )
+        return (
+            *IMPORT_ROOTS,
+            *backend,
+            *(root for project in projects for root in (project, posixpath.join(project, "src"))),
+        )
 
     def modules(self) -> ModuleBindings:
         """The top-level names of the Python `code_files`, read with the words."""

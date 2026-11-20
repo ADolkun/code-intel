@@ -2645,18 +2645,80 @@ def test_a_path_after_a_cd_is_read_from_the_cd_directory(tmp_path: Path, monkeyp
         (11, "shared/other.py", "not_checked", "shared/other.py", unfollowed),
         # A subshell's `cd` ends with it.
         (13, "shared/other.py", "ok", "shared/other.py", None),
+        # No `shared/` under `services/api/`: it may be output the command writes.
         (
             16,
             "shared/other.py",
-            "missing",
-            "services/api/shared/other.py",
-            "services/api/shared/other.py does not exist",
+            "skipped",
+            "shared/other.py",
+            "its first directory is not in the directory the command runs in",
         ),
     ]
     # The `cd` directory is also taken from the doc's directory.
     assert [(r.text, r.status, r.target) for r in refs(report, "services/README.md", "path")] == [
         ("../shared/types.py", "ok", "services/shared/types.py")
     ]
+
+
+def test_output_a_command_writes_after_a_cd_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = {
+        "app/main.py": "x = 1\n",
+        "web/src/a.ts": "export const a = 1;\n",
+        "backend/.env.example": "X=1\n",
+        "services/api/src/main.py": "x = 1\n",
+        "services/shared/types.py": "x = 1\n",
+        "docs/guide.md": (
+            "`cd app && python main.py > out/data.json`\n\n"
+            "`cd app && python main.py --output results/run.csv`\n\n"
+            "`cd web && npx tsc --outFile build/app.js`\n\n"
+            "`cd backend && cp .env.example config/local.env`\n\n"
+            "`cd services/api && cat src/gone.py`\n\n"
+            "`cd web && cat src/missing.ts`\n\n"
+            "`cd services/api && cat ../shared/types.py`\n"
+        ),
+    }
+    report = _checkout_report(tmp_path, monkeypatch, files)
+    outside = "its first directory is not in the directory the command runs in"
+    got = [(r.text, r.status, r.detail) for r in refs(report, "docs/guide.md", "path")]
+    assert [row for row in got if row[0] not in ("services/api",)] == [
+        ("out/data.json", "skipped", outside),
+        ("results/run.csv", "skipped", outside),
+        ("build/app.js", "skipped", outside),
+        ("config/local.env", "skipped", outside),
+        ("src/gone.py", "missing", "services/api/src/gone.py does not exist"),
+        ("src/missing.ts", "missing", "web/src/missing.ts does not exist"),
+        ("../shared/types.py", "ok", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("files", "status"),
+    [
+        ({"packages/foo/pyproject.toml": "[project]\nname = 'foo'\n"}, "ok"),
+        ({"packages/foo/setup.py": "x = 1\n"}, "ok"),
+        # Two import roots hold `foo.core`: which one the import reaches is unknown.
+        (
+            {
+                "packages/foo/pyproject.toml": "[project]\nname = 'foo'\n",
+                "packages/bar/pyproject.toml": "[project]\nname = 'bar'\n",
+                "packages/bar/src/foo/core.py": "class Other:\n    pass\n",
+            },
+            "unresolved",
+        ),
+        ({}, "unresolved"),
+    ],
+    ids=["pyproject", "setup-py", "two-roots", "no-project"],
+)
+def test_a_python_project_directory_and_its_src_are_import_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: dict[str, str], status: str
+) -> None:
+    package = {
+        "packages/foo/src/foo/__init__.py": "from foo.core import *\n",
+        "packages/foo/src/foo/core.py": "class Core:\n    pass\n",
+        "docs/guide.md": "`foo.Core`\n",
+    }
+    report = _checkout_report(tmp_path, monkeypatch, {**package, **files})
+    assert [(r.text, r.status) for r in refs(report, "docs/guide.md", "symbol")] == [("foo.Core", status)]
 
 
 _STAR_FILES = {
