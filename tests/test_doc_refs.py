@@ -2616,6 +2616,49 @@ def test_a_path_leaving_the_repository_is_not_checked(tmp_path: Path, monkeypatc
     ]
 
 
+def test_a_path_after_a_cd_is_read_from_the_cd_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = {
+        "services/api/main.py": "x = 1\n",
+        "services/shared/types.py": "x = 1\n",
+        "shared/other.py": "x = 1\n",
+        "docs/guide.md": (
+            "`cd services/api && cat ../shared/types.py`\n\n"
+            "`cd services/api && cat ../shared/gone.py`\n\n"
+            "`cd services && cat api/main.py`\n\n"
+            "`cd $APP && cat ../shared/types.py`\n\n"
+            "`cd nowhere && cat shared/other.py`\n\n"
+            "`cd .. && cat shared/other.py`\n\n"
+            "`(cd services/api && make) && cat shared/other.py`\n\n"
+            "```bash\ncd services/api && cat shared/other.py\n```\n"
+        ),
+        "services/README.md": "`cd api && cat ../shared/types.py`\n",
+    }
+    report = _checkout_report(tmp_path, monkeypatch, files)
+    unfollowed = "runs after a cd the docs check cannot follow"
+    got = [(r.line, r.text, r.status, r.target, r.detail) for r in refs(report, "docs/guide.md", "path")]
+    assert [row for row in got if row[1] not in ("services/api", "services")] == [
+        (1, "../shared/types.py", "ok", "services/shared/types.py", None),
+        (3, "../shared/gone.py", "missing", "services/shared/gone.py", "services/shared/gone.py does not exist"),
+        (5, "api/main.py", "ok", "services/api/main.py", None),
+        (7, "../shared/types.py", "not_checked", "../shared/types.py", unfollowed),
+        (9, "shared/other.py", "not_checked", "shared/other.py", unfollowed),
+        (11, "shared/other.py", "not_checked", "shared/other.py", unfollowed),
+        # A subshell's `cd` ends with it.
+        (13, "shared/other.py", "ok", "shared/other.py", None),
+        (
+            16,
+            "shared/other.py",
+            "missing",
+            "services/api/shared/other.py",
+            "services/api/shared/other.py does not exist",
+        ),
+    ]
+    # The `cd` directory is also taken from the doc's directory.
+    assert [(r.text, r.status, r.target) for r in refs(report, "services/README.md", "path")] == [
+        ("../shared/types.py", "ok", "services/shared/types.py")
+    ]
+
+
 _STAR_FILES = {
     "pkg/__init__.py": "from .models import *\n",
     "pkg/models.py": "class UserModel:\n    pass\n",

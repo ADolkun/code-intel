@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import textwrap
+import time
 
 import pytest
 
 from stack_intel.code_words import (
     BUILTIN_WORDS,
+    IMPORT_ROOTS,
     BoundModule,
     TopLevel,
     bound_by_module,
@@ -272,13 +274,15 @@ def test_top_level_records_all_star_imports_and_module_getattr(source: str, expe
     assert (words.top, problems) == (expected, [])
 
 
-def _modules(files: dict[str, str]) -> dict[tuple[str, ...], tuple[BoundModule, ...]]:
+def _modules(
+    files: dict[str, str], roots: tuple[str, ...] = IMPORT_ROOTS
+) -> dict[tuple[str, ...], tuple[BoundModule, ...]]:
     tops = {}
     for rel, source in files.items():
         words, _ = python_words(rel, textwrap.dedent(source))
         assert words.top is not None
         tops[rel] = words.top
-    return dict(module_bindings(tops))
+    return dict(module_bindings(tops, roots))
 
 
 def test_star_imports_are_followed_to_the_tracked_module() -> None:
@@ -314,3 +318,27 @@ def test_a_module_that_may_bind_names_at_run_time_is_open(files: dict[str, str])
     modules = _modules(files)
     assert bound_by_module(["lazy", "HeavyThing"], modules) is None
     assert open_module(["lazy", "HeavyThing"], modules) == "lazy.py"
+
+
+def test_an_absolute_star_import_resolves_only_from_an_import_root() -> None:
+    # A tracked `lib/enum.py` is not the standard library's `enum`.
+    modules = _modules({"std/__init__.py": "from enum import *\n", "lib/enum.py": "class Mine: pass\n"})
+    assert bound_by_module(["std", "Mine"], modules) is None
+    assert open_module(["std", "IntEnum"], modules) == "std/__init__.py"
+    src = _modules({"app/__init__.py": "from pkg.models import *\n", "src/pkg/models.py": "class Model: pass\n"})
+    assert bound_by_module(["app", "Model"], src) == "app/__init__.py"
+    backend = {"svc/__init__.py": "from core.base import *\n", "backend/core/base.py": "class Base: pass\n"}
+    assert bound_by_module(["svc", "Base"], _modules(backend, ("", "backend/"))) == "svc/__init__.py"
+    assert bound_by_module(["svc", "Base"], _modules(backend)) is None
+
+
+def test_star_import_chains_resolve_in_linear_time() -> None:
+    count = 400
+    files = {
+        f"p/m{i:03}.py": "".join(f"from .m{j:03} import *\n" for j in (i + 1, i + 2) if j < count) + f"N{i} = 1\n"
+        for i in range(count)
+    }
+    started = time.perf_counter()
+    modules = _modules(files)
+    assert time.perf_counter() - started < 2.0
+    assert bound_by_module(["m000", f"N{count - 1}"], modules) == "p/m000.py"

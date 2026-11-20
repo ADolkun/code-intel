@@ -25,7 +25,7 @@ from urllib.parse import unquote
 from stack_intel.code_paths import is_under
 from stack_intel.code_words import BUILTIN_WORDS, CodeWords, ModuleBindings, bound_by_module, open_module
 from stack_intel.definition_files import Unreadable
-from stack_intel.doc_commands import PACKAGE_MANIFEST, PACKAGE_RUNNERS, CommandMention
+from stack_intel.doc_commands import PACKAGE_MANIFEST, PACKAGE_RUNNERS, UNKNOWN_DIR, CommandMention, command_directories
 from stack_intel.doc_report import Reference, RouteRow, SymbolRow
 from stack_intel.doc_rules import (
     CLASS_KINDS,
@@ -446,11 +446,27 @@ class PathResolver:
 
     def paths(self, doc: str, text: str, form: PathForm, line: int, context: str) -> list[Draft]:
         out: list[Draft] = []
-        for token in path_tokens(text, form):
-            draft = self.path(doc, token, form, line, context)
-            if draft is not None:
-                out.append(draft)
+        for part, cwd in self._parts(text, form):
+            for token in path_tokens(part, form):
+                draft = self.path(doc, token, form, line, context, cwd)
+                if draft is not None:
+                    out.append(draft)
         return out
+
+    @staticmethod
+    def _parts(text: str, form: PathForm) -> list[tuple[str, str | None]]:
+        """``text`` cut where a ``cd`` earlier on the line moves the commands
+        after it, each part with that directory (None: no ``cd``)."""
+        if form == "span":
+            return [(text, None)]
+        cuts = command_directories(text)
+        if all(cwd is None for _, cwd in cuts):
+            return [(text, None)]
+        ends = [start for start, _ in cuts[1:]] + [len(text)]
+        return [
+            (text[: cuts[0][0]], None),
+            *((text[start:end], cwd) for (start, cwd), end in zip(cuts, ends, strict=True)),
+        ]
 
     def classify(self, doc: str, path: str, relative: bool, form: PathForm) -> tuple[str | None, list[str]]:
         """``(class, base directories)``; class None means "not a path to check here".
@@ -494,7 +510,19 @@ class PathResolver:
             return None, []
         return ("other" if first in self.ctx.dir_names else "unknown"), [doc_dir]
 
-    def path(self, doc: str, token: str, form: PathForm, line: int, context: str) -> Draft | None:
+    def _cd_dirs(self, doc: str, cwd: str) -> list[str]:
+        """The repository directories a ``cd`` may have reached, taken from
+        the repository root and from the doc's directory, as the command
+        check takes them; none when it named no literal repository directory."""
+        if cwd == UNKNOWN_DIR:
+            return []
+        doc_dir = posixpath.dirname(doc)
+        found = [cwd, posixpath.normpath(posixpath.join(doc_dir, cwd)) if cwd else doc_dir]
+        return [d for d in dict.fromkeys(found) if d == "" or d in self.ctx.repo.dirs]
+
+    def path(
+        self, doc: str, token: str, form: PathForm, line: int, context: str, cwd: str | None = None
+    ) -> Draft | None:
         # In a command, `./x` is relative to the shell's directory, not the doc.
         relative = form == "span" and token.lstrip("\"'`([").startswith("./")
         parsed = split_path_token(token)
@@ -507,6 +535,11 @@ class PathResolver:
         draft = Draft(doc, line, "path", parsed.text, context, target=path)
         if is_placeholder_path(path):
             return draft.set("skipped", "placeholder", checked=False)
+        if cwd is not None:
+            bases = self._cd_dirs(doc, cwd)
+            if not bases:
+                return draft.set("not_checked", "runs after a cd the docs check cannot follow", checked=False)
+            cls = "cd-rel"
         if cls == "unknown":
             return draft.set("skipped", "its first directory is not in the repository", checked=False)
         expansions = expand_braces(path)
@@ -579,7 +612,7 @@ class PathResolver:
         draft.target = tries[0]
         where = (
             f"{tries[0]} does not exist"
-            if cls in ("doc-rel", "shell-rel") and len(tries) == 1
+            if cls in ("doc-rel", "shell-rel", "cd-rel") and len(tries) == 1
             else "not found under " + _join_or([b + "/" if b else "the repository root" for b in _bases(bases)])
         )
         if has_glob(expansion):

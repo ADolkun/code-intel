@@ -392,65 +392,132 @@ def _module_key(file: str) -> tuple[str, ...]:
     return tuple(parts[:-1] if parts[-1] == "__init__" else parts)
 
 
-class _Modules:
-    """Star imports followed across ``tops`` (file → ``TopLevel``)."""
+IMPORT_ROOTS: tuple[str, ...] = ("", "src")
 
-    def __init__(self, tops: Mapping[str, TopLevel]) -> None:
-        self.tops = tops
-        self.exact: dict[tuple[str, ...], str] = {}
-        self.ending: dict[tuple[str, ...], list[str]] = {}
-        # Sorted, so a package's `__init__.py` wins over a same-named `.py`
-        # beside it, as the import system picks the package.
-        for file in sorted(tops, key=lambda f: (not f.endswith("/__init__.py"), f)):
-            key = _module_key(file)
-            self.exact.setdefault(key, file)
-            for start in range(len(key)):
-                self.ending.setdefault(key[start:], []).append(file)
-        self.done: dict[str, tuple[frozenset[str], bool]] = {}
 
-    def star_target(self, file: str, level: int, module: str) -> str | None:
-        """The tracked file ``from <level dots><module> import *`` in ``file``
-        imports; an absolute module only when exactly one tracked module's
-        path ends with it."""
-        wanted = tuple(module.split(".")) if module else ()
-        if level == 0:
-            found = {self.exact[_module_key(f)] for f in self.ending.get(wanted, ())}
-            return found.pop() if len(found) == 1 else None
-        package = posixpath.dirname(file).split("/") if posixpath.dirname(file) else []
-        if level - 1 > len(package):
-            return None
-        return self.exact.get((*package[: len(package) - (level - 1)], *wanted))
-
-    def resolve(self, file: str, active: frozenset[str] = frozenset()) -> tuple[frozenset[str], bool]:
-        if file in self.done:
-            return self.done[file]
-        top = self.tops[file]
-        names = set(top.names)
-        is_open = top.getattr
+def _star_targets(tops: Mapping[str, TopLevel], roots: Sequence[str]) -> dict[str, list[str | None]]:
+    """Each file's star-import targets in order, None for one that is not a
+    single tracked module. A relative import resolves from the file's
+    package; an absolute one only from an import root (``roots``), so a
+    tracked ``lib/enum.py`` does not stand in for the standard library's
+    ``enum``."""
+    exact: dict[tuple[str, ...], str] = {}
+    # A package's `__init__.py` first: the import system picks the package
+    # over a same-named `.py` beside it.
+    for file in sorted(tops, key=lambda f: (not f.endswith("/__init__.py"), f)):
+        exact.setdefault(_module_key(file), file)
+    root_parts = [tuple(root.strip("/").split("/")) if root.strip("/") else () for root in dict.fromkeys(roots)]
+    out: dict[str, list[str | None]] = {}
+    for file, top in tops.items():
+        targets: list[str | None] = []
         for level, module in top.stars:
-            target = self.star_target(file, level, module)
-            if target is None or target in active or target == file:
-                is_open = is_open or target is None
+            wanted = tuple(module.split(".")) if module else ()
+            if level == 0:
+                found = {exact[key] for root in root_parts if (key := (*root, *wanted)) in exact}
+                targets.append(found.pop() if len(found) == 1 else None)
                 continue
-            target_names, target_open = self.resolve(target, active | {file})
-            source = self.tops[target]
-            if source.all_dynamic:
-                is_open = True
-            names |= source.all if source.all is not None else {n for n in target_names if not n.startswith("_")}
-            is_open = is_open or target_open
-        result = (frozenset(names), is_open)
-        if not active:
-            self.done[file] = result
-        return result
+            package = posixpath.dirname(file).split("/") if posixpath.dirname(file) else []
+            if level - 1 > len(package):
+                targets.append(None)
+                continue
+            targets.append(exact.get((*package[: len(package) - (level - 1)], *wanted)))
+        out[file] = targets
+    return out
 
 
-def module_bindings(tops: Mapping[str, TopLevel]) -> ModuleBindings:
+def _components(nodes: Sequence[str], edges: Mapping[str, Sequence[str]]) -> list[list[str]]:
+    """Tarjan's strongly connected components, each after every component it
+    reaches; iterative, so a long import chain does not exhaust the stack."""
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    on_stack: set[str] = set()
+    stack: list[str] = []
+    out: list[list[str]] = []
+    for root in nodes:
+        if root in index:
+            continue
+        work: list[tuple[str, int]] = [(root, 0)]
+        while work:
+            node, position = work.pop()
+            if position == 0:
+                index[node] = low[node] = len(index)
+                stack.append(node)
+                on_stack.add(node)
+            successors = edges[node]
+            if position < len(successors):
+                work.append((node, position + 1))
+                successor = successors[position]
+                if successor not in index:
+                    work.append((successor, 0))
+                elif successor in on_stack:
+                    low[node] = min(low[node], index[successor])
+                continue
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index[node]:
+                component: list[str] = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    component.append(member)
+                    if member == node:
+                        break
+                out.append(component)
+    return out
+
+
+def _resolved(tops: Mapping[str, TopLevel], roots: Sequence[str]) -> dict[str, tuple[frozenset[str], bool]]:
+    """Each file's names with its star imports followed, and whether it is
+    open (``BoundModule.open``). Modules that star-import each other share
+    what they export, settled by iterating to a fixed point; the work is
+    linear in modules and imports otherwise."""
+    targets = _star_targets(tops, roots)
+    files = sorted(tops)
+    edges = {file: sorted({t for t in targets[file] if t is not None}) for file in files}
+    done: dict[str, tuple[frozenset[str], bool]] = {}
+
+    def exports(target: str, names: frozenset[str]) -> frozenset[str]:
+        source = tops[target]
+        if source.all is not None:
+            return source.all
+        return frozenset(n for n in names if not n.startswith("_"))
+
+    for component in _components(files, edges):
+        names = {file: set(tops[file].names) for file in component}
+        is_open = {
+            file: tops[file].getattr
+            or None in targets[file]
+            or any(t is not None and tops[t].all_dynamic for t in targets[file])
+            for file in component
+        }
+        changed = True
+        while changed:
+            changed = False
+            for file in component:
+                for target in edges[file]:
+                    if target in done:
+                        target_names, target_open = done[target]
+                    else:
+                        target_names, target_open = frozenset(names[target]), is_open[target]
+                    added = exports(target, target_names) - names[file]
+                    if added or (target_open and not is_open[file]):
+                        names[file] |= added
+                        is_open[file] = is_open[file] or target_open
+                        changed = True
+        for file in component:
+            done[file] = (frozenset(names[file]), is_open[file])
+    return done
+
+
+def module_bindings(tops: Mapping[str, TopLevel], roots: Sequence[str] = IMPORT_ROOTS) -> ModuleBindings:
     """``ModuleBindings`` from each tracked Python file's ``TopLevel``; a
-    package's ``__init__.py`` stands for its directory."""
-    modules = _Modules(tops)
+    package's ``__init__.py`` stands for its directory. ``roots``: the
+    directories an absolute import resolves from."""
+    resolved = _resolved(tops, roots)
     index: dict[tuple[str, ...], list[BoundModule]] = {}
     for file in sorted(tops):
-        names, is_open = modules.resolve(file)
+        names, is_open = resolved[file]
         key = _module_key(file)
         for start in range(len(key)):
             index.setdefault(key[start:], []).append(BoundModule(file, names, is_open))

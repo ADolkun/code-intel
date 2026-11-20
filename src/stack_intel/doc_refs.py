@@ -42,6 +42,7 @@ from stack_intel.code_paths import (
 )
 from stack_intel.code_words import (
     EMPTY,
+    IMPORT_ROOTS,
     NO_MODULES,
     CodeWords,
     ModuleBindings,
@@ -462,7 +463,8 @@ class _Run:
                 if found.top is not None:
                     tops[rel] = found.top
             self._words = CodeWords(frozenset(words), frozenset(dotted))
-            self._modules = module_bindings(tops)
+            backend = [root.prefix for root in self.config.path_roots if root.name == "backend-rel"]
+            self._modules = module_bindings(tops, (*IMPORT_ROOTS, *backend))
         return self._words
 
     def modules(self) -> ModuleBindings:
