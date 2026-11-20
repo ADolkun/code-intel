@@ -40,7 +40,18 @@ from stack_intel.code_paths import (
     read_bytes_with_digest,
     read_file_bytes,
 )
-from stack_intel.code_words import EMPTY, CodeWords, code_words_from_bytes, is_code_file, package_bindings_from_bytes
+from stack_intel.code_words import (
+    EMPTY,
+    IMPORT_ROOTS,
+    NO_MODULES,
+    CodeWords,
+    ModuleBindings,
+    TopLevel,
+    code_words_from_bytes,
+    is_code_file,
+    module_bindings,
+    package_bindings_from_bytes,
+)
 from stack_intel.definition_files import Unreadable, unreadable
 from stack_intel.doc_commands import PACKAGE_MANIFEST, CommandMention, command_mentions, fence_command_mentions
 from stack_intel.doc_report import (
@@ -392,10 +403,11 @@ class _Run:
         self.definitions_read: set[str] = set()
         self._facts: dict[str, DocFacts | None] = {}
         self._words: CodeWords | None = None
+        self._modules: ModuleBindings = NO_MODULES
         self._definitions: dict[tuple[Callable[[str], Any], str], Any] = {}
         self.links = LinkResolver(self.ctx, self.facts)
         self.paths = PathResolver(self.ctx)
-        self.symbols = SymbolResolver(self.ctx, self.words)
+        self.symbols = SymbolResolver(self.ctx, self.words, self.modules)
         self.commands = CommandResolver(
             self.ctx, self.package_scripts, self.make_targets, self.mise_file, self.npmrc_if_present
         )
@@ -442,13 +454,38 @@ class _Run:
         if self._words is None:
             words: set[str] = set()
             dotted: set[str] = set()
+            tops: dict[str, TopLevel] = {}
             for rel in self.code_files():
                 self.words_read.add(rel)
                 found = self.index.code_words(rel, self.problems)
                 words.update(found.words)
                 dotted.update(found.dotted)
+                if found.top is not None:
+                    tops[rel] = found.top
             self._words = CodeWords(frozenset(words), frozenset(dotted))
+            self._modules = module_bindings(tops, self._import_roots())
         return self._words
+
+    def _import_roots(self) -> tuple[str, ...]:
+        """Where an absolute import may resolve from: ``IMPORT_ROOTS``, the
+        backend root, and each directory holding a tracked ``pyproject.toml``
+        or ``setup.py`` with its ``src/`` (a monorepo's packages)."""
+        backend = [root.prefix for root in self.config.path_roots if root.name == "backend-rel"]
+        projects = sorted(
+            posixpath.dirname(rel)
+            for rel in self.repo.tracked
+            if posixpath.basename(rel) in ("pyproject.toml", "setup.py")
+        )
+        return (
+            *IMPORT_ROOTS,
+            *backend,
+            *(root for project in projects for root in (project, posixpath.join(project, "src"))),
+        )
+
+    def modules(self) -> ModuleBindings:
+        """The top-level names of the Python `code_files`, read with the words."""
+        self.words()
+        return self._modules
 
     # Build -----------------------------------------------------------------
 

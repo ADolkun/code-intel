@@ -15,7 +15,7 @@ import pytest
 from doc_config import doc_config
 from fake_repo_files import FakeRepoFiles
 
-from stack_intel.code_words import CodeWords
+from stack_intel.code_words import NO_MODULES, CodeWords, TopLevel, module_bindings
 from stack_intel.definition_files import Unreadable
 from stack_intel.doc_commands import CommandMention, command_mentions
 from stack_intel.doc_report import route_rows, symbol_rows
@@ -560,6 +560,8 @@ def test_a_link_keeps_its_href_as_written_when_decoding_changes_it(tmp_path: Pat
         ("service_backend/x.py", False, "span", ("backend-rel", ["backend/", "docs"])),
         ("service_backend/x.py", False, "fence", (None, [])),
         ("../backend/app.py", False, "span", ("doc-rel", ["docs"])),
+        ("../backend/app.py", False, "command", ("shell-rel", ["", "docs"])),
+        ("../backend/app.py", False, "fence", (None, [])),
         ("tests/x.py", True, "span", ("doc-rel", ["docs"])),
         ("nowhere/x.py", False, "span", ("unknown", ["docs"])),
     ],
@@ -567,6 +569,52 @@ def test_a_link_keeps_its_href_as_written_when_decoding_changes_it(tmp_path: Pat
 def test_path_classes_and_bases(tmp_path: Path, path: str, relative: bool, form: Any, expected: Any) -> None:
     ctx = _context(tmp_path, ["backend/service_backend/x.py", "docs/a.md"])
     assert PathResolver(ctx).classify("docs/a.md", path, relative, form) == expected
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("**/b.py", "b.py"),
+        ("a/**/c.py", "a/c.py"),
+        ("a/**", "a/c.py"),
+        ("a/*/d.py", "a/x/d.py"),
+        ("a/?/d.py", "a/x/d.py"),
+        ("**/x/*.py", "a/x/d.py"),
+        ("app/[id]/*.tsx", "app/[id]/page.tsx"),
+        ("a/**/*.ts", None),
+    ],
+)
+def test_the_first_glob_match_skips_paths_that_cannot_match(tmp_path: Path, pattern: str, expected: str | None) -> None:
+    paths = PathResolver(_context(tmp_path, ["b.py", "a/c.py", "a/x/d.py", "app/[id]/page.tsx"]))
+    assert paths._first_match(pattern) == expected
+
+
+@pytest.mark.parametrize(
+    ("glob", "resolved", "ended", "status"),
+    [
+        # The first alternative that matches ends the search.
+        ("pkg/**/*.{py,pyi,mts}", ["pkg/**/*.py"], [], "ok"),
+        ("pkg/**/*.{mts,py,pyi}", ["pkg/**/*.mts", "pkg/**/*.py"], [], "ok"),
+        # The suffix match runs only once every alternative misses at every base.
+        ("pkg/**/*.{mts,cts}", ["pkg/**/*.mts", "pkg/**/*.cts"], ["pkg/**/*.mts", "pkg/**/*.cts"], "missing"),
+    ],
+)
+def test_glob_alternatives_are_tried_lazily(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, glob: str, resolved: list[str], ended: list[str], status: str
+) -> None:
+    paths = PathResolver(_context(tmp_path, ["pkg/a.py", "pkg/sub/b.py"]))
+    calls: dict[str, list[str]] = {"resolve_in": [], "_ending_with": []}
+    for name in calls:
+        real = getattr(paths, name)
+
+        def spy(*args: Any, _real: Callable[..., Any] = real, _name: str = name) -> Any:
+            calls[_name].append(args[-1])
+            return _real(*args)
+
+        monkeypatch.setattr(paths, name, spy)
+    draft = paths.path("docs/a.md", glob, "span", 1, "code")
+    assert draft is not None
+    assert (calls["resolve_in"], calls["_ending_with"], draft.status) == (resolved, ended, status)
 
 
 # ── Symbols ──────────────────────────────────────────────────────────────
@@ -584,7 +632,7 @@ def test_code_words_are_read_only_when_the_index_has_no_definition(tmp_path: Pat
         calls.append(1)
         return CodeWords(frozenset({"UsedName"}), frozenset())
 
-    symbols = SymbolResolver(ctx, words)
+    symbols = SymbolResolver(ctx, words, lambda: NO_MODULES)
     kept = symbols.symbol("docs/a.md", SymbolMention("Kept", "Kept", False, False), 1, "code")
     assert (kept.status, kept.defined_in, calls) == ("ok", ("backend/app.py:3",), [])
     used = symbols.symbol("docs/a.md", SymbolMention("UsedName", "UsedName", False, False), 1, "code")
@@ -660,9 +708,40 @@ def _symbol_ctx(tmp_path: Path) -> ResolutionContext:
 def test_dotted_symbols_match_their_whole_qualifier_chain(
     tmp_path: Path, name: str, status: str, defined_in: tuple[str, ...]
 ) -> None:
-    symbols = SymbolResolver(_symbol_ctx(tmp_path), lambda: CodeWords(frozenset(), frozenset()))
+    symbols = SymbolResolver(_symbol_ctx(tmp_path), lambda: CodeWords(frozenset(), frozenset()), lambda: NO_MODULES)
     draft = symbols.symbol("docs/a.md", SymbolMention(name, name, False, False), 1, "code")
     assert (draft.status, draft.defined_in) == (status, defined_in)
+
+
+@pytest.mark.parametrize(
+    ("name", "status", "detail"),
+    [
+        ("pkg.ProgressEvent", "ok", "bound at the top level of pkg/__init__.py"),
+        ("pkg.errors.AuthState", "ok", "bound at the top level of pkg/errors.py"),
+        ("errors.AuthState", "ok", "bound at the top level of pkg/errors.py"),
+        ("test_widgets.TestWidgetLayout", "ok", "bound at the top level of tests/test_widgets.py"),
+        # The qualifier names a module that does not bind the name, or no module.
+        ("pkg.AuthState", "missing", "no definition in the symbol index and no use in tracked code"),
+        ("pkg.state.ProgressEvent", "missing", "no definition in the symbol index and no use in tracked code"),
+        ("other.errors.AuthState", "missing", "no definition in the symbol index and no use in tracked code"),
+        # A binding proves the class, not its attributes.
+        ("pkg.errors.AuthState.gone", "unresolved", "no definition in the symbol index and no use in tracked code"),
+    ],
+)
+def test_a_module_qualifies_the_names_it_binds_at_top_level(
+    tmp_path: Path, name: str, status: str, detail: str
+) -> None:
+    modules = module_bindings(
+        {
+            "pkg/__init__.py": TopLevel(names=frozenset({"ProgressEvent"})),
+            "pkg/errors.py": TopLevel(names=frozenset({"AuthState"})),
+            "pkg/state.py": TopLevel(names=frozenset({"AuthState"})),
+            "tests/test_widgets.py": TopLevel(names=frozenset({"TestWidgetLayout"})),
+        }
+    )
+    symbols = SymbolResolver(_context(tmp_path, []), lambda: CodeWords(frozenset(), frozenset()), lambda: modules)
+    draft = symbols.symbol("docs/a.md", SymbolMention(name, name, False, False), 1, "code")
+    assert (draft.status, draft.detail) == (status, detail)
 
 
 def _first(text: str) -> CommandMention:

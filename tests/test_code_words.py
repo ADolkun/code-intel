@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import textwrap
+import time
 
 import pytest
 
 from stack_intel.code_words import (
     BUILTIN_WORDS,
+    IMPORT_ROOTS,
+    BoundModule,
+    TopLevel,
+    bound_by_module,
     code_words,
     code_words_from_bytes,
     is_code_file,
+    module_bindings,
+    open_module,
     package_bindings_from_bytes,
     plain_words,
     python_words,
@@ -205,6 +212,8 @@ def test_builtins_are_known_words() -> None:
     [
         ("", set()),
         ("__all__: list[str] = []\n", {"__all__"}),
+        # `__all__` declares names a module `__getattr__` may serve.
+        ('__all__ = ["Lazy", 1]\n__all__ += ("More",)\n', {"__all__", "Lazy", "More"}),
         ("from .mod import Thing\n", {"Thing"}),
         ("from .mod import Thing as Other\n", {"Other"}),
         ("import a.b\nimport c as d\n", {"a", "d"}),
@@ -232,3 +241,104 @@ def test_package_bindings_of_a_file_that_does_not_parse_are_empty_with_a_diagnos
     names, problems = package_bindings_from_bytes("backend/pkg/__init__.py", b"def (:\n")
     assert names == frozenset()
     assert [p.kind for p in problems] == ["parse_failed"]
+
+
+def test_a_python_file_carries_what_it_binds_at_top_level_and_other_files_nothing() -> None:
+    source = b"from .state import AuthState\nfrom .models import *\n\n\ndef build():\n    inner = 1\n"
+    words, _ = code_words_from_bytes("pkg/errors.py", source)
+    assert words.top == TopLevel(names=frozenset({"AuthState", "build"}), stars=((1, "models"),))
+    words, _ = code_words_from_bytes("web/a.ts", b"export const AuthState = 1;\n")
+    assert words.top is None
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("x = 1\n", TopLevel(names=frozenset({"x"}))),
+        ('__all__ = ["A"]\n', TopLevel(names=frozenset({"__all__", "A"}), all=frozenset({"A"}))),
+        (
+            "__all__ = sorted(_LAZY)\n",
+            TopLevel(names=frozenset({"__all__"}), all=frozenset(), all_dynamic=True),
+        ),
+        (
+            '__all__ = ["A"]\n__all__.extend(B)\n',
+            TopLevel(names=frozenset({"__all__", "A"}), all=frozenset({"A"}), all_dynamic=True),
+        ),
+        ("def __getattr__(name):\n    pass\n", TopLevel(names=frozenset({"__getattr__"}), getattr=True)),
+        ("from pkg.models import *\n", TopLevel(stars=((0, "pkg.models"),))),
+        ("from .. import *\n", TopLevel(stars=((2, ""),))),
+    ],
+)
+def test_top_level_records_all_star_imports_and_module_getattr(source: str, expected: TopLevel) -> None:
+    words, problems = python_words("pkg/m.py", source)
+    assert (words.top, problems) == (expected, [])
+
+
+def _modules(
+    files: dict[str, str], roots: tuple[str, ...] = IMPORT_ROOTS
+) -> dict[tuple[str, ...], tuple[BoundModule, ...]]:
+    tops = {}
+    for rel, source in files.items():
+        words, _ = python_words(rel, textwrap.dedent(source))
+        assert words.top is not None
+        tops[rel] = words.top
+    return dict(module_bindings(tops, roots))
+
+
+def test_star_imports_are_followed_to_the_tracked_module() -> None:
+    modules = _modules(
+        {
+            "pkg/__init__.py": "from .models import *\nfrom pkg.events import *\n",
+            "pkg/models.py": "class UserModel: pass\nclass _Hidden: pass\n",
+            "pkg/events.py": '__all__ = ["Event"]\nclass Event: pass\nclass Other: pass\n',
+            "pkg/cycle_a.py": "from .cycle_b import *\nA = 1\n",
+            "pkg/cycle_b.py": "from .cycle_a import *\nB = 1\n",
+        }
+    )
+    assert bound_by_module(["pkg", "UserModel"], modules) == "pkg/__init__.py"
+    assert bound_by_module(["pkg", "Event"], modules) == "pkg/__init__.py"
+    # A star import takes `__all__` when there is one, else the public names.
+    assert bound_by_module(["pkg", "Other"], modules) is None
+    assert bound_by_module(["pkg", "_Hidden"], modules) is None
+    assert bound_by_module(["cycle_a", "B"], modules) == "pkg/cycle_a.py"
+    assert open_module(["pkg", "Anything"], modules) is None
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"lazy.py": "_LAZY = {}\n__all__ = sorted(_LAZY)\n\ndef __getattr__(name):\n    return _LAZY[name]\n"},
+        {"lazy.py": "from os.path import *\n"},
+        {"lazy.py": "from .dyn import *\n", "dyn.py": "__all__ = sorted(NAMES)\n"},
+        {"lazy.py": "from models import *\n", "a/models.py": "X = 1\n", "b/models.py": "Y = 1\n"},
+    ],
+    ids=["getattr", "untracked-star", "dynamic-all-star", "ambiguous-star"],
+)
+def test_a_module_that_may_bind_names_at_run_time_is_open(files: dict[str, str]) -> None:
+    modules = _modules(files)
+    assert bound_by_module(["lazy", "HeavyThing"], modules) is None
+    assert open_module(["lazy", "HeavyThing"], modules) == "lazy.py"
+
+
+def test_an_absolute_star_import_resolves_only_from_an_import_root() -> None:
+    # A tracked `lib/enum.py` is not the standard library's `enum`.
+    modules = _modules({"std/__init__.py": "from enum import *\n", "lib/enum.py": "class Mine: pass\n"})
+    assert bound_by_module(["std", "Mine"], modules) is None
+    assert open_module(["std", "IntEnum"], modules) == "std/__init__.py"
+    src = _modules({"app/__init__.py": "from pkg.models import *\n", "src/pkg/models.py": "class Model: pass\n"})
+    assert bound_by_module(["app", "Model"], src) == "app/__init__.py"
+    backend = {"svc/__init__.py": "from core.base import *\n", "backend/core/base.py": "class Base: pass\n"}
+    assert bound_by_module(["svc", "Base"], _modules(backend, ("", "backend/"))) == "svc/__init__.py"
+    assert bound_by_module(["svc", "Base"], _modules(backend)) is None
+
+
+def test_star_import_chains_resolve_in_linear_time() -> None:
+    count = 400
+    files = {
+        f"p/m{i:03}.py": "".join(f"from .m{j:03} import *\n" for j in (i + 1, i + 2) if j < count) + f"N{i} = 1\n"
+        for i in range(count)
+    }
+    started = time.perf_counter()
+    modules = _modules(files)
+    assert time.perf_counter() - started < 2.0
+    assert bound_by_module(["m000", f"N{count - 1}"], modules) == "p/m000.py"

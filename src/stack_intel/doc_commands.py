@@ -901,6 +901,17 @@ def _line_mentions(line: str, state: _LineState, *, fence: bool) -> list[Command
     return out
 
 
+UNKNOWN_DIR = _LOST
+
+
+def command_directories(line: str) -> list[tuple[int, str | None]]:
+    """Where each command of ``line`` starts, with the directory a ``cd``
+    earlier on the line moved it to: None for none, a repository-relative
+    directory (``""`` for the root), or ``UNKNOWN_DIR`` for one that is not a
+    literal repository path (``cd ..``, ``cd $APP``)."""
+    return [(command.spans[0][0], command.cwd) for command in _commands(_end_of_input(line), _LineState())]
+
+
 def command_mentions(text: str) -> list[CommandMention]:
     """Every script, target or task a code span runs."""
     return _line_mentions(_end_of_input(text), _LineState(), fence=False)

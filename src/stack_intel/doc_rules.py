@@ -674,8 +674,9 @@ KNOWN_EXTENSIONS = frozenset(
         "webp",
     }
 )
-# `:12`, `:12-30`, `:12–30`, `:12:4`, `#L12`, `#L12-L30`, `#symbol`, `::node`.
-_PATH_SUFFIX_RE = re.compile(r"(?::\d+(?:[-–:,]\d+)*|#L\d+(?:-L?\d+)?|#[A-Za-z_][\w.-]*|::[\w:\[\]./-]+)$")
+# `:12`, `:12-30`, `:12–30`, `:12:4`, `#L12`, `#L12-L30`, `#symbol`, `::node`,
+# `::Class.{test_a,test_b}`.
+_PATH_SUFFIX_RE = re.compile(r"(?::\d+(?:[-–:,]\d+)*|#L\d+(?:-L?\d+)?|#[A-Za-z_][\w.-]*|::[\w:\[\]./{},-]+)$")
 _URL_PREFIXES: tuple[str, ...] = ("http:", "https:", "mailto:", "gs:", "s3:", "git@", "data:", "blob:", "file:")
 _PLACEHOLDER_RE = re.compile(r"<[^<>]*>|\{[^{},]*\}|\.\.\.|…|\$\{?[A-Za-z_]|YYYY|NNNN|XXX|Xxx")
 _BRACES_RE = re.compile(r"\{([^{}]*,[^{}]*)\}")
