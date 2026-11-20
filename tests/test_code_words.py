@@ -205,6 +205,8 @@ def test_builtins_are_known_words() -> None:
     [
         ("", set()),
         ("__all__: list[str] = []\n", {"__all__"}),
+        # `__all__` declares names a module `__getattr__` may serve.
+        ('__all__ = ["Lazy", 1]\n__all__ += ("More",)\n', {"__all__", "Lazy", "More"}),
         ("from .mod import Thing\n", {"Thing"}),
         ("from .mod import Thing as Other\n", {"Other"}),
         ("import a.b\nimport c as d\n", {"a", "d"}),
@@ -232,3 +234,11 @@ def test_package_bindings_of_a_file_that_does_not_parse_are_empty_with_a_diagnos
     names, problems = package_bindings_from_bytes("backend/pkg/__init__.py", b"def (:\n")
     assert names == frozenset()
     assert [p.kind for p in problems] == ["parse_failed"]
+
+
+def test_a_python_file_carries_its_top_level_bindings_and_other_files_none() -> None:
+    source = b"from .state import AuthState\n\n\ndef build():\n    inner = 1\n"
+    words, _ = code_words_from_bytes("pkg/errors.py", source)
+    assert words.bindings == frozenset({"AuthState", "build"})
+    words, _ = code_words_from_bytes("web/a.ts", b"export const AuthState = 1;\n")
+    assert words.bindings == frozenset()

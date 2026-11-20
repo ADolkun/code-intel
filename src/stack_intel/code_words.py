@@ -12,8 +12,9 @@ Dotted texts (``HeartbeatConfig.pg_max_retry_seconds``) are kept as wholes,
 every contiguous window of two or more parts of each attribute chain, so a
 dotted mention can match as written instead of part by part.
 
-``package_bindings_from_bytes`` reads the other side of a dotted mention: the
-names a package's ``__init__.py`` binds, so ``package.Name`` reaches them.
+The other side of a dotted mention is what a Python module binds at top
+level: each file's ``CodeWords.bindings``, so ``module.Name`` reaches them, and
+``package_bindings_from_bytes`` for a package's ``__init__.py`` alone.
 
 Functions are pure over ``(rel, text)`` or ``(rel, bytes)``: no git, no
 filesystem, so the runtime can cache each file's words by its stamp.
@@ -80,10 +81,13 @@ _DOCSTRING_OWNERS = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctio
 
 @dataclass(frozen=True)
 class CodeWords:
-    """``words``: single identifiers. ``dotted``: dotted texts of two or more parts."""
+    """``words``: single identifiers. ``dotted``: dotted texts of two or more
+    parts. ``bindings``: the names a Python file binds at top level
+    (``top_level_bindings``); empty for other files and for a union of files."""
 
     words: frozenset[str]
     dotted: frozenset[str]
+    bindings: frozenset[str] = frozenset()
 
 
 EMPTY = CodeWords(frozenset(), frozenset())
@@ -221,7 +225,8 @@ def python_words(rel: str, text: str, *, stage: str = STAGE) -> tuple[CodeWords,
         tree = ast.parse(text, filename=rel)
     except _PARSE_ERRORS as exc:
         return plain_words(text), [diagnostic("parse_failed", stage=stage, step="parse file", file=rel, exc=exc)]
-    return python_tree_words(tree), []
+    words = python_tree_words(tree)
+    return CodeWords(words.words, words.dotted, top_level_bindings(tree)), []
 
 
 def code_words(rel: str, text: str, *, stage: str = STAGE) -> tuple[CodeWords, list[Problem]]:
@@ -254,8 +259,19 @@ def _bound_targets(target: ast.expr) -> Iterable[str]:
             yield from _bound_targets(element.value if isinstance(element, ast.Starred) else element)
 
 
+def _all_names(value: ast.expr | None) -> Iterable[str]:
+    if isinstance(value, (ast.List, ast.Tuple)):
+        for element in value.elts:
+            if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                yield element.value
+
+
 def _bindings(body: Sequence[ast.stmt], names: set[str]) -> None:
     for node in body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
+                names.update(_all_names(node.value))
         if isinstance(node, ast.Import):
             names.update(alias.asname or alias.name.split(".", 1)[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -275,13 +291,21 @@ def _bindings(body: Sequence[ast.stmt], names: set[str]) -> None:
                 _bindings(part, names)
 
 
+def top_level_bindings(tree: ast.Module) -> frozenset[str]:
+    """The names a Python module binds at top level, so ``module.Name``
+    reaches them: imports (``import a.b`` binds ``a``, an ``as`` name replaces
+    the original), defs, classes, assignments and the string names listed in
+    ``__all__`` (a module ``__getattr__`` may serve them), also under a
+    top-level ``if`` (``TYPE_CHECKING``) or ``try``. A star import is not
+    followed."""
+    names: set[str] = set()
+    _bindings(tree.body, names)
+    return frozenset(names)
+
+
 def package_bindings_from_bytes(rel: str, data: bytes, *, stage: str = STAGE) -> tuple[frozenset[str], list[Problem]]:
-    """The names a package's ``__init__.py`` binds at top level, so
-    ``package.Name`` reaches them: imports (``import a.b`` binds ``a``, an
-    ``as`` name replaces the original), defs, classes and assignments, also
-    under a top-level ``if`` (``TYPE_CHECKING``) or ``try``. ``__all__`` binds
-    nothing by itself, and a star import is not followed. A file that cannot
-    be decoded or parsed binds nothing, with a diagnostic."""
+    """``top_level_bindings`` of a package's ``__init__.py``. A file that
+    cannot be decoded or parsed binds nothing, with a diagnostic."""
     try:
         encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
         text = data.decode(encoding)
@@ -291,6 +315,4 @@ def package_bindings_from_bytes(rel: str, data: bytes, *, stage: str = STAGE) ->
         tree = ast.parse(text, filename=rel)
     except _PARSE_ERRORS as exc:
         return frozenset(), [diagnostic("parse_failed", stage=stage, step="parse file", file=rel, exc=exc)]
-    names: set[str] = set()
-    _bindings(tree.body, names)
-    return frozenset(names), []
+    return top_level_bindings(tree), []

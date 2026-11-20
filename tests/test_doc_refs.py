@@ -398,13 +398,13 @@ def test_missing_path_messages_name_the_roots_tried(tmp_path: Path) -> None:
         ("docs/a.md", "`..`", []),
         ("docs/a.md", "`../backend/app.py` and `../docs/`", [("../backend/app.py", "ok"), ("../docs/", "ok")]),
         ("docs/sub/a.md", "`../../`", [("../../", "ok")]),
-        ("docs/sub/a.md", "`../../../`", [("../../../", "missing")]),
-        ("docs/a.md", "`../../`", [("../../", "missing")]),
+        ("docs/sub/a.md", "`../../../`", [("../../../", "not_checked")]),
+        ("docs/a.md", "`../../`", [("../../", "not_checked")]),
         ("docs/a.md", "`../nope/`", [("../nope/", "missing")]),
         ("AGENTS.md", "`./`", []),
         ("AGENTS.md", "`.`", []),
         ("AGENTS.md", "`./docs/../`", [("./docs/../", "ok")]),
-        ("AGENTS.md", "`./../`", [("./../", "missing")]),
+        ("AGENTS.md", "`./../`", [("./../", "not_checked")]),
     ],
 )
 def test_paths_naming_the_repository_root(
@@ -414,11 +414,14 @@ def test_paths_naming_the_repository_root(
     assert [(r.text, r.status) for r in refs(report, doc, "path")] == expected
 
 
-def test_a_missing_path_past_the_root_is_still_reported_stale(tmp_path: Path) -> None:
+def test_a_missing_path_inside_the_repository_is_reported_and_one_past_the_root_is_not_checked(
+    tmp_path: Path,
+) -> None:
     report = build(tmp_path, {"docs/a.md": "`../nope/` and `../../`\n"})
-    assert [f.message for f in ref_findings(report)] == [
-        "stale path: ../../ (not found under docs/)",
-        "stale path: ../nope/ (nope does not exist)",
+    assert [f.message for f in ref_findings(report)] == ["stale path: ../nope/ (nope does not exist)"]
+    assert [(r.text, r.status, r.detail, r.checked) for r in refs(report, kind="path")] == [
+        ("../../", "not_checked", "points outside the repository", False),
+        ("../nope/", "missing", "nope does not exist", True),
     ]
 
 
@@ -2478,6 +2481,159 @@ def test_a_code_file_that_does_not_parse_is_one_diagnostic_on_every_report(tmp_p
     for _ in range(2):
         report = index.report(repo, ROUTES, [], [], SYMBOLS, True, doc_config())
         assert [(p.kind, p.file) for p in report.diagnostics] == [("parse_failed", "backend/broken.py")]
+
+
+# ── Checkouts: qualified names and paths written from elsewhere ──────────
+
+
+def _checkout_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: Mapping[str, str],
+    *,
+    layout: str = "",
+    symbols: list[dict[str, Any]] | None = None,
+) -> doc_refs.DocReport:
+    """A report over a real git checkout of ``files``, docs-only unless ``layout`` configures a backend."""
+    hermetic_git(monkeypatch, tmp_path / "home")
+    root = tmp_path / "git"
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    config = doc_config({"scope": ["**/*.md"], "reachability": None, "rules": []}, layout=layout)
+    return DocIndex(root).report(list_repo_files(root), [], [], [], symbols or [], True, config)
+
+
+_QUALIFIED_FILES = {
+    "pkg/__init__.py": "from pkg.events import ProgressEvent\n",
+    "pkg/events.py": "class ProgressEvent:\n    pass\n",
+    "pkg/errors.py": 'from pkg.state import AuthState\n\n__all__ = ["AuthState"]\n',
+    "pkg/state.py": "class AuthState:\n    pass\n",
+    "tests/test_widgets.py": "class TestWidgetLayout:\n    pass\n",
+    "docs/guide.md": (
+        "`pkg.ProgressEvent` `pkg.errors.AuthState` `test_widgets.TestWidgetLayout`\n\n"
+        "`pkg.AuthState` `pkg.errors.ProgressEvent` `widgets.TestWidgetLayout`\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("backend", [False, True], ids=["docs-only", "backend"])
+def test_a_module_or_package_qualifies_the_names_it_binds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: bool
+) -> None:
+    symbols = [
+        {"name": "ProgressEvent", "kind": "class", "container": None, "file": "pkg/events.py", "line": 1},
+        {"name": "AuthState", "kind": "class", "container": None, "file": "pkg/state.py", "line": 1},
+        {"name": "TestWidgetLayout", "kind": "class", "container": None, "file": "tests/test_widgets.py", "line": 1},
+    ]
+    report = _checkout_report(
+        tmp_path,
+        monkeypatch,
+        _QUALIFIED_FILES,
+        layout=LAYOUT if backend else "",
+        symbols=symbols if backend else None,
+    )
+    assert [(r.text, r.status) for r in refs(report, "docs/guide.md", "symbol")] == [
+        ("pkg.ProgressEvent", "ok"),
+        ("pkg.errors.AuthState", "ok"),
+        ("test_widgets.TestWidgetLayout", "ok"),
+        # A module that does not bind the name, or no module of that name.
+        ("pkg.AuthState", "missing"),
+        ("pkg.errors.ProgressEvent", "missing"),
+        ("widgets.TestWidgetLayout", "missing"),
+    ]
+
+
+def test_a_root_path_missing_from_the_root_may_end_a_deeper_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `skills/` is also a top-level directory, yet the doc writes from `app/`
+    # as it does for `analyze/`.
+    files = {
+        "app/skills/builder.py": "def run():\n    pass\n",
+        "app/analyze/tagger.py": "def run():\n    pass\n",
+        "skills/howto/SKILL.md": "# How to\n",
+        "docs/guide.md": (
+            "`analyze/tagger.py` `skills/builder.py` `skills/builder.run` `analyze/tagger.run`\n\n"
+            "`skills/gone.py` `skills/howto/`\n\n"
+            "[`skills/builder.py`](../app/skills/builder.py)\n"
+        ),
+    }
+    report = _checkout_report(tmp_path, monkeypatch, files)
+    assert sorted((r.text, r.status, r.target) for r in refs(report, "docs/guide.md", "path")) == sorted(
+        [
+            ("analyze/tagger.py", "ok", "app/analyze/tagger.py"),
+            ("skills/builder.py", "ok", "app/skills/builder.py"),
+            ("skills/builder.run", "ok", "app/skills/builder.py"),
+            ("skills/gone.py", "missing", "skills/gone.py"),
+            ("skills/howto/", "ok", "skills/howto"),
+            ("skills/builder.py", "ok", "app/skills/builder.py"),
+        ]
+    )
+    assert [r.status for r in refs(report, "docs/guide.md", "link")] == ["ok"]
+
+
+def test_a_path_leaving_the_repository_is_not_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = {
+        "README.md": "Install with `uv pip install -e ../sibling` and read `../sibling/README.md`.\n",
+        "docs/setup.md": "`uv pip install -e ../sibling`\n\n`../nope/` and `../`\n",
+    }
+    report = _checkout_report(tmp_path, monkeypatch, files)
+    outside = ("not_checked", "points outside the repository")
+    assert sorted((r.text, r.status, r.detail) for r in refs(report, "README.md", "path")) == sorted(
+        [
+            ("../sibling", *outside),
+            ("../sibling/README.md", *outside),
+        ]
+    )
+    # A command's `..` leaves the shell's directory, not the doc's.
+    assert sorted((r.text, r.status, r.detail) for r in refs(report, "docs/setup.md", "path")) == sorted(
+        [
+            ("../sibling", *outside),
+            ("../nope/", "missing", "nope does not exist"),
+            ("../", "ok", None),
+        ]
+    )
+
+
+def test_a_pytest_node_id_with_a_brace_group_names_its_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = {
+        "tests/test_x.py": "class TestX:\n    def test_a(self):\n        pass\n\n    def test_b(self):\n        pass\n",
+        "docs/guide.md": "`tests/test_x.py::TestX.test_a` `tests/test_x.py::TestX.{test_a,test_b}`\n",
+    }
+    report = _checkout_report(tmp_path, monkeypatch, files)
+    assert sorted((r.text, r.status, r.target) for r in refs(report, "docs/guide.md", "path")) == sorted(
+        [
+            ("tests/test_x.py::TestX.test_a", "ok", "tests/test_x.py"),
+            ("tests/test_x.py::TestX.{test_a,test_b}", "ok", "tests/test_x.py"),
+        ]
+    )
+
+
+def test_braces_are_alternatives_in_a_glob_and_files_without_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {
+        "web/src/a.ts": "export const a = 1;\n",
+        "web/src/b.tsx": "export const b = 1;\n",
+        "docs/guide.md": (
+            "`web/**/*.{ts,tsx}` `web/**/*.{ts,tsx,mts}` `web/src/?.{mts,ts}` `web/**/*.{mts,cts}`\n\n"
+            "`web/src/{a.ts,b.tsx}` `web/src/{a,b}.ts`\n"
+        ),
+    }
+    report = _checkout_report(tmp_path, monkeypatch, files)
+    assert sorted((r.text, r.status, r.detail) for r in refs(report, "docs/guide.md", "path")) == sorted(
+        [
+            ("web/**/*.{ts,tsx}", "ok", None),
+            ("web/**/*.{ts,tsx,mts}", "ok", None),
+            ("web/src/?.{mts,ts}", "ok", None),
+            ("web/**/*.{mts,cts}", "missing", "the pattern matches no file"),
+            ("web/src/{a.ts,b.tsx}", "ok", None),
+            ("web/src/{a,b}.ts", "missing", "not found under the repository root"),
+        ]
+    )
 
 
 # ── Caches ───────────────────────────────────────────────────────────────

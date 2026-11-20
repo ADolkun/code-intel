@@ -28,7 +28,15 @@ from stack_intel.doc_resolvers import (
     RouteResolver,
     SymbolResolver,
 )
-from stack_intel.doc_rules import DocRefsConfig, NextAppPages, PageSet, RouteMention, SymbolMention
+from stack_intel.doc_rules import (
+    NO_MODULES,
+    DocRefsConfig,
+    NextAppPages,
+    PageSet,
+    RouteMention,
+    SymbolMention,
+    module_bindings,
+)
 from stack_intel.make_targets import MakeTargets
 from stack_intel.markdown_facts import DocFacts, Link
 from stack_intel.mise_tasks import MiseFile
@@ -584,7 +592,7 @@ def test_code_words_are_read_only_when_the_index_has_no_definition(tmp_path: Pat
         calls.append(1)
         return CodeWords(frozenset({"UsedName"}), frozenset())
 
-    symbols = SymbolResolver(ctx, words)
+    symbols = SymbolResolver(ctx, words, lambda: NO_MODULES)
     kept = symbols.symbol("docs/a.md", SymbolMention("Kept", "Kept", False, False), 1, "code")
     assert (kept.status, kept.defined_in, calls) == ("ok", ("backend/app.py:3",), [])
     used = symbols.symbol("docs/a.md", SymbolMention("UsedName", "UsedName", False, False), 1, "code")
@@ -660,9 +668,40 @@ def _symbol_ctx(tmp_path: Path) -> ResolutionContext:
 def test_dotted_symbols_match_their_whole_qualifier_chain(
     tmp_path: Path, name: str, status: str, defined_in: tuple[str, ...]
 ) -> None:
-    symbols = SymbolResolver(_symbol_ctx(tmp_path), lambda: CodeWords(frozenset(), frozenset()))
+    symbols = SymbolResolver(_symbol_ctx(tmp_path), lambda: CodeWords(frozenset(), frozenset()), lambda: NO_MODULES)
     draft = symbols.symbol("docs/a.md", SymbolMention(name, name, False, False), 1, "code")
     assert (draft.status, draft.defined_in) == (status, defined_in)
+
+
+@pytest.mark.parametrize(
+    ("name", "status", "detail"),
+    [
+        ("pkg.ProgressEvent", "ok", "bound at the top level of pkg/__init__.py"),
+        ("pkg.errors.AuthState", "ok", "bound at the top level of pkg/errors.py"),
+        ("errors.AuthState", "ok", "bound at the top level of pkg/errors.py"),
+        ("test_widgets.TestWidgetLayout", "ok", "bound at the top level of tests/test_widgets.py"),
+        # The qualifier names a module that does not bind the name, or no module.
+        ("pkg.AuthState", "missing", "no definition in the symbol index and no use in tracked code"),
+        ("pkg.state.ProgressEvent", "missing", "no definition in the symbol index and no use in tracked code"),
+        ("other.errors.AuthState", "missing", "no definition in the symbol index and no use in tracked code"),
+        # A binding proves the class, not its attributes.
+        ("pkg.errors.AuthState.gone", "unresolved", "no definition in the symbol index and no use in tracked code"),
+    ],
+)
+def test_a_module_qualifies_the_names_it_binds_at_top_level(
+    tmp_path: Path, name: str, status: str, detail: str
+) -> None:
+    modules = module_bindings(
+        {
+            "pkg/__init__.py": frozenset({"ProgressEvent"}),
+            "pkg/errors.py": frozenset({"AuthState"}),
+            "pkg/state.py": frozenset({"AuthState"}),
+            "tests/test_widgets.py": frozenset({"TestWidgetLayout"}),
+        }
+    )
+    symbols = SymbolResolver(_context(tmp_path, []), lambda: CodeWords(frozenset(), frozenset()), lambda: modules)
+    draft = symbols.symbol("docs/a.md", SymbolMention(name, name, False, False), 1, "code")
+    assert (draft.status, draft.detail) == (status, detail)
 
 
 def _first(text: str) -> CommandMention:

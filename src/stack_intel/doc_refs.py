@@ -67,8 +67,10 @@ from stack_intel.doc_resolvers import (
 )
 from stack_intel.doc_rules import (
     BROKEN_STATUSES,
+    NO_MODULES,
     STAGE,
     DocRefsConfig,
+    ModuleBindings,
     NoPages,
     PageProvider,
     PageSet,
@@ -78,6 +80,7 @@ from stack_intel.doc_rules import (
     is_markdown,
     is_shell_fence,
     method_route_mentions,
+    module_bindings,
     symbol_mention,
 )
 from stack_intel.make_targets import MakeTargets, make_targets_from_bytes
@@ -392,10 +395,11 @@ class _Run:
         self.definitions_read: set[str] = set()
         self._facts: dict[str, DocFacts | None] = {}
         self._words: CodeWords | None = None
+        self._modules: ModuleBindings = NO_MODULES
         self._definitions: dict[tuple[Callable[[str], Any], str], Any] = {}
         self.links = LinkResolver(self.ctx, self.facts)
         self.paths = PathResolver(self.ctx)
-        self.symbols = SymbolResolver(self.ctx, self.words)
+        self.symbols = SymbolResolver(self.ctx, self.words, self.modules)
         self.commands = CommandResolver(
             self.ctx, self.package_scripts, self.make_targets, self.mise_file, self.npmrc_if_present
         )
@@ -442,13 +446,22 @@ class _Run:
         if self._words is None:
             words: set[str] = set()
             dotted: set[str] = set()
+            bindings: dict[str, frozenset[str]] = {}
             for rel in self.code_files():
                 self.words_read.add(rel)
                 found = self.index.code_words(rel, self.problems)
                 words.update(found.words)
                 dotted.update(found.dotted)
+                if found.bindings:
+                    bindings[rel] = found.bindings
             self._words = CodeWords(frozenset(words), frozenset(dotted))
+            self._modules = module_bindings(bindings)
         return self._words
+
+    def modules(self) -> ModuleBindings:
+        """The top-level names of the Python `code_files`, read with the words."""
+        self.words()
+        return self._modules
 
     # Build -----------------------------------------------------------------
 

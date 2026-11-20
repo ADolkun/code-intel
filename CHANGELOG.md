@@ -20,6 +20,12 @@ Releases up to 0.2.3 were published as `code-intel`, installed from git; the nam
 ### Fixed
 
 - `doc-check --config <path>` no longer lets the repository's own `.stack-intel/config.toml` feed the symbol table: its ignore entries quote the names they ignore, so with the config read from elsewhere those references resolved, and the entries were reported as unused. The result no longer depends on where the config file lives.
+- `doc-check` no longer reports five kinds of reference that name something the repository has:
+  - A name qualified by the module or package that binds it at top level (`pkg.ProgressEvent` re-exported by `pkg/__init__.py`, `pkg.errors.AuthState` imported by `pkg/errors.py`, `test_widgets.TestWidgetLayout`), with or without `[backend]`.
+  - A path written relative to a package directory whose first segment is also a top-level directory (`skills/builder.py` for `app/skills/builder.py`, and `skills/builder.run`): it now falls back to the same suffix match as other paths.
+  - A path that leaves the repository (`uv pip install -e ../sibling`, `../sibling/README.md` in the root README) is `not_checked`, and a `..` in a command is no longer read from the doc's directory.
+  - A pytest node id with a brace group (`::TestX.{test_a,test_b}` after a test file) names its file.
+  - A glob with brace alternatives (`web/**/*.{ts,tsx,mts}`) passes when any alternative matches; braces without a wildcard still need every file.
 - `verify` no longer fails `docs-reference-lines` for a link whose text wraps onto a second line or a reference-style link (`[text][label]` with the definition elsewhere): doc-check reports both on the line the link opens, and the check now looks for the link there instead of its destination.
 
 ## 0.2.3 - 2026-11-05

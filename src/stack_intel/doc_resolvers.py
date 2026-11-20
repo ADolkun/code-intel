@@ -33,11 +33,13 @@ from stack_intel.doc_rules import (
     WILD,
     DocRefsConfig,
     FrontendPage,
+    ModuleBindings,
     PageSet,
     PathForm,
     RouteMention,
     SymbolMention,
     added_prefix_variants,
+    bound_by_module,
     expand_braces,
     glob_regex,
     has_glob,
@@ -77,6 +79,7 @@ _EXISTS_ERRORS: tuple[type[Exception], ...] = (OSError, ValueError)
 
 FactsReader = Callable[[str], "DocFacts | None"]
 WordsReader = Callable[[], CodeWords]
+ModulesReader = Callable[[], ModuleBindings]
 ScriptsReader = Callable[[str], "frozenset[str] | Unreadable"]
 MakeReader = Callable[[str], "MakeTargets | Unreadable"]
 MiseReader = Callable[[str], "MiseFile | Unreadable"]
@@ -454,7 +457,11 @@ class PathResolver:
         doc_dir = posixpath.dirname(doc)
         first = path.split("/", 1)[0]
         if first == "..":
-            return ("doc-rel", [doc_dir]) if form != "fence" else (None, [])
+            if form == "fence":
+                return None, []
+            # A command runs from the shell's directory, taken as the
+            # repository root (as `./x` is), so its `..` leaves the repository.
+            return ("doc-rel", [doc_dir]) if form == "span" else ("root", [""])
         if relative:
             # `./x` in a whole span is the doc's sibling; failing that, it is
             # usually written from the repository or a code root (`./infra/…`).
@@ -501,25 +508,70 @@ class PathResolver:
         expansions = expand_braces(path)
         if expansions is None:
             return draft.set("skipped", "a brace pattern with too many alternatives", checked=False)
-        for expansion in expansions:
-            found, tries = self.resolve_in(bases, expansion)
-            if found is None and cls == "other":
-                if self._other_path(draft, expansion, path).status != "ok":
-                    return draft
-                continue
+        results = [(expansion, *self._find(cls, bases, expansion)) for expansion in expansions]
+        if has_glob(path):
+            # Braces in a glob are alternatives of one pattern; without a
+            # wildcard (`src/{a,b}.py`) they name files that must each exist.
+            hit = next((found for _, found, _ in results if found is not None), None)
+            if hit is not None:
+                draft.target = hit
+                return draft
+            expansion = results[0][0] if len(results) == 1 else path
+            return self._miss(draft, cls, bases, path, expansion, [t for _, _, tries in results for t in tries])
+        for expansion, found, tries in results:
             if found is None:
-                draft.target = tries[0] if tries else expansion
-                where = (
-                    f"{tries[0]} does not exist"
-                    if cls == "doc-rel" and len(tries) == 1
-                    else "not found under " + _join_or([b + "/" if b else "the repository root" for b in _bases(bases)])
-                )
-                if has_glob(expansion):
-                    where = "the pattern matches no file"
-                return mark_missing(self.ctx, draft, tries, where, example_of=path)
+                return self._miss(draft, cls, bases, path, expansion, tries)
             if draft.target == path:
                 draft.target = found
         return draft
+
+    def _find(self, cls: str, bases: Sequence[str], path: str) -> tuple[str | None, list[str]]:
+        """``resolve_in``, then for a root or other path any repository path
+        that ends with it: ``skills/builder.py`` may be written relative to
+        ``app/`` although ``skills/`` is also a top-level directory."""
+        found, tries = self.resolve_in(bases, path)
+        if found is None and cls in ("root", "other") and tries:
+            found = self._ending_with(path)
+        return found, tries
+
+    def _ending_with(self, path: str) -> str | None:
+        """The first git-visible path that is ``path`` or ends with ``/path``,
+        trying ``path_variants`` in turn."""
+        repo = self.ctx.repo
+        if has_glob(path):
+            pattern = glob_regex("**/" + path)
+            return min((p for p in repo.files | repo.dirs if pattern.fullmatch(p)), default=None)
+        want_dir = path.endswith("/")
+        for variant in path_variants(path):
+            tail = variant.rstrip("/")
+            hits = [
+                p
+                for p in self.ctx.by_basename.get(posixpath.basename(tail), ())
+                if (p == tail or p.endswith("/" + tail)) and (not want_dir or p in repo.dirs)
+            ]
+            if hits:
+                return min(hits)
+        return None
+
+    def _miss(self, draft: Draft, cls: str, bases: Sequence[str], path: str, expansion: str, tries: list[str]) -> Draft:
+        """The verdict on ``expansion`` of ``path``, found under none of ``bases``."""
+        if not tries:
+            return draft.set("not_checked", "points outside the repository", checked=False)
+        if cls == "other":
+            for sub in sorted(self.ctx.repo.uninitialized_submodules):
+                if _ends_inside(expansion, sub):
+                    return draft.set("not_checked", f"submodule {sub} is not checked out", checked=False)
+            draft.target = expansion
+            return mark_missing(self.ctx, draft, [], f"no repository file path ends with {expansion}", example_of=path)
+        draft.target = tries[0]
+        where = (
+            f"{tries[0]} does not exist"
+            if cls == "doc-rel" and len(tries) == 1
+            else "not found under " + _join_or([b + "/" if b else "the repository root" for b in _bases(bases)])
+        )
+        if has_glob(expansion):
+            where = "the pattern matches no file"
+        return mark_missing(self.ctx, draft, tries, where, example_of=path)
 
     def resolve_in(self, bases: Sequence[str], path: str) -> tuple[str | None, list[str]]:
         """The repository path ``path`` resolves to under one of ``bases``, and every path tried."""
@@ -547,27 +599,6 @@ class PathResolver:
                 if repo.exists(variant):
                     return variant, tries
         return None, tries
-
-    def _other_path(self, draft: Draft, expansion: str, path: str) -> Draft:
-        """A path whose first directory exists somewhere in the repository:
-        any file whose path ends with it counts."""
-        if has_glob(expansion):
-            pattern = glob_regex("**/" + expansion)
-            hits = sorted(p for p in self.ctx.repo.files if pattern.fullmatch(p))
-        else:
-            name = posixpath.basename(expansion.rstrip("/"))
-            hits = sorted(
-                p for p in self.ctx.by_basename.get(name, ()) if p == expansion or p.endswith("/" + expansion)
-            )
-        if hits:
-            if draft.target == path:
-                draft.target = hits[0]
-            return draft
-        for sub in sorted(self.ctx.repo.uninitialized_submodules):
-            if _ends_inside(expansion, sub):
-                return draft.set("not_checked", f"submodule {sub} is not checked out", checked=False)
-        draft.target = expansion
-        return mark_missing(self.ctx, draft, [], f"no repository file path ends with {expansion}", example_of=path)
 
 
 def _ends_inside(path: str, sub: str) -> bool:
@@ -867,12 +898,15 @@ class RouteResolver:
 
 
 class SymbolResolver:
-    """Symbol mentions against the symbol index, then the identifier words of
-    tracked code (read through ``words`` only when the index has no answer)."""
+    """Symbol mentions against the symbol index, then what tracked code binds
+    and uses: the top-level names of each Python module (``modules``) and the
+    identifier words of every code file (``words``), both read only when the
+    index has no answer."""
 
-    def __init__(self, ctx: ResolutionContext, words: WordsReader) -> None:
+    def __init__(self, ctx: ResolutionContext, words: WordsReader, modules: ModulesReader) -> None:
         self.ctx = ctx
         self.words = words
+        self.modules = modules
 
     def symbol(self, doc: str, mention: SymbolMention, line: int, context: str) -> Draft:
         tier = symbol_tier(mention, self.ctx.python_classes)
@@ -897,6 +931,8 @@ class SymbolResolver:
             ordered = sorted(definitions, key=lambda r: (r.file, r.line))
             draft.defined_in = tuple(dict.fromkeys(row.location for row in ordered))
             return draft.set("ok", "defined in the symbol index")
+        if len(parts) > 1 and (module := bound_by_module(parts, self.modules())) is not None:
+            return draft.set("ok", f"bound at the top level of {module}")
         words = self.words()
         used = (
             mention.name in words.words or mention.name in BUILTIN_WORDS
