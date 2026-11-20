@@ -19,7 +19,7 @@ Runs sixteen checks, one line each (`PASS`, `FAIL`, `ERROR` for a check that cou
 | `jsx-oracle` | The helper's JSX elements equal an independent walk of the TypeScript AST (`oracles/jsx_oracle.cjs`) in file, tag, line, column, kind, parent and test flag. |
 | `declaration-oracle` | The helper's declarations equal an independent walk (`oracles/decl_oracle.cjs`) in name, line, column, kind, end line, scope, container, exported and test flag. |
 | `docs-content` | The docs report lost no content. |
-| `docs-reference-lines` | Every reference's text starts on the line it reports (a wrapped code span starts on its first line; symbols and paths outside a fence sit between backticks). |
+| `docs-reference-lines` | Every reference's text starts on the line it reports (a wrapped code span starts on its first line; symbols and paths outside a fence sit between backticks; a Markdown link is reported on the line its `[` opens, where its destination may follow on a later line or sit in a reference definition). |
 | `docs-failure-messages` | Every failing reference has a specific message, not just `<kind> <status>`. |
 | `docs-routes-are-live` | Every `ok` route reference's handler location is a live route's, and its target is one of the routes defined there. |
 | `docs-code-words` | The symbol check's two sources agree: a Python definition the index holds is also an identifier word of its file. |
