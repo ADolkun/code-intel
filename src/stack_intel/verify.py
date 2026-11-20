@@ -43,12 +43,12 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from stack_intel import code_paths, problems
 from stack_intel.analysis_runtime import AnalysisFailed, AnalysisRuntime, FrontendFailed, InvalidRoot
@@ -294,17 +294,87 @@ def _starts_on_line(text: str, lines: Sequence[str], line: int) -> bool:
     return found is not None and found.start() < len(lines[line - 1])
 
 
+_DEFINITION = re.compile(r"^ {0,3}\[((?:[^\]\\]|\\.)+)\]:[ \t]*\n?[ \t]*(<[^>\n]*>|\S+)", re.MULTILINE)
+_INLINE_DESTINATION = re.compile(r"\(\s*(<[^>\n]*>|(?:[^\s()\\]|\\.|\((?:[^\s()\\]|\\.)*\))*)")
+_REFERENCE_LABEL = re.compile(r"\[((?:[^\]\\]|\\.)*)\]")
+
+
+def _label(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _bare(destination: str) -> str:
+    return destination[1:-1] if destination.startswith("<") else destination
+
+
+def _link_definitions(lines: Sequence[str]) -> dict[str, str]:
+    """Reference definitions by normalized label; the first of a label wins."""
+    out: dict[str, str] = {}
+    for found in _DEFINITION.finditer("\n".join(lines)):
+        out.setdefault(_label(found.group(1)), _bare(found.group(2)))
+    return out
+
+
+def _closing_bracket(text: str, start: int) -> int | None:
+    depth = 0
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == "[":
+            depth += 1
+        elif text[i] == "]":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _link_destinations_opened_on(lines: Sequence[str], line: int, definitions: Mapping[str, str]) -> Iterator[str]:
+    """Destinations of the links and images whose ``[`` is on 1-based ``line``.
+    The link may close on a later line, and a reference-style one takes its
+    destination from a definition elsewhere in the document."""
+    window = "\n".join(lines[line - 1 : line - 1 + WRAP_LINES])
+    for opener in re.finditer(r"(?<!\\)\[", window):
+        if opener.start() >= len(lines[line - 1]):
+            break
+        close = _closing_bracket(window, opener.start())
+        if close is None:
+            continue
+        text = window[opener.start() + 1 : close]
+        inline = _INLINE_DESTINATION.match(window, close + 1)
+        if inline is not None:
+            yield _bare(inline.group(1))
+            continue
+        label = _REFERENCE_LABEL.match(window, close + 1)
+        key = _label(label.group(1) or text) if label else _label(text)
+        if key in definitions:
+            yield definitions[key]
+
+
+def _link_opens_on_line(text: str, lines: Sequence[str], line: int) -> bool:
+    return any(
+        text in (destination, unquote(destination))
+        for destination in _link_destinations_opened_on(lines, line, _link_definitions(lines))
+    )
+
+
 def reference_on_its_line(ref: Any, lines: Sequence[str]) -> bool:
     """The reference's text, as written, starts on its reported line. Symbols,
     and paths outside a fence, are read only from code spans, so their text
     must sit between backticks there: the same word in prose would pass a
     wrong line. A link's text is the decoded href, so the line may hold it
-    percent-encoded."""
+    percent-encoded. A Markdown link's line is where its ``[`` opens: its
+    destination may follow on a later line, or sit in a definition."""
     line = lines[ref.line - 1]
     if ref.kind == "symbol" or (ref.kind == "path" and ref.context != "fence"):
         return _between_backticks(ref.text, line)
-    return _starts_on_line(ref.text, lines, ref.line) or (
-        ref.kind == "link" and quote(ref.text, safe="/#?&=:.-_~%") in line
+    if _starts_on_line(ref.text, lines, ref.line):
+        return True
+    return ref.kind == "link" and (
+        quote(ref.text, safe="/#?&=:.-_~%") in line or _link_opens_on_line(ref.text, lines, ref.line)
     )
 
 

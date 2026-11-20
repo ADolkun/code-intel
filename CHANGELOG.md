@@ -20,6 +20,7 @@ Releases up to 0.2.3 were published as `code-intel`, installed from git; the nam
 ### Fixed
 
 - `doc-check --config <path>` no longer lets the repository's own `.stack-intel/config.toml` feed the symbol table: its ignore entries quote the names they ignore, so with the config read from elsewhere those references resolved, and the entries were reported as unused. The result no longer depends on where the config file lives.
+- `verify` no longer fails `docs-reference-lines` for a link whose text wraps onto a second line or a reference-style link (`[text][label]` with the definition elsewhere): doc-check reports both on the line the link opens, and the check now looks for the link there instead of its destination.
 
 ## 0.2.3 - 2026-11-05
 

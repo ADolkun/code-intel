@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fixture_repo import BACKEND_ONLY_CONFIG, DOCS_ONLY_CONFIG, hermetic_git
+from fixture_repo import BACKEND_ONLY_CONFIG, DOCS_ONLY_CONFIG, hermetic_git, write
 from mcp_fixtures import LAYOUT, FakeAnalyzers, doc_lookup_report, make_repo, make_runtime, write_config
 
 from stack_intel import cli, doc_queries, ts_bridge, verify
@@ -242,6 +242,91 @@ def test_symbols_and_paths_must_sit_between_backticks_on_their_line() -> None:
 def test_a_link_may_hold_its_target_percent_encoded() -> None:
     lines = ["[x](a%20b.md)"]
     assert verify.reference_on_its_line(reference(kind="link", text="a b.md"), lines)
+
+
+LINK_FORMS = """\
+# Links
+
+A [link that wraps its
+text](#what-ships) and an inline [one](docs/one.md) beside a ![wrapped image
+alt](img/one.png).
+
+A [publisher registry][npm] and ![a diagram][fig] and a [reference link that wraps
+its text][npm], then [Shortcut] and [collapsed][].
+
+## What ships
+
+[npm]: https://registry.npmjs.org/somepkg
+[fig]: <img/a diagram.png>
+[shortcut]: docs/two.md
+[collapsed]: docs/three.md
+"""
+
+
+def test_every_markdown_link_form_is_reported_on_the_line_it_opens(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    write(root / "docs" / "links.md", LINK_FORMS)
+    docs = doc_lookup_report(root).docs
+    reported = sorted((ref.line, ref.text) for ref in docs["docs/links.md"].references)
+    assert reported == [
+        (3, "#what-ships"),
+        (4, "docs/one.md"),
+        (4, "img/one.png"),
+        (7, "https://registry.npmjs.org/somepkg"),
+        (7, "https://registry.npmjs.org/somepkg"),
+        (7, "img/a diagram.png"),
+        (8, "docs/three.md"),
+        (8, "docs/two.md"),
+    ]
+    assert (
+        verify.misplaced_references({"docs/links.md": docs["docs/links.md"]}, lambda doc: LINK_FORMS.split("\n")) == []
+    )
+
+
+WRAPPED = ["Intro", "See [What", "ships](#what-ships) now.", "", "## What ships"]
+REFERENCE_STYLE = [
+    "Intro",
+    "Read the [publisher registry][npm] and ![a diagram][fig].",
+    "A [wrapped",
+    "label][npm] and [npm][] and [Npm].",
+    "",
+    "[npm]: https://registry.npmjs.org/somepkg",
+    "[fig]:",
+    "  <img/a diagram.png>",
+]
+
+
+@pytest.mark.parametrize(
+    ("lines", "text", "line"),
+    [
+        (WRAPPED, "#what-ships", 2),
+        (REFERENCE_STYLE, "https://registry.npmjs.org/somepkg", 2),
+        (REFERENCE_STYLE, "img/a diagram.png", 2),
+        (REFERENCE_STYLE, "https://registry.npmjs.org/somepkg", 3),
+        (REFERENCE_STYLE, "https://registry.npmjs.org/somepkg", 4),
+    ],
+)
+def test_a_link_split_over_lines_or_defined_elsewhere_sits_on_the_line_it_opens(
+    lines: list[str], text: str, line: int
+) -> None:
+    assert verify.reference_on_its_line(reference(kind="link", text=text, line=line), lines)
+
+
+@pytest.mark.parametrize(
+    ("lines", "text", "line"),
+    [
+        (WRAPPED, "#what-ships", 1),
+        (REFERENCE_STYLE, "https://registry.npmjs.org/somepkg", 1),
+        (REFERENCE_STYLE, "https://registry.npmjs.org/somepkg", 5),
+        (REFERENCE_STYLE, "https://registry.npmjs.org/other", 2),
+        (REFERENCE_STYLE, "img/a diagram.png", 3),
+        (["Intro", "A [link](a.md).", "More"], "a.md", 1),
+        (["Intro", "A [link](a.md).", "More"], "a.md", 3),
+        (["A [link][x].", "More", "", "[x]: a.md"], "a.md", 2),
+    ],
+)
+def test_a_link_on_the_wrong_line_is_still_reported(lines: list[str], text: str, line: int) -> None:
+    assert not verify.reference_on_its_line(reference(kind="link", text=text, line=line), lines)
 
 
 def test_a_failing_reference_with_a_generic_message_is_reported() -> None:
