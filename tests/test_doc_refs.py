@@ -2579,6 +2579,11 @@ def test_a_path_leaving_the_repository_is_not_checked(tmp_path: Path, monkeypatc
     files = {
         "README.md": "Install with `uv pip install -e ../sibling` and read `../sibling/README.md`.\n",
         "docs/setup.md": "`uv pip install -e ../sibling`\n\n`../nope/` and `../`\n",
+        "docs/guide.md": "`cd backend && python ../scripts/gone.sh` `bash ../scripts/ok.sh`\n",
+        "packages/a/README.md": "`cat ../../scripts/gone.sh`\n",
+        "docs/runbooks/dev.md": "`uv pip install -e ../sibling`\n",
+        "scripts/ok.sh": "echo ok\n",
+        "backend/app.py": "x = 1\n",
     }
     report = _checkout_report(tmp_path, monkeypatch, files)
     outside = ("not_checked", "points outside the repository")
@@ -2588,14 +2593,50 @@ def test_a_path_leaving_the_repository_is_not_checked(tmp_path: Path, monkeypatc
             ("../sibling/README.md", *outside),
         ]
     )
-    # A command's `..` leaves the shell's directory, not the doc's.
+    # A command runs from the repository root or the doc's directory: from
+    # `docs/`, `../sibling` is `sibling`, which is not there, so it may as
+    # well be a sibling checkout; and so is `../sibling` from `docs/runbooks/`.
     assert sorted((r.text, r.status, r.detail) for r in refs(report, "docs/setup.md", "path")) == sorted(
         [
-            ("../sibling", *outside),
+            ("../sibling", "not_checked", "may point outside the repository from where the command runs"),
             ("../nope/", "missing", "nope does not exist"),
             ("../", "ok", None),
         ]
     )
+    # Inside a top-level directory, a command's `..` path is still checked.
+    assert sorted((r.text, r.status, r.target) for r in refs(report, "docs/guide.md", "path")) == sorted(
+        [
+            ("../scripts/gone.sh", "missing", "scripts/gone.sh"),
+            ("../scripts/ok.sh", "ok", "scripts/ok.sh"),
+        ]
+    )
+    assert [(r.text, r.status) for r in refs(report, "docs/runbooks/dev.md", "path")] == [("../sibling", "not_checked")]
+    assert [(r.text, r.status, r.detail) for r in refs(report, "packages/a/README.md", "path")] == [
+        ("../../scripts/gone.sh", "missing", "scripts/gone.sh does not exist")
+    ]
+
+
+_STAR_FILES = {
+    "pkg/__init__.py": "from .models import *\n",
+    "pkg/models.py": "class UserModel:\n    pass\n",
+    "lazy.py": ("_LAZY = {}\n__all__ = sorted(_LAZY)\n\n\ndef __getattr__(name):\n    return _LAZY[name]\n"),
+    "docs/guide.md": "`pkg.UserModel` `lazy.HeavyThing` `pkg.GoneModel`\n",
+}
+
+
+@pytest.mark.parametrize("backend", [False, True], ids=["docs-only", "backend"])
+def test_a_star_import_is_followed_and_a_module_getattr_is_not_judged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: bool
+) -> None:
+    symbols = [{"name": "UserModel", "kind": "class", "container": None, "file": "pkg/models.py", "line": 1}]
+    report = _checkout_report(
+        tmp_path, monkeypatch, _STAR_FILES, layout=LAYOUT if backend else "", symbols=symbols if backend else None
+    )
+    assert sorted((r.text, r.status) for r in refs(report, "docs/guide.md", "symbol")) == [
+        ("lazy.HeavyThing", "unresolved"),
+        ("pkg.GoneModel", "missing"),
+        ("pkg.UserModel", "ok"),
+    ]
 
 
 def test_a_pytest_node_id_with_a_brace_group_names_its_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2632,6 +2673,24 @@ def test_braces_are_alternatives_in_a_glob_and_files_without_one(
             ("web/**/*.{mts,cts}", "missing", "the pattern matches no file"),
             ("web/src/{a.ts,b.tsx}", "ok", None),
             ("web/src/{a,b}.ts", "missing", "not found under the repository root"),
+        ]
+    )
+
+
+def test_braces_mixing_files_and_globs_need_each_file_and_one_glob_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {
+        "web/src/a.ts": "export const a = 1;\n",
+        "web/src/b/c.ts": "export const c = 1;\n",
+        "docs/guide.md": "`web/src/{a.ts,b/*.ts}` `web/src/{gone.ts,b/*.ts}` `web/src/{a.ts,d/*.ts}`\n",
+    }
+    report = _checkout_report(tmp_path, monkeypatch, files)
+    assert sorted((r.text, r.status, r.target) for r in refs(report, "docs/guide.md", "path")) == sorted(
+        [
+            ("web/src/{a.ts,b/*.ts}", "ok", "web/src/a.ts"),
+            ("web/src/{gone.ts,b/*.ts}", "missing", "web/src/gone.ts"),
+            ("web/src/{a.ts,d/*.ts}", "missing", "web/src/d/*.ts"),
         ]
     )
 

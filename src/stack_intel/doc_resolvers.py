@@ -13,7 +13,9 @@ settles the git-ignored paths, applies the ignore entries and builds the report.
 
 from __future__ import annotations
 
+import bisect
 import posixpath
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -21,7 +23,7 @@ from typing import NamedTuple
 from urllib.parse import unquote
 
 from stack_intel.code_paths import is_under
-from stack_intel.code_words import BUILTIN_WORDS, CodeWords
+from stack_intel.code_words import BUILTIN_WORDS, CodeWords, ModuleBindings, bound_by_module, open_module
 from stack_intel.definition_files import Unreadable
 from stack_intel.doc_commands import PACKAGE_MANIFEST, PACKAGE_RUNNERS, CommandMention
 from stack_intel.doc_report import Reference, RouteRow, SymbolRow
@@ -33,13 +35,11 @@ from stack_intel.doc_rules import (
     WILD,
     DocRefsConfig,
     FrontendPage,
-    ModuleBindings,
     PageSet,
     PathForm,
     RouteMention,
     SymbolMention,
     added_prefix_variants,
-    bound_by_module,
     expand_braces,
     glob_regex,
     has_glob,
@@ -74,6 +74,7 @@ from stack_intel.mise_tasks import MiseFile, config_file, config_owner, file_tas
 from stack_intel.repo_files import RepoFiles
 
 _INDEX_NAMES: tuple[str, ...] = ("readme.md", "index.md")
+_GLOB_CHARS = re.compile(r"[*?]")
 # `Path.exists` raises ValueError for a NUL byte in the name.
 _EXISTS_ERRORS: tuple[type[Exception], ...] = (OSError, ValueError)
 
@@ -175,6 +176,8 @@ class ResolutionContext:
     # First path segments of every git-visible path, and of the paths under
     # each of the config's `path_roots`.
     top: frozenset[str]
+    # Every git-visible file and directory, sorted.
+    paths: tuple[str, ...]
     children: Mapping[str, frozenset[str]]
     dir_names: frozenset[str]
     by_basename: Mapping[str, tuple[str, ...]]
@@ -251,6 +254,7 @@ class ResolutionContext:
             unmounted=kept_unmounted,
             symbols=kept_symbols,
             top=frozenset(path.split("/", 1)[0] for path in everything),
+            paths=tuple(sorted(everything)),
             # Read-only: one context is shared by every resolver of a report.
             children=MappingProxyType(children),
             dir_names=frozenset(posixpath.basename(path) for path in repo.dirs),
@@ -459,9 +463,9 @@ class PathResolver:
         if first == "..":
             if form == "fence":
                 return None, []
-            # A command runs from the shell's directory, taken as the
-            # repository root (as `./x` is), so its `..` leaves the repository.
-            return ("doc-rel", [doc_dir]) if form == "span" else ("root", [""])
+            # A command runs from a directory the doc does not name: the
+            # repository root or the doc's own (`_anchored` settles which may fail).
+            return ("doc-rel", [doc_dir]) if form == "span" else ("shell-rel", ["", doc_dir])
         if relative:
             # `./x` in a whole span is the doc's sibling; failing that, it is
             # usually written from the repository or a code root (`./infra/…`).
@@ -508,46 +512,49 @@ class PathResolver:
         expansions = expand_braces(path)
         if expansions is None:
             return draft.set("skipped", "a brace pattern with too many alternatives", checked=False)
-        results = [(expansion, *self._find(cls, bases, expansion)) for expansion in expansions]
-        if has_glob(path):
-            # Braces in a glob are alternatives of one pattern; without a
-            # wildcard (`src/{a,b}.py`) they name files that must each exist.
-            hit = next((found for _, found, _ in results if found is not None), None)
-            if hit is not None:
-                draft.target = hit
-                return draft
-            expansion = results[0][0] if len(results) == 1 else path
-            return self._miss(draft, cls, bases, path, expansion, [t for _, _, tries in results for t in tries])
-        for expansion, found, tries in results:
+        # Braces enumerate files (`src/{a,b}.py`), each of which must exist;
+        # the alternatives with a wildcard are one glob, which one match satisfies.
+        literal = [expansion for expansion in expansions if not has_glob(expansion)]
+        patterns = [expansion for expansion in expansions if has_glob(expansion)]
+        groups = [[expansion] for expansion in literal] + ([patterns] if patterns else [])
+        for group in groups:
+            found, tries = self._find(cls, bases, group)
             if found is None:
+                expansion = group[0] if len(group) == 1 else path
                 return self._miss(draft, cls, bases, path, expansion, tries)
             if draft.target == path:
                 draft.target = found
         return draft
 
-    def _find(self, cls: str, bases: Sequence[str], path: str) -> tuple[str | None, list[str]]:
-        """``resolve_in``, then for a root or other path any repository path
-        that ends with it: ``skills/builder.py`` may be written relative to
-        ``app/`` although ``skills/`` is also a top-level directory."""
-        found, tries = self.resolve_in(bases, path)
-        if found is None and cls in ("root", "other") and tries:
-            found = self._ending_with(path)
-        return found, tries
+    def _find(self, cls: str, bases: Sequence[str], alternatives: Sequence[str]) -> tuple[str | None, list[str]]:
+        """The first of ``alternatives`` found by ``resolve_in``, else, for a
+        root or other path, the first that ends a repository path:
+        ``skills/builder.py`` may be written relative to ``app/`` although
+        ``skills/`` is also a top-level directory. Also every path tried."""
+        tries: list[str] = []
+        for alternative in alternatives:
+            found, tried = self.resolve_in(bases, alternative)
+            tries += tried
+            if found is not None:
+                return found, tries
+        if cls in ("root", "other") and tries:
+            for alternative in alternatives:
+                if (found := self._ending_with(alternative)) is not None:
+                    return found, tries
+        return None, tries
 
     def _ending_with(self, path: str) -> str | None:
         """The first git-visible path that is ``path`` or ends with ``/path``,
         trying ``path_variants`` in turn."""
-        repo = self.ctx.repo
         if has_glob(path):
-            pattern = glob_regex("**/" + path)
-            return min((p for p in repo.files | repo.dirs if pattern.fullmatch(p)), default=None)
+            return self._first_match("**/" + path)
         want_dir = path.endswith("/")
         for variant in path_variants(path):
             tail = variant.rstrip("/")
             hits = [
                 p
                 for p in self.ctx.by_basename.get(posixpath.basename(tail), ())
-                if (p == tail or p.endswith("/" + tail)) and (not want_dir or p in repo.dirs)
+                if (p == tail or p.endswith("/" + tail)) and (not want_dir or p in self.ctx.repo.dirs)
             ]
             if hits:
                 return min(hits)
@@ -557,6 +564,12 @@ class PathResolver:
         """The verdict on ``expansion`` of ``path``, found under none of ``bases``."""
         if not tries:
             return draft.set("not_checked", "points outside the repository", checked=False)
+        if cls == "shell-rel":
+            tries = self._anchored(bases, expansion)
+            if not tries:
+                return draft.set(
+                    "not_checked", "may point outside the repository from where the command runs", checked=False
+                )
         if cls == "other":
             for sub in sorted(self.ctx.repo.uninitialized_submodules):
                 if _ends_inside(expansion, sub):
@@ -566,12 +579,44 @@ class PathResolver:
         draft.target = tries[0]
         where = (
             f"{tries[0]} does not exist"
-            if cls == "doc-rel" and len(tries) == 1
+            if cls in ("doc-rel", "shell-rel") and len(tries) == 1
             else "not found under " + _join_or([b + "/" if b else "the repository root" for b in _bases(bases)])
         )
         if has_glob(expansion):
             where = "the pattern matches no file"
         return mark_missing(self.ctx, draft, tries, where, example_of=path)
+
+    def _anchored(self, bases: Sequence[str], path: str) -> list[str]:
+        """The paths a command's ``../x/…`` reaches from ``bases`` where ``x``
+        is a directory there. Otherwise the command may as well run from a
+        directory whose parent holds ``x`` outside the repository: a sibling
+        checkout (``uv pip install -e ../sibling``)."""
+        parts = path.split("/")
+        ups = next((i for i, part in enumerate(parts) if part != ".."), len(parts))
+        anchor = "/".join(parts[: ups + 1])
+        out: list[str] = []
+        for base in bases:
+            full = _repo_path(posixpath.join(base, path))
+            if full is not None and _repo_path(posixpath.join(base, anchor)) in self.ctx.repo.dirs:
+                out.append(full)
+        return out
+
+    def _first_match(self, pattern: str) -> str | None:
+        """The first git-visible path, in sorted order, that glob ``pattern``
+        matches. Only the paths starting with its literal head are read, and
+        the regex runs only on those holding its longest literal piece (less
+        its edge slashes, which ``**/`` may consume)."""
+        paths = self.ctx.paths
+        head = _GLOB_CHARS.split(pattern, 1)[0]
+        piece = max((part.strip("/") for part in _GLOB_CHARS.split(pattern)), key=len)
+        regex = glob_regex(pattern)
+        for index in range(bisect.bisect_left(paths, head), len(paths)):
+            candidate = paths[index]
+            if not candidate.startswith(head):
+                break
+            if piece in candidate and regex.fullmatch(candidate):
+                return candidate
+        return None
 
     def resolve_in(self, bases: Sequence[str], path: str) -> tuple[str | None, list[str]]:
         """The repository path ``path`` resolves to under one of ``bases``, and every path tried."""
@@ -586,10 +631,9 @@ class PathResolver:
             if full == "":
                 return full, tries
             if has_glob(full):
-                pattern = glob_regex(full)
-                hits = sorted(p for p in (repo.files | repo.dirs) if pattern.fullmatch(p))
-                if hits:
-                    return hits[0], tries
+                hit = self._first_match(full)
+                if hit is not None:
+                    return hit, tries
                 continue
             if want_dir:
                 if full in repo.dirs:
@@ -945,6 +989,11 @@ class SymbolResolver:
             return draft.set("ok", "the end of a name used in tracked code")
         if is_example_symbol(mention):
             return draft.set("skipped", "placeholder or example name", checked=False)
+        if len(parts) > 1 and (module := open_module(parts, self.modules())) is not None:
+            return draft.set(
+                "unresolved",
+                f"{module} may bind it at run time (a module __getattr__, or a star import that cannot be followed)",
+            )
         if tier == "B":
             return draft.set("unresolved", "no definition in the symbol index and no use in tracked code")
         # No submodule exemption: backend code imports and names what it uses

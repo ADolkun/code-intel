@@ -977,34 +977,6 @@ def qualifiers_match(
     )
 
 
-ModuleBindings = Mapping[tuple[str, ...], tuple[tuple[str, frozenset[str]], ...]]
-"""Every trailing run of a Python module's dotted path (``errors``,
-``pkg.errors``, ``src.pkg.errors`` for ``src/pkg/errors.py``) → the files of
-the modules it ends, each with the names it binds at top level."""
-NO_MODULES: ModuleBindings = MappingProxyType({})
-
-
-def module_bindings(bindings: Mapping[str, frozenset[str]]) -> ModuleBindings:
-    """``ModuleBindings`` from each Python file's top-level names; a package's
-    ``__init__.py`` stands for its directory."""
-    index: dict[tuple[str, ...], list[tuple[str, frozenset[str]]]] = {}
-    for file, names in sorted(bindings.items()):
-        parts = posixpath.splitext(file)[0].split("/")
-        if parts[-1] == "__init__":
-            parts.pop()
-        for start in range(len(parts)):
-            index.setdefault(tuple(parts[start:]), []).append((file, names))
-    return MappingProxyType({key: tuple(value) for key, value in index.items()})
-
-
-def bound_by_module(parts: Sequence[str], modules: ModuleBindings) -> str | None:
-    """The first file of a module whose dotted path ends with ``parts[:-1]``
-    and that binds ``parts[-1]`` at top level: ``pkg.errors.AuthState`` is
-    bound by ``pkg/errors.py`` when it imports ``AuthState``, wherever that
-    class is defined."""
-    return next((file for file, names in modules.get(tuple(parts[:-1]), ()) if parts[-1] in names), None)
-
-
 def is_upper_fragment(name: str) -> bool:
     """``_ACCOUNTING``: an UPPER_SNAKE suffix that prose attaches to a name
     (``HEARTBEAT_HISTORY`` + ``_ACCOUNTING``), resolved against word endings."""

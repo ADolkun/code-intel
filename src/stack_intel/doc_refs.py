@@ -40,7 +40,17 @@ from stack_intel.code_paths import (
     read_bytes_with_digest,
     read_file_bytes,
 )
-from stack_intel.code_words import EMPTY, CodeWords, code_words_from_bytes, is_code_file, package_bindings_from_bytes
+from stack_intel.code_words import (
+    EMPTY,
+    NO_MODULES,
+    CodeWords,
+    ModuleBindings,
+    TopLevel,
+    code_words_from_bytes,
+    is_code_file,
+    module_bindings,
+    package_bindings_from_bytes,
+)
 from stack_intel.definition_files import Unreadable, unreadable
 from stack_intel.doc_commands import PACKAGE_MANIFEST, CommandMention, command_mentions, fence_command_mentions
 from stack_intel.doc_report import (
@@ -67,10 +77,8 @@ from stack_intel.doc_resolvers import (
 )
 from stack_intel.doc_rules import (
     BROKEN_STATUSES,
-    NO_MODULES,
     STAGE,
     DocRefsConfig,
-    ModuleBindings,
     NoPages,
     PageProvider,
     PageSet,
@@ -80,7 +88,6 @@ from stack_intel.doc_rules import (
     is_markdown,
     is_shell_fence,
     method_route_mentions,
-    module_bindings,
     symbol_mention,
 )
 from stack_intel.make_targets import MakeTargets, make_targets_from_bytes
@@ -446,16 +453,16 @@ class _Run:
         if self._words is None:
             words: set[str] = set()
             dotted: set[str] = set()
-            bindings: dict[str, frozenset[str]] = {}
+            tops: dict[str, TopLevel] = {}
             for rel in self.code_files():
                 self.words_read.add(rel)
                 found = self.index.code_words(rel, self.problems)
                 words.update(found.words)
                 dotted.update(found.dotted)
-                if found.bindings:
-                    bindings[rel] = found.bindings
+                if found.top is not None:
+                    tops[rel] = found.top
             self._words = CodeWords(frozenset(words), frozenset(dotted))
-            self._modules = module_bindings(bindings)
+            self._modules = module_bindings(tops)
         return self._words
 
     def modules(self) -> ModuleBindings:
